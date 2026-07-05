@@ -49,8 +49,12 @@ beforeEach(() => {
 });
 
 describe('poolConnect + poolStatus', () => {
-  it('stores the token, username and space url', async () => {
-    const result = await poolConnect({ token: 'xp1.a.b', username: 'osolmaz', url: 'https://my-space.hf.space' });
+  it('stores the token and username for the configured pool origin', async () => {
+    await poolSetConfig({ url: 'https://my-space.hf.space' });
+    const result = await poolConnect(
+      { token: 'xp1.a.b', username: 'osolmaz' },
+      'https://my-space.hf.space/connect'
+    );
     assert.deepEqual(result, { ok: true, username: 'osolmaz' });
     const status = poolStatus();
     assert.equal(status.connected, true);
@@ -59,8 +63,18 @@ describe('poolConnect + poolStatus', () => {
     assert.equal(storageData.poolToken, 'xp1.a.b');
   });
 
+  it('refuses tokens handed off by a different origin', async () => {
+    const result = await poolConnect(
+      { token: 'xp1.a.b', username: 'mallory' },
+      'https://evil-space.hf.space/connect'
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /unexpected origin/);
+    assert.equal(poolStatus().connected, false);
+  });
+
   it('rejects a missing token', async () => {
-    const result = await poolConnect({ token: '', username: 'x', url: '' });
+    const result = await poolConnect({ token: '', username: 'x' }, DEFAULT_POOL_URL);
     assert.equal(result.ok, false);
     assert.equal(poolStatus().connected, false);
   });
@@ -81,7 +95,8 @@ describe('poolEnqueue + poolFlush', () => {
 
   it('sends queued tweets with the bearer token and drains the queue', async () => {
     globalThis.fetch = okFetch();
-    await poolConnect({ token: 'tok', username: 'osolmaz', url: 'https://s.hf.space' });
+    await poolSetConfig({ url: 'https://s.hf.space' });
+    await poolConnect({ token: 'tok', username: 'osolmaz' }, 'https://s.hf.space/connect');
     poolEnqueue([tweet('1'), tweet('2')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 0);
@@ -95,7 +110,8 @@ describe('poolEnqueue + poolFlush', () => {
 
   it('keeps the queue and records the error when the pool is unreachable', async () => {
     globalThis.fetch = mock.fn(() => Promise.reject(new Error('offline')));
-    await poolConnect({ token: 'tok', username: 'o', url: 'https://s.hf.space' });
+    await poolSetConfig({ url: 'https://s.hf.space' });
+    await poolConnect({ token: 'tok', username: 'o' }, 'https://s.hf.space/connect');
     poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 1);
@@ -104,7 +120,8 @@ describe('poolEnqueue + poolFlush', () => {
 
   it('stops retrying on 401 and asks for a reconnect', async () => {
     globalThis.fetch = mock.fn(() => Promise.resolve(new Response('no', { status: 401 })));
-    await poolConnect({ token: 'expired', username: 'o', url: 'https://s.hf.space' });
+    await poolSetConfig({ url: 'https://s.hf.space' });
+    await poolConnect({ token: 'expired', username: 'o' }, 'https://s.hf.space/connect');
     poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 1);
@@ -122,7 +139,8 @@ describe('poolEnqueue + poolFlush', () => {
 describe('pause + config + persistence', () => {
   it('pausing blocks flushes until resumed', async () => {
     globalThis.fetch = okFetch();
-    await poolConnect({ token: 'tok', username: 'o', url: 'https://s.hf.space' });
+    await poolSetConfig({ url: 'https://s.hf.space' });
+    await poolConnect({ token: 'tok', username: 'o' }, 'https://s.hf.space/connect');
     const paused = await poolTogglePause();
     assert.equal(paused, true);
     poolEnqueue([tweet('1')]);

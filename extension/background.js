@@ -521,7 +521,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'POOL_CONNECT') {
     (async () => {
-      const result = await poolConnect(msg);
+      const result = await poolConnect(msg, _sender && _sender.url ? _sender.url : '');
       sendResponse(result);
     })();
     return true;
@@ -736,10 +736,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 restoreState().then(async () => {
-  readyResolve();
   updateBadge();
   await initPoolSync();
   await initTransport();
+  // Resolve `ready` only after the pool queue and transport are restored, so
+  // early GraphQL messages cannot race initialization or flush into a
+  // not-yet-connected transport.
+  readyResolve();
   function scheduleNextFlush() {
     const jitter = Math.random() * FLUSH_INTERVAL_MS * 0.5;
     flushTimer = setTimeout(() => { scheduledFlush(); scheduleNextFlush(); }, FLUSH_INTERVAL_MS + jitter);

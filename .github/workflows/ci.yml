@@ -21,6 +21,8 @@ jobs:
       - run: npx tsc -p tsconfig.json --noEmit
       - run: npm test
       - run: npm run test:extension
+      - uses: astral-sh/setup-uv@v5
+      - run: npm run test:extension:native
       - run: npm run coverage
       - run: npm run dry
       - run: npm run mutate

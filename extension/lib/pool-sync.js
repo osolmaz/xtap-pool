@@ -140,21 +140,40 @@ async function retryLater(message) {
   return false;
 }
 
-/** Handle a token handed off by the /connect page content script. */
-export async function poolConnect({ token, username, url }) {
+/**
+ * Handle a token handed off by the /connect page content script.
+ *
+ * The token is only accepted when the sender page's origin matches the
+ * configured pool URL; otherwise any malicious HF Space rendering an
+ * `#xtap-pool-token` element could silently repoint the extension and
+ * receive all future captures. Switching pools requires setting the URL
+ * explicitly (options / POOL_SET_CONFIG) before connecting.
+ */
+export async function poolConnect({ token, username }, senderUrl) {
   if (typeof token !== 'string' || !token) return { ok: false, error: 'missing token' };
+  if (!senderMatchesPool(senderUrl)) {
+    console.warn(`[xtap-pool] refused pool token from unexpected origin: ${senderUrl}`);
+    return { ok: false, error: `refused token from unexpected origin (pool is ${config.poolUrl})` };
+  }
   config.poolToken = token;
   if (typeof username === 'string') config.poolUsername = username;
-  if (typeof url === 'string' && url) config.poolUrl = url;
   stats.lastError = null;
   await storageSet({
     poolToken: config.poolToken,
     poolUsername: config.poolUsername,
-    poolUrl: config.poolUrl,
     poolStats: stats,
   });
   scheduleFlush(0);
   return { ok: true, username: config.poolUsername };
+}
+
+function senderMatchesPool(senderUrl) {
+  if (typeof senderUrl !== 'string' || !senderUrl) return false;
+  try {
+    return new URL(senderUrl).origin === new URL(config.poolUrl).origin;
+  } catch {
+    return false;
+  }
 }
 
 export async function poolSetConfig({ url, token }) {
