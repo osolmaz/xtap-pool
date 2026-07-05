@@ -42,6 +42,25 @@ describe("exchangeCodeForUsername", () => {
     );
   });
 
+  it("authenticates the client with HTTP Basic on the token exchange", async () => {
+    let tokenInit: RequestInit | undefined;
+    const fetchFn: typeof fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/oauth/token")) {
+        tokenInit = init;
+        return Promise.resolve(Response.json({ access_token: "at" }));
+      }
+      return Promise.resolve(Response.json({ preferred_username: "osolmaz" }));
+    };
+    await exchangeCodeForUsername({ ...settings, fetchFn }, "code");
+    const headers = tokenInit?.headers as Record<string, string>;
+    const expected = `Basic ${Buffer.from("cid:csecret").toString("base64")}`;
+    expect(headers["authorization"]).toBe(expected);
+    const body = tokenInit?.body as URLSearchParams;
+    expect(body.get("client_secret")).toBeNull();
+    expect(body.get("code")).toBe("code");
+  });
+
   it.each([
     [
       "token endpoint failure",

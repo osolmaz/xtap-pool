@@ -6,7 +6,8 @@ xtap-pool is three pieces in one repo:
 
 - **`extension/`** — a vendored fork of the xTap Chrome extension that keeps
   saving tweets locally exactly like xTap, and additionally syncs them to a
-  shared, private Hugging Face Space.
+  shared Hugging Face Space (all access enforced in-app via HF sign-in and
+  an allowlist).
 - **`space/`** — the Hugging Face Docker Space that receives submissions,
   verifies who sent them, stamps attribution, deduplicates, and commits
   everything to a private HF dataset repo (the durable system of record).

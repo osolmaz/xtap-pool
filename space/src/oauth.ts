@@ -31,12 +31,17 @@ export async function exchangeCodeForUsername(
   code: string,
 ): Promise<string | undefined> {
   const fetchFn = settings.fetchFn ?? fetch;
+  // Hugging Face's token endpoint authenticates the client with HTTP Basic
+  // (client_secret_basic), not a client_secret form field.
+  const basic = Buffer.from(`${settings.clientId}:${settings.clientSecret}`).toString("base64");
   const tokenResponse = await fetchFn(`${settings.providerUrl}/oauth/token`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: `Basic ${basic}`,
+    },
     body: new URLSearchParams({
       client_id: settings.clientId,
-      client_secret: settings.clientSecret,
       grant_type: "authorization_code",
       code,
       redirect_uri: settings.redirectUri,

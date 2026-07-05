@@ -20,7 +20,12 @@ trap 'rm -rf "$STAGE"' EXIT
 
 echo "==> Creating repos (idempotent)"
 hf repos create "$DATASET_REPO" --repo-type dataset --private 2>/dev/null || true
-hf repos create "$SPACE_REPO" --repo-type space --space-sdk docker --private 2>/dev/null || true
+# The Space itself is public: a private Space would put HF's repo-access gate
+# in front of the app, blocking friends who are on ALLOWED_USERS but not
+# Space collaborators. All data access is enforced in-app (OAuth allowlist +
+# pool tokens); anonymous visitors only see the sign-in page. To keep the
+# Space page private instead, add every friend as a Space collaborator.
+hf repos create "$SPACE_REPO" --repo-type space --space-sdk docker 2>/dev/null || true
 
 echo "==> Staging Space contents"
 git -C "$ROOT" archive HEAD | tar -x -C "$STAGE"

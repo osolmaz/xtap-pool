@@ -107,8 +107,11 @@ Target friend onboarding: **install extension, one OAuth authorize, done.**
 1. Friend loads the extension (unpacked from a GitHub release zip).
 2. Extension popup shows **"Connect to pool"** → opens the Space's
    `/connect` page.
-3. Space is private → HF login wall → **"Sign in with Hugging Face"** (one
-   click if already logged into HF, which they are — they have HF accounts).
+3. The Space app itself is public (a private Space would gate friends who
+   are not repo collaborators before the app even runs) → the app shows
+   **"Sign in with Hugging Face"** (one click if already logged into HF).
+   Everything beyond the sign-in page is enforced in-app by the allowlist;
+   the dataset repo stays private.
 4. `/connect` verifies the username against the `ALLOWED_USERS` allowlist,
    mints a **pool token**, and renders it in the page DOM.
 5. A content script (matching the Space origin only) picks the token up
