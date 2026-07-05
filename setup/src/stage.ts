@@ -10,6 +10,7 @@ export type UploadFile = {
 };
 
 const SPACE_EXCLUDED_ROOTS = new Set(["docs", "extension", "setup"]);
+const SPACE_ALLOWED_FILES = new Set(["setup/package.json"]);
 
 export async function createSpaceStage(root: string, stageDir: string): Promise<void> {
   const archivePath = join(stageDir, "repo.tar");
@@ -22,6 +23,8 @@ export async function createSpaceStage(root: string, stageDir: string): Promise<
       fs.rm(join(stageDir, name), { recursive: true, force: true }),
     ),
   );
+  await fs.mkdir(join(stageDir, "setup"), { recursive: true });
+  await fs.copyFile(join(root, "setup", "package.json"), join(stageDir, "setup", "package.json"));
 }
 
 export async function collectUploadFiles(root: string): Promise<readonly UploadFile[]> {
@@ -35,6 +38,7 @@ export async function collectUploadFiles(root: string): Promise<readonly UploadF
 }
 
 export function shouldUploadPath(path: string): boolean {
+  if (SPACE_ALLOWED_FILES.has(path)) return true;
   const [first] = path.split("/");
   return first !== undefined && !SPACE_EXCLUDED_ROOTS.has(first) && first !== ".git";
 }

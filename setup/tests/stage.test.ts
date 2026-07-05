@@ -13,6 +13,7 @@ describe("space staging helpers", () => {
     expect(shouldUploadPath("space/src/server.ts")).toBe(true);
     expect(shouldUploadPath("docs/implementation-plan.md")).toBe(false);
     expect(shouldUploadPath("extension/manifest.json")).toBe(false);
+    expect(shouldUploadPath("setup/package.json")).toBe(true);
     expect(shouldUploadPath("setup/src/main.ts")).toBe(false);
   });
 
@@ -42,13 +43,14 @@ describe("space staging helpers", () => {
       await mkdir(join(repo, "space"), { recursive: true });
       await mkdir(join(repo, "docs"), { recursive: true });
       await mkdir(join(repo, "extension"), { recursive: true });
-      await mkdir(join(repo, "setup"), { recursive: true });
+      await mkdir(join(repo, "setup", "src"), { recursive: true });
       await writeFile(join(repo, "README.md"), "root readme");
       await writeFile(join(repo, "space", "hf-space-README.md"), "space readme");
       await writeFile(join(repo, "space", "server.ts"), "export {};");
       await writeFile(join(repo, "docs", "plan.md"), "internal");
       await writeFile(join(repo, "extension", "manifest.json"), "{}");
-      await writeFile(join(repo, "setup", "main.ts"), "export {};");
+      await writeFile(join(repo, "setup", "package.json"), "{}");
+      await writeFile(join(repo, "setup", "src", "main.ts"), "export {};");
       await captureCommand("git", ["add", "."], { cwd: repo });
       await captureCommand(
         "git",
@@ -62,9 +64,10 @@ describe("space staging helpers", () => {
 
       await expect(readFile(join(stage, "README.md"), "utf8")).resolves.toBe("space readme");
       await expect(readFile(join(stage, "space", "server.ts"), "utf8")).resolves.toBe("export {};");
+      await expect(readFile(join(stage, "setup", "package.json"), "utf8")).resolves.toBe("{}");
       await expect(readdir(join(stage, "docs"))).rejects.toThrow();
       await expect(readdir(join(stage, "extension"))).rejects.toThrow();
-      await expect(readdir(join(stage, "setup"))).rejects.toThrow();
+      await expect(readdir(join(stage, "setup", "src"))).rejects.toThrow();
     } finally {
       await rm(repo, { recursive: true, force: true });
       await rm(stage, { recursive: true, force: true });

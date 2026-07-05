@@ -6,6 +6,7 @@ COPY package.json package-lock.json ./
 COPY shared/package.json shared/
 COPY space/package.json space/
 COPY explorer/package.json explorer/
+COPY setup/package.json setup/
 RUN npm ci
 COPY tsconfig.base.json ./
 COPY shared/ shared/
@@ -20,6 +21,7 @@ COPY package.json package-lock.json ./
 COPY shared/package.json shared/
 COPY space/package.json space/
 COPY explorer/package.json explorer/
+COPY setup/package.json setup/
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/shared/dist shared/dist
 COPY --from=build /app/space/dist space/dist
