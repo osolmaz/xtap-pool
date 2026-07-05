@@ -35,7 +35,7 @@ describe("dataset token verification", () => {
 
   it("accepts dataset entity names with a datasets prefix", () => {
     const report = evaluateDatasetWriteToken(
-      whoami([scope("datasets/alice/xtap-pool-data", ["repo.content.write"])]),
+      whoami([scope("datasets/alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
       "alice/xtap-pool-data",
     );
     expect(report.ok).toBe(true);
@@ -62,16 +62,21 @@ describe("dataset token verification", () => {
     if (!report.ok) expect(report.errors.join("\n")).toContain("outside alice/xtap-pool-data");
   });
 
-  it("rejects missing write or unexpected target permissions", () => {
-    const missing = evaluateDatasetWriteToken(
+  it("rejects missing read, missing write, or unexpected target permissions", () => {
+    const missingWrite = evaluateDatasetWriteToken(
       whoami([scope("alice/xtap-pool-data", ["repo.content.read"])]),
+      "alice/xtap-pool-data",
+    );
+    const missingRead = evaluateDatasetWriteToken(
+      whoami([scope("alice/xtap-pool-data", ["repo.content.write"])]),
       "alice/xtap-pool-data",
     );
     const unexpected = evaluateDatasetWriteToken(
       whoami([scope("alice/xtap-pool-data", ["repo.settings.write"])]),
       "alice/xtap-pool-data",
     );
-    expect(missing.ok).toBe(false);
+    expect(missingRead.ok).toBe(false);
+    expect(missingWrite.ok).toBe(false);
     expect(unexpected.ok).toBe(false);
   });
 });

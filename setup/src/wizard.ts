@@ -100,7 +100,8 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
 async function promptDatasetToken(datasetRepo: string): Promise<string> {
   note(
     [
-      `Create a fine-grained token with write access only to ${datasetRepo}.`,
+      `Create a fine-grained token scoped only to ${datasetRepo}.`,
+      `It must include repo.content.read and repo.content.write on that dataset.`,
       tokenSettingsUrl(),
     ].join("\n"),
     "Dataset token",

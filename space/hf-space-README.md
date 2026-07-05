@@ -19,7 +19,7 @@ Private tweet pool for a group of friends running the
 - `GET /connect` — sign in with Hugging Face to connect the extension
 - `/` — tweet explorer
 
-Required Space secrets: `HF_TOKEN` (fine-grained, write access to the dataset
-repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`.
+Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
+dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`.
 Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (comma-separated HF
 usernames), `SPACE_HOST` (auto-injected by HF).
