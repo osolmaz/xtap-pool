@@ -23,7 +23,12 @@ this directory, excluding the modifications below.
   the pool queue; new `POOL_*` message handlers; `chrome.alarms` periodic
   flush; `initPoolSync()` during startup.
 - `popup.html` / `popup.js` — added the "Pool sync" section (status, connect,
-  sync-now, pause).
+  sync-now, pause) and an Options link.
+- `options.html` / `options.js` — **new**: configure the pool Space URL and
+  paste a token manually (fallback for the automatic handoff).
+- `native-host/xtap_daemon.py` — `/status` validates a supplied bearer token
+  (401 on mismatch) so the extension detects rotated daemon secrets;
+  `background.js` `probeHttp()` sends the cached token accordingly.
 - `tests/pool-sync.test.mjs` — **new**: node --test coverage for the queue,
   flush, backoff and connect flows.
 - `background.js` flush — rebuffers batches on explicit host rejection or

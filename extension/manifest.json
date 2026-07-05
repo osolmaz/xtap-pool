@@ -34,6 +34,10 @@
       "run_at": "document_idle"
     }
   ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

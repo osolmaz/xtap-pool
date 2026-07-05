@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+  <style>
+    body { min-width: 26rem; }
+    .options-note { font-size: 0.85em; opacity: 0.75; margin: 0.3rem 0 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>xtap-pool options</h1>
+    <div id="pool-status" class="status"></div>
+
+    <div class="settings">
+      <label class="settings-label" for="pool-url">Pool Space URL</label>
+      <p class="options-note">
+        The Space this extension syncs to. Changing it disconnects the current
+        pool token; use Connect in the popup (or paste a token below) after
+        saving.
+      </p>
+      <div class="settings-row">
+        <input type="text" id="pool-url" placeholder="https://your-space.hf.space" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="settings">
+      <label class="settings-label" for="pool-token">Pool token (manual fallback)</label>
+      <p class="options-note">
+        Only needed if the automatic handoff on the Space's /connect page
+        fails. Copy the token shown there and paste it here.
+      </p>
+      <div class="settings-row">
+        <input type="text" id="pool-token" placeholder="xp1.…" spellcheck="false">
+      </div>
+    </div>
+
+    <div class="settings-row">
+      <button id="save" class="save-btn">Save</button>
+    </div>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

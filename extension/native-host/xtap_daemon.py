@@ -63,6 +63,13 @@ class DaemonHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/status':
+            # Liveness stays open, but when a token is supplied it is
+            # validated so clients can detect a stale cached token instead
+            # of discovering it via 401s on every write.
+            auth = self.headers.get('Authorization')
+            if auth is not None and (not auth.startswith('Bearer ') or auth[7:] != _token):
+                self._send_json({'ok': False, 'error': 'Unauthorized'}, 401)
+                return
             self._send_json({'ok': True, 'version': VERSION})
             return
         self._send_json({'ok': False, 'error': 'Not found'}, 404)

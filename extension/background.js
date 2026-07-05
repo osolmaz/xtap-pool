@@ -123,9 +123,14 @@ async function httpFetch(method, path, body) {
 
 async function probeHttp(port, token) {
   try {
+    // Send the token so a daemon with a rotated secret answers 401 here,
+    // instead of the stale token wedging every subsequent tweet POST.
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const resp = await fetch(`http://127.0.0.1:${port}/status`, {
+      headers,
       signal: AbortSignal.timeout(3000)
     });
+    if (!resp.ok) return false;
     const data = await resp.json();
     return data.ok === true;
   } catch {

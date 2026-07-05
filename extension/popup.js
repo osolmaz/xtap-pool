@@ -231,4 +231,8 @@ document.getElementById('open-debug').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('debug.html') });
 });
 
+document.getElementById('open-options').addEventListener('click', () => {
+  chrome.runtime.openOptionsPage();
+});
+
 refresh();
