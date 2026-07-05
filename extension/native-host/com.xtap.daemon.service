@@ -1,0 +1,13 @@
+[Unit]
+Description=xTap HTTP daemon
+After=network.target
+
+[Service]
+ExecStart=__PYTHON_PATH__ __DAEMON_PATH__
+Environment=HOME=__HOME_DIR__
+Environment=PATH=__PATH__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
