@@ -1,0 +1,22 @@
+{
+  "name": "@xtap-pool/space",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "node --watch --experimental-strip-types src/server.ts",
+    "start": "node dist/src/server.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@huggingface/hub": "^2.6.14",
+    "@xtap-pool/shared": "*",
+    "better-sqlite3": "^12.4.1",
+    "hono": "^4.11.9",
+    "zod": "^4.3.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}
