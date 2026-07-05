@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>xtap-pool</h1>
+    <div id="status" class="status"></div>
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-value" id="session-count">0</span>
+        <span class="stat-label">Session</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="alltime-count">0</span>
+        <span class="stat-label">All time</span>
+      </div>
+    </div>
+    <button id="toggle"></button>
+    <div id="video-section" class="video-section" style="display: none;">
+      <div class="video-info">
+        <span id="video-label"></span>
+      </div>
+      <div id="ytdlp-hint" class="ytdlp-hint" style="display: none;">
+        Install <a href="https://github.com/yt-dlp/yt-dlp#installation" target="_blank">yt-dlp</a> for best quality
+      </div>
+      <div class="video-warning">Not stealth — downloads make extra requests to X</div>
+      <button id="download-btn" class="download-btn"></button>
+    </div>
+    <div class="pool-section">
+      <div class="settings-label">Pool sync</div>
+      <div id="pool-status" class="status"></div>
+      <div class="settings-row">
+        <button id="pool-connect" class="save-btn">Connect</button>
+        <button id="pool-sync-now" class="save-btn">Sync now</button>
+        <button id="pool-pause" class="save-btn"></button>
+      </div>
+    </div>
+    <div class="settings">
+      <label class="settings-label" for="output-dir">Output directory</label>
+      <div class="settings-row">
+        <input type="text" id="output-dir" placeholder="~/Downloads/xtap" spellcheck="false">
+        <button id="save-dir" class="save-btn">Save</button>
+      </div>
+    </div>
+    <a id="open-debug" class="debug-link">Debug Dashboard</a>
+    <a id="open-options" class="debug-link">Options</a>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

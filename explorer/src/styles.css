@@ -1,0 +1,282 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens ported from the solmaz.io X display
+ * (_sass/minima/_x_shell.scss, _x_cards.scss). The --x-* variables drive all
+ * tweet-card styling below so the explorer matches that look in both themes.
+ */
+:root {
+  --x-bg: #ffffff;
+  --x-card: #f7f9f9;
+  --x-border: #e3e8ea;
+  --x-soft: #eef2f4;
+  --x-soft-hover: color-mix(in oklab, var(--x-soft), var(--x-text) 12%);
+  --x-soft-active: color-mix(in oklab, var(--x-soft), var(--x-text) 18%);
+  --x-accent: #1d9bf0;
+  --x-accent-hover: color-mix(in oklab, var(--x-accent), var(--x-text) 22%);
+  --x-muted: #536471;
+  --x-text: #0f1419;
+  --x-header-bg: color-mix(in oklab, var(--x-bg), var(--x-card) 35%);
+  --x-code-bg: #f1f3f4;
+  --x-strong-border: color-mix(in oklab, var(--x-border), var(--x-text) 24%);
+  --x-card-pad-x: 1rem;
+  --x-card-pad-y: 0.9rem;
+  --x-avatar-size: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --x-bg: #0b0f19;
+    --x-card: #151b26;
+    --x-border: #26303c;
+    --x-soft: #1b2430;
+    --x-accent: #1d9bf0;
+    --x-muted: #71767b;
+    --x-text: #e7e9ea;
+    --x-code-bg: #10151f;
+  }
+}
+
+:root[data-theme="dark"] {
+  --x-bg: #0b0f19;
+  --x-card: #151b26;
+  --x-border: #26303c;
+  --x-soft: #1b2430;
+  --x-accent: #1d9bf0;
+  --x-muted: #71767b;
+  --x-text: #e7e9ea;
+  --x-code-bg: #10151f;
+}
+
+body {
+  background: var(--x-bg);
+  color: var(--x-text);
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+}
+
+/* Feed shell */
+.x-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.x-feed__item {
+  border-bottom: 1px solid var(--x-border);
+  max-width: 100%;
+}
+
+/* Tweet card (ported from _x_cards.scss) */
+.x-tweet-card {
+  display: grid;
+  grid-template-columns: var(--x-avatar-size) minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: var(--x-card-pad-y) var(--x-card-pad-x);
+  position: relative;
+  z-index: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.x-tweet-card__avatar {
+  width: var(--x-avatar-size);
+  height: var(--x-avatar-size);
+  border-radius: 999px;
+  border: 1px solid var(--x-border);
+  overflow: hidden;
+  background: var(--x-bg);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: #fff;
+}
+
+.x-tweet-card__main {
+  min-width: 0;
+}
+
+.x-tweet-card__identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.x-tweet-card__name {
+  font-weight: 700;
+  color: var(--x-text);
+}
+
+.x-tweet-card__handle,
+.x-tweet-card__dot,
+.x-tweet-card__identity time {
+  color: var(--x-muted);
+}
+
+.x-tweet-card__text {
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.x-tweet-card__text a {
+  color: var(--x-accent);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.x-tweet-card__text a:hover {
+  color: var(--x-accent-hover);
+}
+
+/* Media grid */
+.x-tweet-card__media {
+  margin-top: 0.72rem;
+  border: 1px solid var(--x-border);
+  border-radius: 1rem;
+  overflow: hidden;
+  display: grid;
+  gap: 4px;
+  background: var(--x-bg);
+}
+
+.x-tweet-card__media--count-1 {
+  --x-single-media-ratio: 1.78;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.x-tweet-card__media--count-1 .x-tweet-card__media-link {
+  aspect-ratio: var(--x-single-media-ratio);
+  overflow: hidden;
+}
+
+.x-tweet-card__media--count-2,
+.x-tweet-card__media--count-3,
+.x-tweet-card__media--count-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.x-tweet-card__media--count-3 .x-tweet-card__media-link:first-child {
+  grid-row: span 2;
+}
+
+.x-tweet-card__media-link {
+  display: block;
+  margin: 0;
+  color: inherit;
+  text-decoration: none;
+  line-height: 0;
+  background: var(--x-card);
+}
+
+.x-tweet-card__media-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--x-card);
+}
+
+.x-tweet-card__media--count-2 .x-tweet-card__media-image,
+.x-tweet-card__media--count-3 .x-tweet-card__media-image,
+.x-tweet-card__media--count-4 .x-tweet-card__media-image {
+  aspect-ratio: 1 / 1;
+}
+
+/* Quote card */
+.x-quote-card {
+  display: block;
+  margin-top: 0.62rem;
+  border: 1px solid var(--x-border);
+  border-radius: 1rem;
+  background: var(--x-card);
+  overflow: hidden;
+  padding: 0.65rem 0.75rem;
+  color: var(--x-muted);
+  font-size: 0.92rem;
+  text-decoration: none;
+}
+
+.x-quote-card:hover {
+  border-color: var(--x-strong-border);
+}
+
+/* "View on X" pill */
+.x-tweet-card__view-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  height: 1.62rem;
+  padding: 0 0.45rem;
+  background: var(--x-soft);
+  color: var(--x-text);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.77rem;
+  line-height: 1;
+  align-self: center;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.x-tweet-card__view-link:hover {
+  background: var(--x-soft-hover);
+  border-color: var(--x-strong-border);
+}
+
+/* Metrics row */
+.x-tweet-card__metrics {
+  display: flex;
+  gap: 1.4rem;
+  margin-top: 0.55rem;
+  color: var(--x-muted);
+  font-size: 0.82rem;
+}
+
+.x-tweet-card__metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+/* Contributor chips */
+.x-tweet-card__contributors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.55rem;
+}
+
+.x-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  background: var(--x-soft);
+  color: var(--x-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.x-chip--article {
+  color: var(--x-accent);
+}

@@ -1,0 +1,39 @@
+typescript:
+  coverage:
+    threshold: 85
+    paths:
+      - shared/src
+      - space/src
+      - explorer/src
+    exclude:
+      - pattern: "explorer/src/components/ui/**"
+        reason: "generated shadcn/ui primitives, exercised through component tests"
+      - pattern: "explorer/src/main.tsx"
+        reason: "DOM bootstrap entrypoint with no branching logic"
+      - pattern: "space/src/server.ts"
+        reason: "process entrypoint wiring env to app factory, covered by integration boot test"
+      - pattern: "extension/**"
+        reason: "vendored upstream xTap extension (vanilla JS), tested via node --test"
+  complexity:
+    max: 8
+  dry:
+    max_findings: 0
+    paths:
+      - shared/src
+      - space/src
+      - explorer/src
+    exclude:
+      - pattern: "explorer/src/components/ui/**"
+        reason: "generated shadcn/ui primitives"
+    copied_blocks:
+      enabled: true
+      min_tokens: 100
+  mutation:
+    targets:
+      - shared/src/tweet.ts
+      - space/src/pool-token.ts
+      - explorer/src/lib/format.ts
+  dependency_boundaries:
+    - from: explorer/src/components
+      allow:
+        - explorer/src/lib
