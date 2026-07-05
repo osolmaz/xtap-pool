@@ -11,7 +11,7 @@ export default tseslint.config(
       "**/node_modules/**",
       "extension/**",
       "explorer/vite.config.ts",
-      "vitest.config.ts",
+      "**/vitest.config.ts",
       "stryker.conf.json",
     ],
   },
