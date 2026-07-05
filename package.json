@@ -12,7 +12,7 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",
-    "typecheck": "tsc --build shared space explorer",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc --build shared space explorer",
     "test": "vitest run",
     "test:extension": "node --test extension/tests/*.test.mjs",
     "coverage": "vitest run --coverage",

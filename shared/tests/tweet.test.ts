@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { datasetPathFor, dayKey, stampTweet, validateTweet } from "../src/tweet.js";
+import { datasetPathFor, dayKey, stampTweet, validateTweet } from "../src/index.js";
 
 const sample = {
   id: "2022409507826213048",

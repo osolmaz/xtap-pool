@@ -15,13 +15,43 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run build --workspace shared
       - run: npm run format
       - run: npm run lint
-      - run: npm run typecheck
+      - run: npx tsc -p tsconfig.json --noEmit
       - run: npm test
       - run: npm run test:extension
       - run: npm run coverage
-      - run: npm run build
+      - run: npm run dry
+      - run: npm run mutate
+      - name: Check shared
+        run: |
+          npm run format --workspace shared
+          npm run lint --workspace shared
+          npm run typecheck --workspace shared
+          npm run test --workspace shared
+          npm run coverage --workspace shared
+          npm run dry --workspace shared
+          npm run mutate --workspace shared
+      - name: Check space
+        run: |
+          npm run format --workspace space
+          npm run lint --workspace space
+          npm run typecheck --workspace space
+          npm run test --workspace space
+          npm run coverage --workspace space
+          npm run dry --workspace space
+          npm run mutate --workspace space
+      - name: Check explorer
+        run: |
+          npm run format --workspace explorer
+          npm run lint --workspace explorer
+          npm run typecheck --workspace explorer
+          npm run test --workspace explorer
+          npm run coverage --workspace explorer
+          npm run dry --workspace explorer
+          npm run mutate --workspace explorer
+      - run: npm run build --workspace explorer && npm run build --workspace space
       - name: Slophammer
         uses: dutifuldev/slophammer@main
         with:

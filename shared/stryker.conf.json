@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/stryker-mutator/stryker-js/master/packages/api/schema/stryker-core.json",
   "testRunner": "vitest",
-  "mutate": ["shared/src/tweet.ts", "space/src/pool-token.ts", "explorer/src/lib/format.ts"],
+  "mutate": ["src/tweet.ts"],
   "vitest": {
     "configFile": "vitest.config.ts"
   },
@@ -10,5 +10,6 @@
     "low": 60,
     "break": 60
   },
-  "reporters": ["clear-text", "progress"]
+  "reporters": ["clear-text", "progress"],
+  "tempDirName": ".stryker-tmp"
 }

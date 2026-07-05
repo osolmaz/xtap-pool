@@ -32,3 +32,8 @@ typescript:
     targets:
       - shared/src/tweet.ts
       - space/src/pool-token.ts
+      - explorer/src/lib/format.ts
+  dependency_boundaries:
+    - from: explorer/src/components
+      allow:
+        - explorer/src/lib

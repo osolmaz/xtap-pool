@@ -6,7 +6,14 @@
   "scripts": {
     "build": "tsc --build",
     "dev": "node --watch --experimental-strip-types src/server.ts",
-    "start": "node dist/src/server.js"
+    "start": "node dist/src/server.js",
+    "format": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "dry": "cd .. && slophammer-ts dry .",
+    "mutate": "stryker run"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.6",

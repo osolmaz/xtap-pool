@@ -2,30 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    projects: [
-      {
-        test: {
-          name: "shared",
-          root: "shared",
-          include: ["tests/**/*.test.ts"],
-        },
-      },
-      {
-        test: {
-          name: "space",
-          root: "space",
-          include: ["tests/**/*.test.ts"],
-        },
-      },
-      {
-        test: {
-          name: "explorer",
-          root: "explorer",
-          include: ["tests/**/*.test.{ts,tsx}"],
-          environment: "jsdom",
-        },
-      },
-    ],
+    projects: ["shared/vitest.config.ts", "space/vitest.config.ts", "explorer/vitest.config.ts"],
     coverage: {
       provider: "v8",
       include: ["shared/src/**", "space/src/**", "explorer/src/**"],
