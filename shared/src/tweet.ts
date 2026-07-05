@@ -1,8 +1,16 @@
 import { z } from "zod";
 
+// Strict ISO-8601: the store compares these lexicographically and dayKey
+// derives dataset paths from them, so loose Date.parse inputs ("1",
+// "May 21 2026") must be rejected, not coerced.
+const ISO_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
 const isoTimestamp = z
   .string()
-  .refine((value) => !Number.isNaN(Date.parse(value)), { error: "not an ISO timestamp" });
+  .refine((value) => ISO_TIMESTAMP_PATTERN.test(value) && !Number.isNaN(Date.parse(value)), {
+    error: "not an ISO timestamp",
+  });
 
 const authorSchema = z
   .looseObject({

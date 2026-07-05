@@ -107,4 +107,10 @@ describe("DatasetMirror.appendAndCommit", () => {
     const evil = makePooled({ contributed_by: "../../etc" });
     await expect(mirror.appendAndCommit([evil], "evil")).rejects.toThrow("escapes mirror root");
   });
+
+  it("refuses sibling escapes that share the mirror root's name prefix", async () => {
+    const sibling = new DatasetMirror(hub, join(dir, "mirror"));
+    const evil = makePooled({ contributed_by: "../../mirror-evil" });
+    await expect(sibling.appendAndCommit([evil], "evil")).rejects.toThrow("escapes mirror root");
+  });
 });

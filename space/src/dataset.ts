@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
 import { commit, downloadFile, listFiles } from "@huggingface/hub";
 
@@ -76,7 +76,10 @@ export class DatasetMirror {
 
   private localPath(datasetPath: string): string {
     const resolved = normalize(join(this.rootDir, datasetPath));
-    if (!resolved.startsWith(normalize(this.rootDir))) {
+    // Separator-aware containment: a raw prefix check would accept escapes
+    // into siblings sharing the root's name prefix (mirror → mirror-evil).
+    const rel = relative(normalize(this.rootDir), resolved);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error(`dataset path escapes mirror root: ${datasetPath}`);
     }
     return resolved;
