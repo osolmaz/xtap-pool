@@ -6,6 +6,8 @@ export type HubClient = {
   fetchFn?: typeof fetch;
 };
 
+export type HubRepo = { type: "dataset" | "space"; name: string };
+
 type JsonObject = Record<string, unknown>;
 
 export async function getSpaceVariables(
@@ -24,7 +26,7 @@ export async function setSpaceVariable(
   key: string,
   value: string,
 ): Promise<void> {
-  await hubRequestJson(client, `/api/spaces/${spaceRepo}/variables`, {
+  await hubRequest(client, `/api/spaces/${spaceRepo}/variables`, {
     method: "POST",
     body: JSON.stringify({ key, value }),
   });
@@ -40,6 +42,16 @@ export async function setSpaceSecret(
     method: "POST",
     body: JSON.stringify({ key, value }),
   });
+}
+
+export async function getRepoPrivateState(client: HubClient, repo: HubRepo): Promise<boolean> {
+  const payload = await hubRequestJson(client, `/api/${repo.type}s/${repo.name}`, {
+    method: "GET",
+  });
+  if (typeof payload["private"] !== "boolean") {
+    throw new Error(`Hub ${repo.type} ${repo.name} did not report visibility.`);
+  }
+  return payload["private"];
 }
 
 export function parseSpaceVariables(payload: unknown): ReadonlyMap<string, string> {

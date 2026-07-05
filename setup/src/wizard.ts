@@ -25,6 +25,7 @@ import {
 } from "./config.js";
 import { deployPool } from "./deploy.js";
 import { setSpaceSecret } from "./hub-api.js";
+import { defaultTweetsDirectory, expandHomePath } from "./path.js";
 import { captureCommand, inheritCommand } from "./process.js";
 import { verifyDatasetWriteToken } from "./token.js";
 
@@ -127,10 +128,12 @@ async function maybeSeed(root: string, config: SetupConfig): Promise<void> {
     "Seed data belongs to which HF user?",
     config.allowedUsers[0] ?? config.namespace,
   );
-  const source = await promptText("Existing tweets directory", "~/xtap-store/data/tweets");
-  await inheritCommand("scripts/seed-dataset.sh", [config.datasetRepo, username, source], {
-    cwd: root,
-  });
+  const source = await promptText("Existing tweets directory", defaultTweetsDirectory());
+  await inheritCommand(
+    "scripts/seed-dataset.sh",
+    [config.datasetRepo, username, expandHomePath(source)],
+    { cwd: root },
+  );
 }
 
 async function promptText(

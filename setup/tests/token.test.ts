@@ -62,6 +62,15 @@ describe("dataset token verification", () => {
     if (!report.ok) expect(report.errors.join("\n")).toContain("outside alice/xtap-pool-data");
   });
 
+  it("rejects same-name scopes on non-dataset entities", () => {
+    const report = evaluateDatasetWriteToken(
+      whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"], "model")]),
+      "alice/xtap-pool-data",
+    );
+    expect(report.ok).toBe(false);
+    if (!report.ok) expect(report.errors.join("\n")).toContain("model:alice/xtap-pool-data");
+  });
+
   it("rejects missing read, missing write, or unexpected target permissions", () => {
     const missingWrite = evaluateDatasetWriteToken(
       whoami([scope("alice/xtap-pool-data", ["repo.content.read"])]),

@@ -7,8 +7,13 @@ import { createRepo, repoExists, uploadFiles } from "@huggingface/hub";
 
 import type { SetupConfig } from "./config.js";
 import { usersValue } from "./config.js";
-import type { HubClient } from "./hub-api.js";
-import { getSpaceVariables, setSpaceSecret, setSpaceVariable } from "./hub-api.js";
+import type { HubClient, HubRepo } from "./hub-api.js";
+import {
+  getRepoPrivateState,
+  getSpaceVariables,
+  setSpaceSecret,
+  setSpaceVariable,
+} from "./hub-api.js";
 import { captureCommand } from "./process.js";
 import { collectUploadFiles, createSpaceStage } from "./stage.js";
 
@@ -41,7 +46,7 @@ export async function configureSpace(client: HubClient, config: SetupConfig): Pr
 
 async function ensureRepo(
   client: HubClient,
-  repo: { type: "dataset" | "space"; name: string },
+  repo: HubRepo,
   visibility: "private" | "public",
 ): Promise<void> {
   const exists = await repoExists({
@@ -49,7 +54,10 @@ async function ensureRepo(
     accessToken: client.accessToken,
     ...fetchOption(client),
   });
-  if (exists) return;
+  if (exists) {
+    await assertRepoVisibility(client, repo, visibility);
+    return;
+  }
   await createRepo({
     repo,
     accessToken: client.accessToken,
@@ -57,6 +65,19 @@ async function ensureRepo(
     ...(repo.type === "space" ? { sdk: "docker" as const } : {}),
     ...fetchOption(client),
   });
+}
+
+async function assertRepoVisibility(
+  client: HubClient,
+  repo: HubRepo,
+  visibility: "private" | "public",
+): Promise<void> {
+  const actualPrivate = await getRepoPrivateState(client, repo);
+  const expectedPrivate = visibility === "private";
+  if (actualPrivate === expectedPrivate) return;
+  throw new Error(
+    `${repo.type} ${repo.name} already exists as ${actualPrivate ? "private" : "public"}; expected ${visibility}.`,
+  );
 }
 
 async function uploadSpace(root: string, client: HubClient, spaceRepo: string): Promise<void> {

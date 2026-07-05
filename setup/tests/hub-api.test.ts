@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  getRepoPrivateState,
   getSpaceVariables,
   parseSpaceVariables,
   setSpaceSecret,
@@ -24,7 +25,7 @@ describe("space variable parsing", () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const fetchFn: typeof fetch = (input, init) => {
       requests.push({ url: requestUrl(input), init: init ?? {} });
-      if (requestUrl(input).endsWith("/secrets")) {
+      if (init?.method === "POST") {
         return Promise.resolve(new Response(null, { status: 204 }));
       }
       return Promise.resolve(Response.json({ DATASET_REPO: { value: "alice/xtap-pool-data" } }));
@@ -45,6 +46,16 @@ describe("space variable parsing", () => {
     const headers = requests[0]?.init.headers;
     expect(headers).toBeInstanceOf(Headers);
     expect((headers as Headers).get("authorization")).toBe("Bearer hf_owner");
+  });
+
+  it("reads repo visibility from Hub info", async () => {
+    const fetchFn: typeof fetch = () => Promise.resolve(Response.json({ private: true }));
+    await expect(
+      getRepoPrivateState(
+        { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+        { type: "dataset", name: "alice/xtap-pool-data" },
+      ),
+    ).resolves.toBe(true);
   });
 
   it("surfaces Hub errors with status and body", async () => {

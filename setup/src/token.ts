@@ -104,7 +104,15 @@ function recordTargetPermission(
 }
 
 function matchesDataset(entity: JsonObject, datasetRepo: string): boolean {
-  return entityCandidates(entity).some((candidate) => normalizeRepo(candidate) === datasetRepo);
+  return (
+    isDatasetEntity(entity) &&
+    entityCandidates(entity).some((candidate) => normalizeRepo(candidate) === datasetRepo)
+  );
+}
+
+function isDatasetEntity(entity: JsonObject): boolean {
+  const type = text(entity["type"]);
+  return type === "dataset" || type === "datasets";
 }
 
 function entityCandidates(entity: JsonObject): readonly string[] {
