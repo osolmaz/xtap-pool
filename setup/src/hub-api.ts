@@ -12,7 +12,9 @@ export async function getSpaceVariables(
   client: HubClient,
   spaceRepo: string,
 ): Promise<ReadonlyMap<string, string>> {
-  const payload = await hubJson(client, `/api/spaces/${spaceRepo}/variables`, { method: "GET" });
+  const payload = await hubRequestJson(client, `/api/spaces/${spaceRepo}/variables`, {
+    method: "GET",
+  });
   return parseSpaceVariables(payload);
 }
 
@@ -22,7 +24,7 @@ export async function setSpaceVariable(
   key: string,
   value: string,
 ): Promise<void> {
-  await hubJson(client, `/api/spaces/${spaceRepo}/variables`, {
+  await hubRequestJson(client, `/api/spaces/${spaceRepo}/variables`, {
     method: "POST",
     body: JSON.stringify({ key, value }),
   });
@@ -34,7 +36,7 @@ export async function setSpaceSecret(
   key: string,
   value: string,
 ): Promise<void> {
-  await hubJson(client, `/api/spaces/${spaceRepo}/secrets`, {
+  await hubRequest(client, `/api/spaces/${spaceRepo}/secrets`, {
     method: "POST",
     body: JSON.stringify({ key, value }),
   });
@@ -50,7 +52,7 @@ export function parseSpaceVariables(payload: unknown): ReadonlyMap<string, strin
   return result;
 }
 
-async function hubJson(client: HubClient, path: string, init: RequestInit): Promise<JsonObject> {
+async function hubRequest(client: HubClient, path: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${client.accessToken}`);
   headers.set("content-type", "application/json");
@@ -61,6 +63,15 @@ async function hubJson(client: HubClient, path: string, init: RequestInit): Prom
   if (!response.ok) {
     throw new Error(`Hub request failed (${String(response.status)}): ${await response.text()}`);
   }
+  return response;
+}
+
+async function hubRequestJson(
+  client: HubClient,
+  path: string,
+  init: RequestInit,
+): Promise<JsonObject> {
+  const response = await hubRequest(client, path, init);
   const payload: unknown = await response.json();
   return asRecord(payload);
 }

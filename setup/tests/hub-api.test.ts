@@ -24,6 +24,9 @@ describe("space variable parsing", () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const fetchFn: typeof fetch = (input, init) => {
       requests.push({ url: requestUrl(input), init: init ?? {} });
+      if (requestUrl(input).endsWith("/secrets")) {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
       return Promise.resolve(Response.json({ DATASET_REPO: { value: "alice/xtap-pool-data" } }));
     };
     const client = { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn };
