@@ -18,6 +18,7 @@ import { captureCommand } from "./process.js";
 import { collectUploadFiles, createSpaceStage } from "./stage.js";
 
 type DeleteOperation = { operation: "delete"; path: string };
+type ConfigureSpaceOptions = { initializeGeneratedSecrets?: boolean };
 
 export async function deployPool(
   root: string,
@@ -30,7 +31,23 @@ export async function deployPool(
   await configureSpace(client, config);
 }
 
-export async function configureSpace(client: HubClient, config: SetupConfig): Promise<void> {
+export async function updateExistingPool(
+  root: string,
+  client: HubClient,
+  config: SetupConfig,
+): Promise<void> {
+  await assertRepoVisibility(client, { type: "dataset", name: config.datasetRepo }, "private");
+  await assertRepoVisibility(client, { type: "space", name: config.spaceRepo }, "public");
+  await uploadSpace(root, client, config.spaceRepo);
+  await configureSpace(client, config, { initializeGeneratedSecrets: false });
+}
+
+export async function configureSpace(
+  client: HubClient,
+  config: SetupConfig,
+  options: ConfigureSpaceOptions = {},
+): Promise<void> {
+  const initializeGeneratedSecrets = options.initializeGeneratedSecrets ?? true;
   const variables = await getSpaceVariables(client, config.spaceRepo);
   await setSpaceVariable(client, config.spaceRepo, "DATASET_REPO", config.datasetRepo);
   await setSpaceVariable(
@@ -40,7 +57,7 @@ export async function configureSpace(client: HubClient, config: SetupConfig): Pr
     usersValue(config.allowedUsers),
   );
   await setSpaceVariable(client, config.spaceRepo, "POOL_ADMINS", usersValue(config.poolAdmins));
-  if (!variables.has("SECRETS_INITIALIZED")) {
+  if (initializeGeneratedSecrets && !variables.has("SECRETS_INITIALIZED")) {
     await setSpaceSecret(client, config.spaceRepo, "POOL_SIGNING_SECRET", randomSecret());
     await setSpaceSecret(client, config.spaceRepo, "SESSION_SECRET", randomSecret());
     await setSpaceVariable(client, config.spaceRepo, "SECRETS_INITIALIZED", "1");
