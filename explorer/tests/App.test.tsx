@@ -77,11 +77,23 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("hello world");
     expect(screen.getByText("signed in as @osolmaz")).toBeDefined();
-    expect(screen.getByText("Install extension")).toBeDefined();
+    expect(screen.getByText("Install")).toBeDefined();
+    expect(screen.getByText("Captured by")).toBeDefined();
+  });
+
+  it("shows extension setup in the install tab", async () => {
+    stubApi({
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: false }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByText("Install"));
+    await screen.findByText("Install extension");
     expect(screen.getByText("Download repo").getAttribute("href")).toBe(
       "https://github.com/dutifuldev/xtap-pool",
     );
-    expect(screen.getByText("Captured by")).toBeDefined();
+    expect(screen.getByText("Connect").getAttribute("href")).toBe("/connect");
   });
 
   it("loads the next page via the load-more button", async () => {

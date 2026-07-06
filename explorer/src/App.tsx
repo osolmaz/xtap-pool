@@ -11,17 +11,22 @@ type AuthState =
   | { status: "signed-out" }
   | { status: "signed-in"; username: string; isAdmin: boolean };
 
-type View = "feed" | "admin";
+type View = "feed" | "install" | "admin";
 
 function InstallExtension(): React.JSX.Element {
   return (
-    <section className="mb-4 rounded-md border border-(--x-border) p-3 text-sm">
-      <h2 className="font-semibold">Install extension</h2>
-      <p className="mt-1 text-(--x-muted)">
+    <section className="flex flex-col gap-4 p-4">
+      <header className="border-b border-(--x-border) pb-4">
+        <h2 className="text-lg font-bold">Install extension</h2>
+        <p className="mt-1 text-sm text-(--x-muted)">
+          Add the browser extension, connect it to this pool, then browse X normally.
+        </p>
+      </header>
+      <p className="text-sm text-(--x-muted)">
         Download the repo, open <code>chrome://extensions</code>, enable Developer mode, then Load
         unpacked and choose <code>extension/</code>.
       </p>
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 text-sm">
         <a
           className="rounded-md border border-(--x-border) px-3 py-1.5 font-semibold"
           href="https://github.com/dutifuldev/xtap-pool"
@@ -65,10 +70,11 @@ export function App(): React.JSX.Element {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [contributors, setContributors] = useState<readonly ContributorStats[]>([]);
   const [now] = useState(() => new Date());
-  const tabClass = (active: boolean): string =>
+  const tabClass = (active: boolean, tone: "default" | "accent" = "default"): string =>
     [
-      "rounded-md border border-(--x-border) px-3 py-1.5 text-sm font-semibold",
-      active ? "bg-(--x-soft-active)" : "",
+      "rounded-md border px-3 py-1.5 text-sm font-semibold",
+      tone === "accent" ? "border-(--x-accent) text-(--x-accent)" : "border-(--x-border)",
+      active ? (tone === "accent" ? "bg-(--x-accent) text-white" : "bg-(--x-soft-active)") : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -118,6 +124,16 @@ export function App(): React.JSX.Element {
           >
             Feed
           </button>
+          <button
+            type="button"
+            aria-pressed={view === "install"}
+            className={tabClass(view === "install", "accent")}
+            onClick={() => {
+              setView("install");
+            }}
+          >
+            Install
+          </button>
           {auth.isAdmin ? (
             <button
               type="button"
@@ -131,13 +147,18 @@ export function App(): React.JSX.Element {
             </button>
           ) : null}
         </nav>
-        <InstallExtension />
         {view === "feed" ? (
           <FiltersPanel filters={filters} contributors={contributors} onChange={setFilters} />
         ) : null}
       </aside>
       <main className="border-x border-(--x-border)">
-        {view === "admin" && auth.isAdmin ? <AdminPanel /> : <Feed filters={filters} now={now} />}
+        {view === "install" ? (
+          <InstallExtension />
+        ) : view === "admin" && auth.isAdmin ? (
+          <AdminPanel />
+        ) : (
+          <Feed filters={filters} now={now} />
+        )}
       </main>
     </div>
   );
