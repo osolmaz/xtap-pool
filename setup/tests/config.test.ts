@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   defaultSetupConfig,
+  existingSpaceConfig,
   normalizeUsers,
   repoInNamespace,
   spacePublicUrl,
@@ -26,6 +27,38 @@ describe("setup config helpers", () => {
   it("normalizes comma-separated allowlists", () => {
     expect(normalizeUsers("alice, bob,alice,, carol ")).toEqual(["alice", "bob", "carol"]);
     expect(usersValue(["alice", "bob"])).toBe("alice,bob");
+  });
+
+  it("derives update config from existing Space variables", () => {
+    const config = existingSpaceConfig(
+      "alice",
+      "team/xtap-pool",
+      new Map([
+        ["DATASET_REPO", "team/tweets"],
+        ["ALLOWED_USERS", "alice,bob"],
+        ["POOL_ADMINS", "bob"],
+      ]),
+    );
+
+    expect(config).toEqual({
+      namespace: "team",
+      spaceRepo: "team/xtap-pool",
+      datasetRepo: "team/tweets",
+      allowedUsers: ["alice", "bob"],
+      poolAdmins: ["bob"],
+    });
+  });
+
+  it("uses sane update defaults when optional Space variables are missing", () => {
+    const config = existingSpaceConfig("alice", "team/xtap-pool", new Map());
+
+    expect(config).toEqual({
+      namespace: "team",
+      spaceRepo: "team/xtap-pool",
+      datasetRepo: "team/xtap-pool-data",
+      allowedUsers: ["alice"],
+      poolAdmins: ["alice"],
+    });
   });
 
   it("validates repo ids and user lists", () => {

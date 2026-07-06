@@ -19,6 +19,29 @@ export function defaultSetupConfig(username: string): SetupConfig {
   };
 }
 
+export function existingSpaceConfig(
+  username: string,
+  spaceRepo: string,
+  variables: ReadonlyMap<string, string>,
+): SetupConfig {
+  const spaceError = validateRepoId(spaceRepo);
+  if (spaceError !== undefined) throw new Error(spaceError);
+  const namespace = spaceRepo.split("/")[0] ?? "";
+  const datasetRepo = variables.get("DATASET_REPO") ?? repoInNamespace(namespace, "xtap-pool-data");
+  const datasetError = validateRepoId(datasetRepo);
+  if (datasetError !== undefined)
+    throw new Error(`Invalid DATASET_REPO on ${spaceRepo}: ${datasetRepo}`);
+  const allowedUsers = usersFromVariable(variables.get("ALLOWED_USERS"), [username]);
+  const poolAdmins = usersFromVariable(variables.get("POOL_ADMINS"), allowedUsers.slice(0, 1));
+  return {
+    namespace,
+    spaceRepo,
+    datasetRepo,
+    allowedUsers,
+    poolAdmins,
+  };
+}
+
 export function normalizeUsers(input: string): readonly string[] {
   return [
     ...new Set(
@@ -28,6 +51,14 @@ export function normalizeUsers(input: string): readonly string[] {
         .filter((user) => user.length > 0),
     ),
   ];
+}
+
+function usersFromVariable(
+  value: string | undefined,
+  fallback: readonly string[],
+): readonly string[] {
+  const parsed = value === undefined ? [] : normalizeUsers(value);
+  return parsed.length > 0 ? parsed : fallback;
 }
 
 export function usersValue(users: readonly string[]): string {

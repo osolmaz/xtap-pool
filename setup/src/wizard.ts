@@ -14,6 +14,7 @@ import { whoAmI } from "@huggingface/hub";
 import type { SetupConfig } from "./config.js";
 import {
   defaultSetupConfig,
+  existingSpaceConfig,
   normalizeUsers,
   repoInNamespace,
   spacePublicUrl,
@@ -23,8 +24,8 @@ import {
   validateRepoId,
   validateUserList,
 } from "./config.js";
-import { deployPool } from "./deploy.js";
-import { setSpaceSecret } from "./hub-api.js";
+import { deployPool, updateExistingPool } from "./deploy.js";
+import { getSpaceVariables, setSpaceSecret } from "./hub-api.js";
 import { defaultTweetsDirectory, expandHomePath } from "./path.js";
 import { captureCommand, inheritCommand } from "./process.js";
 import { verifyDatasetWriteToken } from "./token.js";
@@ -42,6 +43,20 @@ export async function runSetupWizard(root: string): Promise<void> {
   const datasetToken = await promptDatasetToken(config.datasetRepo);
   await maybeSeed(root, config);
   await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", datasetToken);
+  outro(`Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`);
+}
+
+export async function runUpdateCommand(root: string, requestedSpaceRepo?: string): Promise<void> {
+  intro("xtap-pool update");
+  const accessToken = await activeHfToken();
+  const account = await whoAmI({ accessToken });
+  const spaceRepo = requestedSpaceRepo ?? repoInNamespace(account.name, "xtap-pool");
+  const variables = await getSpaceVariables({ accessToken }, spaceRepo);
+  const config = existingSpaceConfig(account.name, spaceRepo, variables);
+  const task = spinner();
+  task.start(`Updating ${config.spaceRepo}`);
+  await updateExistingPool(root, { accessToken }, config);
+  task.stop("Space updated");
   outro(`Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`);
 }
 

@@ -31,6 +31,26 @@ The setup flow creates or updates the private dataset repo and public Docker
 Space, configures the Space variables and generated secrets, verifies the
 dataset-only `HF_TOKEN`, and can import existing xTap JSONL files.
 
+To redeploy an existing pool without re-entering repo names, the dataset token,
+or import settings:
+
+```sh
+npm run update
+```
+
+By default this updates `<active-hf-user>/xtap-pool`. Pass a Space repo when
+updating a different namespace:
+
+```sh
+npm run update -- dutifuldev/xtap-pool
+```
+
+The update command reads the current Space variables, reuses the existing
+dataset repo and membership bootstrap settings, preserves all secrets, and only
+uploads the latest Space code plus any missing variables.
+It will not create or rotate generated signing/session secrets; run the setup
+flow if those were never initialized.
+
 The lower-level scripts are still available when you want to do those steps
 manually:
 

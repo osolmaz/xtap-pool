@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "setup": "npm run build --workspace setup && npm run start --workspace setup",
+    "update": "npm run build --workspace setup && npm run start --workspace setup -- update",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",
