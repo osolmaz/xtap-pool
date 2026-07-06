@@ -19,6 +19,8 @@ export type OAuthIdentity = {
 };
 
 export type AuthorizeOptions = {
+  orgId?: string;
+  /** @deprecated xtap-pool only supports one active member organization. */
   orgIds?: readonly string[];
 };
 
@@ -46,9 +48,9 @@ export function authorizeUrl(
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid profile");
   url.searchParams.set("state", state);
-  for (const orgId of [...new Set(options.orgIds ?? [])].sort()) {
-    url.searchParams.append("orgIds", orgId);
-  }
+  // eslint-disable-next-line @typescript-eslint/no-deprecated -- read legacy option for backwards compatibility.
+  const orgId = options.orgId ?? options.orgIds?.[0];
+  if (orgId !== undefined) url.searchParams.set("orgIds", orgId);
   return url.toString();
 }
 

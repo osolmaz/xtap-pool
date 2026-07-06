@@ -70,7 +70,7 @@ export function AdminPanel(): React.JSX.Element {
         <h2 className="text-lg font-bold">Pool Admin</h2>
         <p className="text-sm text-(--x-muted)">
           {pool.members.length.toLocaleString()} members · {pool.admins.length.toLocaleString()}{" "}
-          admins · {pool.member_orgs.length.toLocaleString()} orgs
+          admins · {pool.member_orgs.length.toLocaleString()} org grant
         </p>
       </header>
 
@@ -170,12 +170,12 @@ export function AdminPanel(): React.JSX.Element {
           className="rounded-md bg-(--x-accent) px-3 py-2 text-sm font-semibold text-white"
           disabled={busy !== undefined}
         >
-          Add org
+          Set org
         </button>
       </form>
 
       <section>
-        <h3 className="mb-2 font-bold">Member Organizations</h3>
+        <h3 className="mb-2 font-bold">Member Organization</h3>
         <ul className="divide-y divide-(--x-border) border-y border-(--x-border)">
           {sortMemberOrgs(pool.member_orgs).map((org) => (
             <li key={org.sub} className="flex items-center justify-between gap-3 py-2">

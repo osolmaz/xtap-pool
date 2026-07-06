@@ -90,7 +90,7 @@ describe("PoolMembership", () => {
         orgs: [{ sub: "org-hf", name: "huggingface" }],
       }),
     ).toMatchObject({ type: "member_org", org: { name: "huggingface" } });
-    expect(membership.memberOrgIds()).toEqual(["org-hf"]);
+    expect(membership.memberOrgId()).toBe("org-hf");
     expect(membership.isAdmin("dana")).toBe(false);
     expect(membership.accessFor({ username: "erin", orgs: [{ sub: "org-other" }] })).toBe(
       undefined,
@@ -114,7 +114,7 @@ describe("PoolMembership", () => {
     expect(hub.commits[0]?.title).toBe("config: add pool member alice");
   });
 
-  it("commits member organization changes to config/pool.json", async () => {
+  it("commits one active member organization to config/pool.json", async () => {
     const membership = await PoolMembership.load({
       mirror,
       bootstrapMembers: ["osolmaz"],
@@ -129,11 +129,46 @@ describe("PoolMembership", () => {
     expect(membership.snapshot().member_orgs).toEqual([
       { name: "huggingface", sub: "org-hf", display_name: "Hugging Face" },
     ]);
-    expect(hub.commits[0]?.title).toBe("config: add member org huggingface");
+    expect(hub.commits[0]?.title).toBe("config: set member org huggingface");
 
-    await membership.removeMemberOrg("osolmaz", "huggingface");
+    await membership.addMemberOrg("osolmaz", {
+      name: "dutifuldev",
+      sub: "org-dutiful",
+      display_name: "Dutiful",
+    });
+    expect(membership.snapshot().member_orgs).toEqual([
+      { name: "dutifuldev", sub: "org-dutiful", display_name: "Dutiful" },
+    ]);
+    expect(membership.memberOrgId()).toBe("org-dutiful");
+    expect(hub.commits[1]?.title).toBe("config: set member org dutifuldev");
+
+    await membership.removeMemberOrg("osolmaz", "dutifuldev");
     expect(membership.snapshot().member_orgs).toEqual([]);
-    expect(hub.commits[1]?.title).toBe("config: remove member org huggingface");
+    expect(hub.commits[2]?.title).toBe("config: remove member org dutifuldev");
+  });
+
+  it("loads only the first configured member organization", async () => {
+    hub.files.set(
+      "config/pool.json",
+      JSON.stringify({
+        version: 1,
+        admins: ["carol"],
+        members: ["carol"],
+        member_orgs: [
+          { name: "huggingface", sub: "org-hf" },
+          { name: "dutifuldev", sub: "org-dutiful" },
+        ],
+        updated_at: NOW.toISOString(),
+      }),
+    );
+    const membership = await PoolMembership.load({
+      mirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+    expect(membership.snapshot().member_orgs).toEqual([{ name: "huggingface", sub: "org-hf" }]);
+    expect(membership.memberOrgId()).toBe("org-hf");
   });
 
   it("leaves membership unchanged when a config commit fails", async () => {

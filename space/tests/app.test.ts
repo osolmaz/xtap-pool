@@ -417,7 +417,7 @@ describe("admin pool management", () => {
     expect(bootstrapDemote.status).toBe(400);
   });
 
-  it("adds and removes member organizations", async () => {
+  it("sets and removes the member organization", async () => {
     const orgApp = createApp({
       config: testConfig,
       store,
@@ -427,8 +427,8 @@ describe("admin pool management", () => {
       resolveOrg: (orgName) =>
         Promise.resolve({
           name: orgName.toLowerCase(),
-          sub: "org-hf",
-          display_name: "Hugging Face",
+          sub: orgName.toLowerCase() === "dutifuldev" ? "org-dutiful" : "org-hf",
+          display_name: orgName.toLowerCase() === "dutifuldev" ? "Dutiful" : "Hugging Face",
         }),
     });
     const adminHeaders = { cookie: sessionCookie("osolmaz") };
@@ -448,7 +448,30 @@ describe("admin pool management", () => {
       ).status,
     ).toBe(200);
 
-    const removed = await orgApp.request("/api/admin/member-orgs/huggingface", {
+    const replaced = await orgApp.request("/api/admin/member-orgs/dutifuldev", {
+      method: "PUT",
+      headers: adminHeaders,
+    });
+    expect(replaced.status).toBe(200);
+    await expect(replaced.json()).resolves.toMatchObject({
+      pool: { member_orgs: [{ name: "dutifuldev", sub: "org-dutiful" }] },
+    });
+    expect(
+      (
+        await orgApp.request("/api/me", {
+          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await orgApp.request("/api/me", {
+          headers: { authorization: bearer("dana", [{ sub: "org-dutiful", name: "dutifuldev" }]) },
+        })
+      ).status,
+    ).toBe(200);
+
+    const removed = await orgApp.request("/api/admin/member-orgs/dutifuldev", {
       method: "DELETE",
       headers: adminHeaders,
     });

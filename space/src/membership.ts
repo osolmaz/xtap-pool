@@ -104,8 +104,14 @@ export class PoolMembership {
     return this.adminSet().has(normalizeUsername(username));
   }
 
+  memberOrgId(): string | undefined {
+    return normalizeMemberOrgs(this.config.member_orgs)[0]?.sub;
+  }
+
+  /** @deprecated xtap-pool only supports one active member organization. */
   memberOrgIds(): string[] {
-    return normalizeMemberOrgs(this.config.member_orgs).map((org) => org.sub);
+    const orgId = this.memberOrgId();
+    return orgId === undefined ? [] : [orgId];
   }
 
   snapshot(): PoolSnapshot {
@@ -191,14 +197,13 @@ export class PoolMembership {
   async addMemberOrg(actor: string, org: MemberOrgGrant): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
       const grant = normalizeMemberOrg(org);
-      if (this.memberOrgSet().has(grant.sub)) return this.snapshot();
+      const current = normalizeMemberOrgs(this.config.member_orgs)[0];
+      if (current?.sub === grant.sub) return this.snapshot();
       const nextConfig = {
         ...this.config,
-        member_orgs: [...normalizeMemberOrgs(this.config.member_orgs), grant].sort((a, b) =>
-          a.name.localeCompare(b.name),
-        ),
+        member_orgs: [grant],
       };
-      await this.commit(nextConfig, actor, `config: add member org ${grant.name}`);
+      await this.commit(nextConfig, actor, `config: set member org ${grant.name}`);
       return this.snapshot();
     });
   }
@@ -206,10 +211,9 @@ export class PoolMembership {
   async removeMemberOrg(actor: string, orgName: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
       const name = normalizeOrgName(orgName);
-      const nextOrgs = normalizeMemberOrgs(this.config.member_orgs).filter(
-        (org) => org.name !== name,
-      );
-      if (nextOrgs.length === this.config.member_orgs.length) return this.snapshot();
+      const currentOrgs = normalizeMemberOrgs(this.config.member_orgs);
+      const nextOrgs = currentOrgs.filter((org) => org.name !== name);
+      if (nextOrgs.length === currentOrgs.length) return this.snapshot();
       await this.commit(
         { ...this.config, member_orgs: nextOrgs },
         actor,
@@ -225,10 +229,6 @@ export class PoolMembership {
 
   private memberSet(): Set<string> {
     return new Set([...normalizeUsers(this.config.members), ...this.adminSet()]);
-  }
-
-  private memberOrgSet(): Set<string> {
-    return new Set(normalizeMemberOrgs(this.config.member_orgs).map((org) => org.sub));
   }
 
   private memberOrgFor(orgs: readonly PoolIdentityOrg[]): MemberOrgGrant | undefined {
@@ -296,11 +296,8 @@ function normalizeMemberOrg(org: MemberOrgGrant): MemberOrgGrant {
 }
 
 function normalizeMemberOrgs(orgs: readonly MemberOrgGrant[]): MemberOrgGrant[] {
-  const bySub = new Map<string, MemberOrgGrant>();
-  for (const org of orgs.map(normalizeMemberOrg)) {
-    bySub.set(org.sub, org);
-  }
-  return [...bySub.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const first = orgs.map(normalizeMemberOrg)[0];
+  return first === undefined ? [] : [first];
 }
 
 function normalizeIdentityOrgs(orgs: readonly PoolIdentityOrg[]): PoolIdentityOrg[] {

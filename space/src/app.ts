@@ -127,6 +127,7 @@ export function createApp(deps: AppDeps): Hono {
       path: "/",
       maxAge: 600,
     });
+    const orgId = membership.memberOrgId();
     return c.redirect(
       authorizeUrl(
         {
@@ -136,7 +137,7 @@ export function createApp(deps: AppDeps): Hono {
           redirectUri: `${config.publicUrl}/oauth/callback`,
         },
         state,
-        { orgIds: membership.memberOrgIds() },
+        orgId === undefined ? {} : { orgId },
       ),
     );
   });

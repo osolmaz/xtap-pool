@@ -144,7 +144,7 @@ describe("App", () => {
     await screen.findByText("@alice");
   });
 
-  it("lets admins add member organizations", async () => {
+  it("lets admins set the member organization", async () => {
     const routes: Record<string, (init?: RequestInit) => Response> = {
       "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
       "/api/contributors": () => Response.json({ contributors: [] }),
@@ -178,7 +178,7 @@ describe("App", () => {
     fireEvent.change(await screen.findByLabelText("Member organization"), {
       target: { value: "huggingface" },
     });
-    fireEvent.click(screen.getByText("Add org"));
+    fireEvent.click(screen.getByText("Set org"));
     await screen.findByText("@huggingface");
   });
 });

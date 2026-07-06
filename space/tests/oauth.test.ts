@@ -31,11 +31,16 @@ describe("authorizeUrl", () => {
     expect(url.searchParams.getAll("orgIds")).toEqual([]);
   });
 
-  it("adds configured organization ids to the authorize URL", () => {
+  it("adds one configured organization id to the authorize URL", () => {
+    const url = new URL(authorizeUrl(settings, "state-123", { orgId: "org-a" }));
+    expect(url.searchParams.getAll("orgIds")).toEqual(["org-a"]);
+  });
+
+  it("uses only the first deprecated organization id", () => {
     const url = new URL(
       authorizeUrl(settings, "state-123", { orgIds: ["org-b", "org-a", "org-b"] }),
     );
-    expect(url.searchParams.getAll("orgIds")).toEqual(["org-a", "org-b"]);
+    expect(url.searchParams.getAll("orgIds")).toEqual(["org-b"]);
   });
 });
 
