@@ -1,8 +1,14 @@
 type JsonObject = Record<string, unknown>;
 
 const FINE_GRAINED_ROLE = "fineGrained";
-const TARGET_PERMISSIONS = new Set(["repo.content.read", "repo.content.write"]);
-const REQUIRED_PERMISSIONS = ["repo.content.read", "repo.content.write"] as const;
+const TARGET_PERMISSIONS = new Set([
+  "repo.access.read",
+  "repo.content.read",
+  "repo.content.write",
+  "repo.write",
+]);
+const READ_PERMISSION = "repo.content.read";
+const WRITE_PERMISSIONS = ["repo.content.write", "repo.write"] as const;
 
 export type DatasetTokenReport =
   | {
@@ -44,10 +50,11 @@ export function evaluateDatasetWriteToken(
       : [`Token role is '${role || "unknown"}', expected fine-grained.`];
   errors.push(...globalPermissionErrors(fineGrained));
   const targetPermissions = scopedPermissionErrors(fineGrained, datasetRepo, errors);
-  for (const permission of REQUIRED_PERMISSIONS) {
-    if (!targetPermissions.has(permission)) {
-      errors.push(`Token must include ${permission} on ${datasetRepo}.`);
-    }
+  if (!targetPermissions.has(READ_PERMISSION)) {
+    errors.push(`Token must include ${READ_PERMISSION} on ${datasetRepo}.`);
+  }
+  if (!WRITE_PERMISSIONS.some((permission) => targetPermissions.has(permission))) {
+    errors.push(`Token must include ${WRITE_PERMISSIONS.join(" or ")} on ${datasetRepo}.`);
   }
   if (errors.length > 0) return { ok: false, errors };
   return {

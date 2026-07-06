@@ -33,6 +33,21 @@ describe("dataset token verification", () => {
     });
   });
 
+  it("accepts the current HF selected-repo write permission shape", () => {
+    const report = evaluateDatasetWriteToken(
+      whoami([
+        scope("alice/xtap-pool-data", ["repo.access.read", "repo.content.read", "repo.write"]),
+      ]),
+      "alice/xtap-pool-data",
+    );
+    expect(report).toEqual({
+      ok: true,
+      username: "owner",
+      tokenName: "dataset-writer",
+      permissions: ["repo.access.read", "repo.content.read", "repo.write"],
+    });
+  });
+
   it("accepts dataset entity names with a datasets prefix", () => {
     const report = evaluateDatasetWriteToken(
       whoami([scope("datasets/alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
