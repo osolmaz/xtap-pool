@@ -84,7 +84,9 @@ export function createApp(deps: AppDeps): Hono {
     return {
       username: identity.username,
       grant,
-      ...(identity.orgs === undefined ? {} : { orgs: identity.orgs }),
+      ...(grant.type === "member_org" && identity.orgs !== undefined
+        ? { orgs: identity.orgs }
+        : {}),
     };
   };
 

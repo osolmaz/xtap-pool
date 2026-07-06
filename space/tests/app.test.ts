@@ -283,6 +283,53 @@ describe("oauth + connect flow", () => {
     expect(ingestResponse.status).toBe(200);
   });
 
+  it("does not carry org claims into explicit member tokens", async () => {
+    await membership.addMemberOrg("osolmaz", {
+      name: "huggingface",
+      sub: "org-hf",
+      display_name: "Hugging Face",
+    });
+    const oauthFetch: typeof fetch = (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/oauth/token"))
+        return Promise.resolve(Response.json({ access_token: "t" }));
+      return Promise.resolve(
+        Response.json({
+          preferred_username: "alice",
+          orgs: [{ sub: "org-hf", preferred_username: "huggingface" }],
+        }),
+      );
+    };
+    const oauthApp = createApp({
+      config: testConfig,
+      store,
+      membership,
+      now: () => NOW,
+      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+      oauthFetch,
+    });
+
+    const success = await oauthApp.request("/oauth/callback?code=c&state=s1", {
+      headers: { cookie: "xtap_pool_oauth=s1|/connect" },
+    });
+    const cookie = sessionCookieFrom(success.headers.get("set-cookie"));
+    const connect = await oauthApp.request("/connect", { headers: { cookie } });
+    const html = await connect.text();
+    const match = /data-token="([^"]+)"/.exec(html);
+    expect(match).not.toBeNull();
+
+    await membership.removeMember("osolmaz", "alice");
+    const ingestResponse = await oauthApp.request("/api/ingest", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${match?.[1] ?? ""}`,
+      },
+      body: JSON.stringify({ tweets: [makeTweet()] }),
+    });
+    expect(ingestResponse.status).toBe(401);
+  });
+
   it("renders the connect page with a working pool token for a session", async () => {
     const response = await app.request("/connect", {
       headers: { cookie: sessionCookie("osolmaz") },
