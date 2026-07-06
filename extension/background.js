@@ -163,7 +163,11 @@ async function getTokenViaNative() {
         finish(null);
       }
     });
-    port.onDisconnect.addListener(() => finish(null));
+    port.onDisconnect.addListener(() => {
+      const err = chrome.runtime.lastError?.message;
+      if (err) console.warn(`[xTap] Native token bootstrap failed: ${err}`);
+      finish(null);
+    });
     try {
       port.postMessage({ type: 'GET_TOKEN' });
     } catch {
