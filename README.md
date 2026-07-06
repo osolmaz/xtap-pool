@@ -19,17 +19,23 @@ design and delivery plan.
 
 ## Set up a pool (once, by the pool owner)
 
-Requires a personal `hf auth login` with write access to the target namespace:
+Requires Node.js 22+, npm, the Hugging Face CLI, and a personal `hf auth login`
+with write access to the target namespace:
 
 ```sh
-scripts/deploy-space.sh <namespace>   # creates the dataset repo + Docker Space, sets secrets
+npm ci
+npm run setup
 ```
 
-The script prints the two remaining manual steps: storing a fine-grained
-`HF_TOKEN` Space secret (write access to the one dataset repo) and optionally
-seeding an existing xtap-store archive:
+The setup flow creates or updates the private dataset repo and public Docker
+Space, configures the Space variables and generated secrets, verifies the
+dataset-only `HF_TOKEN`, and can seed an existing xtap-store archive.
+
+The lower-level scripts are still available when you want to do those steps
+manually:
 
 ```sh
+scripts/deploy-space.sh <namespace>
 scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/xtap-store/data/tweets
 ```
 

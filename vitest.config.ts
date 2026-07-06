@@ -7,11 +7,23 @@ export default defineConfig({
     },
   },
   test: {
-    projects: ["shared/vitest.config.ts", "space/vitest.config.ts", "explorer/vitest.config.ts"],
+    projects: [
+      "shared/vitest.config.ts",
+      "space/vitest.config.ts",
+      "explorer/vitest.config.ts",
+      "setup/vitest.config.ts",
+    ],
     coverage: {
       provider: "v8",
-      include: ["shared/src/**", "space/src/**", "explorer/src/**"],
-      exclude: ["explorer/src/components/ui/**", "explorer/src/main.tsx", "space/src/server.ts"],
+      include: ["shared/src/**", "space/src/**", "explorer/src/**", "setup/src/**"],
+      exclude: [
+        "explorer/src/components/ui/**",
+        "explorer/src/main.tsx",
+        "setup/src/deploy.ts",
+        "setup/src/main.ts",
+        "setup/src/wizard.ts",
+        "space/src/server.ts",
+      ],
       thresholds: {
         lines: 85,
         functions: 85,

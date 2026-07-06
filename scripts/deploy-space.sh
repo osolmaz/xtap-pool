@@ -56,7 +56,7 @@ if "SECRETS_INITIALIZED" not in variables:
     api.add_space_variable(space, "SECRETS_INITIALIZED", "1")
 print("Set DATASET_REPO, ALLOWED_USERS, POOL_SIGNING_SECRET, SESSION_SECRET.")
 print("Remaining manual steps:")
-print(f"  1. Create a fine-grained token with write access to {dataset} only,")
+print(f"  1. Create a fine-grained token with read/write access to {dataset} only,")
 print(f"     then: python3 -c \"from huggingface_hub import HfApi; HfApi().add_space_secret('{space}', 'HF_TOKEN', '<token>')\"")
 print(f"  2. Optionally seed history: scripts/seed-dataset.sh {dataset} <hf-username> ~/xtap-store/data/tweets")
 PY

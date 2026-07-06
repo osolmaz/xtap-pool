@@ -53,7 +53,16 @@ jobs:
           npm run coverage --workspace explorer
           npm run dry --workspace explorer
           npm run mutate --workspace explorer
-      - run: npm run build --workspace explorer && npm run build --workspace space
+      - name: Check setup
+        run: |
+          npm run format --workspace setup
+          npm run lint --workspace setup
+          npm run typecheck --workspace setup
+          npm run test --workspace setup
+          npm run coverage --workspace setup
+          npm run dry --workspace setup
+          npm run mutate --workspace setup
+      - run: npm run build --workspace explorer && npm run build --workspace space && npm run build --workspace setup
       - name: Slophammer
         uses: dutifuldev/slophammer@main
         with:

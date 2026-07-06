@@ -178,8 +178,8 @@ buffering; ephemeral disk must never hold unpersisted data). Commits use
 `@huggingface/hub` `commit()` with retry; concurrent ingests serialized
 through a single writer queue.
 
-Config via Space secrets/variables: `HF_TOKEN` (fine-grained, write on the
-one dataset repo), `POOL_SIGNING_SECRET`, `SESSION_SECRET`, `ALLOWED_USERS`
+Config via Space secrets/variables: `HF_TOKEN` (fine-grained, read/write on
+the one dataset repo), `POOL_SIGNING_SECRET`, `SESSION_SECRET`, `ALLOWED_USERS`
 (comma-separated HF usernames), `DATASET_REPO`.
 
 README metadata: `sdk: docker`, `hf_oauth: true`, scopes `openid profile`.

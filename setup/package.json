@@ -1,0 +1,25 @@
+{
+  "name": "@xtap-pool/setup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "xtap-pool-setup": "dist/src/main.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "npm run build && npm run start",
+    "start": "node dist/src/main.js",
+    "format": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "dry": "cd .. && slophammer-ts dry .",
+    "mutate": "stryker run stryker.conf.json"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.11.0",
+    "@huggingface/hub": "^2.13.2"
+  }
+}

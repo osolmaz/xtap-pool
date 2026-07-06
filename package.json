@@ -6,19 +6,21 @@
   "workspaces": [
     "shared",
     "space",
-    "explorer"
+    "explorer",
+    "setup"
   ],
   "scripts": {
+    "setup": "npm run build --workspace setup && npm run start --workspace setup",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc --build shared space explorer",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc --build shared space explorer setup",
     "test": "vitest run",
     "test:extension": "node --test extension/tests/*.test.mjs",
     "coverage": "vitest run --coverage",
     "dry": "slophammer-ts dry .",
     "mutate": "stryker run",
-    "build": "npm run build --workspace explorer && npm run build --workspace space",
+    "build": "npm run build --workspace explorer && npm run build --workspace space && npm run build --workspace setup",
     "check": "npm run format && npm run lint && npm run typecheck && npm test && npm run test:extension && npm run test:extension:native && npm run coverage && npm run dry",
     "test:extension:native": "uvx pytest extension/tests -q"
   },

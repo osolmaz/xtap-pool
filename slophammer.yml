@@ -5,6 +5,7 @@ typescript:
       - shared/src
       - space/src
       - explorer/src
+      - setup/src
     exclude:
       - pattern: "explorer/src/components/ui/**"
         reason: "generated shadcn/ui primitives, exercised through component tests"
@@ -12,6 +13,12 @@ typescript:
         reason: "DOM bootstrap entrypoint with no branching logic"
       - pattern: "space/src/server.ts"
         reason: "process entrypoint wiring env to app factory, covered by integration boot test"
+      - pattern: "setup/src/deploy.ts"
+        reason: "network deployment orchestration, covered through lower-level setup helpers"
+      - pattern: "setup/src/main.ts"
+        reason: "CLI entrypoint wiring"
+      - pattern: "setup/src/wizard.ts"
+        reason: "interactive Clack prompts, covered through non-interactive helper tests"
       - pattern: "extension/**"
         reason: "vendored upstream xTap extension (vanilla JS), tested via node --test"
   complexity:
@@ -22,6 +29,7 @@ typescript:
       - shared/src
       - space/src
       - explorer/src
+      - setup/src
     exclude:
       - pattern: "explorer/src/components/ui/**"
         reason: "generated shadcn/ui primitives"
