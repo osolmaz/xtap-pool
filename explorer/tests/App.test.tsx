@@ -77,6 +77,10 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("hello world");
     expect(screen.getByText("signed in as @osolmaz")).toBeDefined();
+    expect(screen.getByText("Install extension")).toBeDefined();
+    expect(screen.getByText("Download repo").getAttribute("href")).toBe(
+      "https://github.com/dutifuldev/xtap-pool",
+    );
     expect(screen.getByText("Captured by")).toBeDefined();
   });
 

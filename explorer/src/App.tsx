@@ -13,6 +13,34 @@ type AuthState =
 
 type View = "feed" | "admin";
 
+function InstallExtension(): React.JSX.Element {
+  return (
+    <section className="mb-4 rounded-md border border-(--x-border) p-3 text-sm">
+      <h2 className="font-semibold">Install extension</h2>
+      <p className="mt-1 text-(--x-muted)">
+        Download the repo, open <code>chrome://extensions</code>, enable Developer mode, then Load
+        unpacked and choose <code>extension/</code>.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <a
+          className="rounded-md border border-(--x-border) px-3 py-1.5 font-semibold"
+          href="https://github.com/dutifuldev/xtap-pool"
+          rel="noreferrer"
+          target="_blank"
+        >
+          Download repo
+        </a>
+        <a
+          className="rounded-md bg-(--x-accent) px-3 py-1.5 font-semibold text-white"
+          href="/connect"
+        >
+          Connect
+        </a>
+      </div>
+    </section>
+  );
+}
+
 function SignIn(): React.JSX.Element {
   return (
     <main className="mx-auto flex max-w-md flex-col items-center gap-4 px-4 py-24 text-center">
@@ -103,6 +131,7 @@ export function App(): React.JSX.Element {
             </button>
           ) : null}
         </nav>
+        <InstallExtension />
         {view === "feed" ? (
           <FiltersPanel filters={filters} contributors={contributors} onChange={setFilters} />
         ) : null}
