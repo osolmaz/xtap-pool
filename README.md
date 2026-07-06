@@ -29,14 +29,14 @@ npm run setup
 
 The setup flow creates or updates the private dataset repo and public Docker
 Space, configures the Space variables and generated secrets, verifies the
-dataset-only `HF_TOKEN`, and can seed an existing xtap-store archive.
+dataset-only `HF_TOKEN`, and can import existing xTap JSONL files.
 
 The lower-level scripts are still available when you want to do those steps
 manually:
 
 ```sh
 scripts/deploy-space.sh <namespace>
-scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/xtap-store/data/tweets
+scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/Downloads/xtap
 ```
 
 Add friends by putting their HF usernames in the Space's `ALLOWED_USERS`

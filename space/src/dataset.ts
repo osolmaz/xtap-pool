@@ -131,7 +131,7 @@ export class DatasetMirror {
 
 /**
  * Parse one JSONL dataset file into stamped tweets. Tolerates legacy lines
- * (e.g. seeded from a personal xtap-store) that lack attribution stamps by
+ * (e.g. imported from local xTap output) that lack attribution stamps by
  * inferring the contributor from the file path (`data/<user>/...`) and
  * defaulting `pooled_at` to the capture time. Invalid lines are skipped.
  */

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export function defaultTweetsDirectory(home = homedir()): string {
-  return join(home, "xtap-store/data/tweets");
+  return join(home, "Downloads/xtap");
 }
 
 export function expandHomePath(value: string, home = homedir()): string {

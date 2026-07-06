@@ -69,7 +69,7 @@ behavior. HF OAuth (`hf_oauth: true`) works identically for Docker Spaces.
 
 ## Data model
 
-### Dataset repo layout (mirrors `xtap-store`)
+### Dataset repo layout
 
 ```
 data/<hf-username>/YYYY/MM/tweets-YYYY-MM-DD.jsonl
@@ -222,7 +222,7 @@ Each phase lands as commits on this PR's branch; the PR stays green.
 1. **Scaffolding** — pnpm workspaces (`shared`, `space`, `explorer`),
    slophammer config + CI, strict TS/ESLint/Vitest baselines.
 2. **Shared schema** — tweet types + zod validators + fixtures drawn from
-   real xtap-store data (sanitized); unit tests.
+   real xTap output data (sanitized); unit tests.
 3. **Space backend** — OAuth + sessions + allowlist, pool tokens, ingest
    pipeline (validate → stamp → dedup → JSONL append → hub commit), SQLite
    index + query API, boot-time rebuild. Hub layer mocked in tests; real
@@ -234,8 +234,8 @@ Each phase lands as commits on this PR's branch; the PR stays green.
    popup/options additions; Vitest/node tests for queue and flush logic.
 6. **Deploy + E2E** — create private dataset repo + private Docker Space
    under the `dutifuldev` HF org (exists already; friends never need org
-   membership — the allowlist governs access), set secrets, seed with
-   existing `~/xtap-store` data under `data/osolmaz/`, live round-trip:
+   membership — the allowlist governs access), set secrets, import existing
+   xTap output under `data/osolmaz/`, live round-trip:
    connect → ingest fixture batch → verify dataset commit → explore in UI.
 
 ## Testing

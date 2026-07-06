@@ -94,7 +94,7 @@ describe("day bucketing", () => {
     expect(dayKey("2026-05-21T23:59:59.999-02:00")).toBe("2026-05-22");
   });
 
-  it("builds xtap-store compatible paths", () => {
+  it("builds pool dataset paths", () => {
     expect(datasetPathFor("osolmaz", "2026-05-21T03:04:35.954Z")).toBe(
       "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
     );

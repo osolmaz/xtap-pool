@@ -34,7 +34,7 @@ describe("parseJsonlTweets", () => {
     expect(tweets[0]?.pooled_at).toBe(pooled.pooled_at);
   });
 
-  it("infers attribution for legacy xtap-store lines from the path", () => {
+  it("infers attribution for legacy xTap lines from the path", () => {
     const legacy = makeTweet();
     const tweets = parseJsonlTweets(
       `${JSON.stringify(legacy)}\n`,

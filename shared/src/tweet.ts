@@ -73,8 +73,8 @@ export function dayKey(capturedAt: string): string {
 }
 
 /**
- * Dataset-repo path of the daily JSONL file for a contributor, mirroring the
- * xtap-store layout: `data/<user>/YYYY/MM/tweets-YYYY-MM-DD.jsonl`.
+ * Dataset-repo path of the daily JSONL file for a contributor:
+ * `data/<user>/YYYY/MM/tweets-YYYY-MM-DD.jsonl`.
  */
 export function datasetPathFor(contributedBy: string, capturedAt: string): string {
   const day = dayKey(capturedAt);

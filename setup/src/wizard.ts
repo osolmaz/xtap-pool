@@ -120,15 +120,15 @@ async function promptDatasetToken(datasetRepo: string): Promise<string> {
 
 async function maybeSeed(root: string, config: SetupConfig): Promise<void> {
   const seed = await confirm({
-    message: "Seed an existing xTap archive now?",
+    message: "Import existing xTap JSONL files now?",
     initialValue: false,
   });
   if (isCancel(seed) || !seed) return;
   const username = await promptText(
-    "Seed data belongs to which HF user?",
+    "Imported tweets belong to which HF user?",
     config.allowedUsers[0] ?? config.namespace,
   );
-  const source = await promptText("Existing tweets directory", defaultTweetsDirectory());
+  const source = await promptText("Existing xTap output directory", defaultTweetsDirectory());
   await inheritCommand(
     "scripts/seed-dataset.sh",
     [config.datasetRepo, username, expandHomePath(source)],
