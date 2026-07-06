@@ -26,6 +26,7 @@ jobs:
       - run: npm run coverage
       - run: npm run dry
       - run: npm run mutate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       - name: Check shared
         run: |
           npm run format --workspace shared
@@ -34,7 +35,11 @@ jobs:
           npm run test --workspace shared
           npm run coverage --workspace shared
           npm run dry --workspace shared
-          npm run mutate --workspace shared
+          if [ "$RUN_MUTATION_TESTS" = "true" ]; then
+            npm run mutate --workspace shared
+          fi
+        env:
+          RUN_MUTATION_TESTS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check space
         run: |
           npm run format --workspace space
@@ -43,7 +48,11 @@ jobs:
           npm run test --workspace space
           npm run coverage --workspace space
           npm run dry --workspace space
-          npm run mutate --workspace space
+          if [ "$RUN_MUTATION_TESTS" = "true" ]; then
+            npm run mutate --workspace space
+          fi
+        env:
+          RUN_MUTATION_TESTS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check explorer
         run: |
           npm run format --workspace explorer
@@ -52,7 +61,11 @@ jobs:
           npm run test --workspace explorer
           npm run coverage --workspace explorer
           npm run dry --workspace explorer
-          npm run mutate --workspace explorer
+          if [ "$RUN_MUTATION_TESTS" = "true" ]; then
+            npm run mutate --workspace explorer
+          fi
+        env:
+          RUN_MUTATION_TESTS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check setup
         run: |
           npm run format --workspace setup
@@ -61,7 +74,11 @@ jobs:
           npm run test --workspace setup
           npm run coverage --workspace setup
           npm run dry --workspace setup
-          npm run mutate --workspace setup
+          if [ "$RUN_MUTATION_TESTS" = "true" ]; then
+            npm run mutate --workspace setup
+          fi
+        env:
+          RUN_MUTATION_TESTS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: npm run build --workspace explorer && npm run build --workspace space && npm run build --workspace setup
       - name: Slophammer
         uses: dutifuldev/slophammer@main
