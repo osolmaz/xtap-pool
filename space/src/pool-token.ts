@@ -5,10 +5,17 @@ const PREFIX = "xp1";
 export type TokenPayload = {
   username: string;
   expiresAt: number;
+  orgs?: readonly TokenOrg[];
+};
+
+export type TokenOrg = {
+  sub: string;
+  name?: string;
 };
 
 export type TokenVerification =
-  { ok: true; username: string } | { ok: false; reason: "malformed" | "bad-signature" | "expired" };
+  | { ok: true; username: string; orgs: readonly TokenOrg[] }
+  | { ok: false; reason: "malformed" | "bad-signature" | "expired" };
 
 function b64url(data: Buffer | string): string {
   return Buffer.from(data).toString("base64url");
@@ -20,12 +27,38 @@ function sign(secret: string, payload: string): string {
 
 /**
  * Mint a stateless pool token: `xp1.<payload>.<signature>` where the payload
- * is base64url JSON `{username, expiresAt}` and the signature is
+ * is base64url JSON `{username, expiresAt, orgs?}` and the signature is
  * HMAC-SHA256 over `xp1.<payload>` with the pool signing secret.
  */
-export function mintPoolToken(secret: string, username: string, expiresAt: Date): string {
-  const payload = b64url(JSON.stringify({ username, expiresAt: expiresAt.getTime() }));
+export function mintPoolToken(
+  secret: string,
+  subject: string | { username: string; orgs?: readonly TokenOrg[] },
+  expiresAt: Date,
+): string {
+  const identity = typeof subject === "string" ? { username: subject } : subject;
+  const payload = b64url(
+    JSON.stringify({
+      username: identity.username,
+      expiresAt: expiresAt.getTime(),
+      ...(identity.orgs === undefined || identity.orgs.length === 0
+        ? {}
+        : { orgs: normalizeTokenOrgs(identity.orgs) }),
+    }),
+  );
   return `${PREFIX}.${payload}.${sign(secret, `${PREFIX}.${payload}`)}`;
+}
+
+function normalizeTokenOrgs(orgs: readonly TokenOrg[]): TokenOrg[] {
+  const bySub = new Map<string, TokenOrg>();
+  for (const org of orgs) {
+    const sub = org.sub.trim();
+    if (sub.length === 0) continue;
+    const normalized: TokenOrg = { sub };
+    const name = org.name?.trim();
+    if (name !== undefined && name.length > 0) normalized.name = name;
+    bySub.set(sub, normalized);
+  }
+  return [...bySub.values()];
 }
 
 function decodePayload(payload: string): TokenPayload | undefined {
@@ -41,7 +74,37 @@ function decodePayload(payload: string): TokenPayload | undefined {
     return undefined;
   }
   if (typeof candidate["expiresAt"] !== "number") return undefined;
-  return { username: candidate["username"], expiresAt: candidate["expiresAt"] };
+  const orgs = decodeOrgs(candidate["orgs"]);
+  if (orgs === undefined) return undefined;
+  return { username: candidate["username"], expiresAt: candidate["expiresAt"], orgs };
+}
+
+function decodeOrgs(raw: unknown): readonly TokenOrg[] | undefined {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return undefined;
+  const orgs: TokenOrg[] = [];
+  for (const item of raw) {
+    const org = decodeOrg(item);
+    if (org === undefined) return undefined;
+    orgs.push(org);
+  }
+  return normalizeTokenOrgs(orgs);
+}
+
+function decodeOrg(raw: unknown): TokenOrg | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate["sub"] !== "string" || candidate["sub"].length === 0) return undefined;
+  const org: TokenOrg = { sub: candidate["sub"] };
+  const name = decodeOptionalName(candidate["name"]);
+  if (name === undefined && candidate["name"] !== undefined) return undefined;
+  if (name !== undefined) org.name = name;
+  return org;
+}
+
+function decodeOptionalName(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
 function splitToken(token: string): [string, string, string] | undefined {
@@ -65,5 +128,5 @@ export function verifyPoolToken(secret: string, token: string, now: Date): Token
   const decoded = decodePayload(payload);
   if (decoded === undefined) return { ok: false, reason: "malformed" };
   if (decoded.expiresAt <= now.getTime()) return { ok: false, reason: "expired" };
-  return { ok: true, username: decoded.username };
+  return { ok: true, username: decoded.username, orgs: decoded.orgs ?? [] };
 }

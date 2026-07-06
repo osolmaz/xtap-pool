@@ -43,6 +43,7 @@ function poolResponse(members: readonly string[]): Response {
       version: 1,
       admins: ["osolmaz"],
       members,
+      member_orgs: [],
       bootstrap_admins: ["osolmaz"],
       updated_at: "2026-07-06T00:00:00.000Z",
       source: "dataset",
@@ -141,5 +142,43 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByText("Add member"));
     await screen.findByText("@alice");
+  });
+
+  it("lets admins add member organizations", async () => {
+    const routes: Record<string, (init?: RequestInit) => Response> = {
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+      "/api/admin/pool": () => poolResponse(["osolmaz"]),
+      "/api/admin/member-orgs/huggingface": (init) =>
+        init?.method === "PUT"
+          ? Response.json({
+              pool: {
+                version: 1,
+                admins: ["osolmaz"],
+                members: ["osolmaz"],
+                member_orgs: [{ name: "huggingface", sub: "org-hf", display_name: "Hugging Face" }],
+                bootstrap_admins: ["osolmaz"],
+                updated_at: "2026-07-06T00:00:00.000Z",
+                source: "dataset",
+              },
+              viewer: { username: "osolmaz" },
+            })
+          : new Response("missing", { status: 404 }),
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const path = url.split("?")[0] ?? url;
+      return Promise.resolve(routes[path]?.(init) ?? new Response("missing", { status: 404 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByText("Admin"));
+    fireEvent.change(await screen.findByLabelText("Member organization"), {
+      target: { value: "huggingface" },
+    });
+    fireEvent.click(screen.getByText("Add org"));
+    await screen.findByText("@huggingface");
   });
 });

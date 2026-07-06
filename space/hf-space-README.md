@@ -25,6 +25,7 @@ Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
 comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
 (auto-injected by HF).
 
-After setup, admins manage members in the Space Admin tab. Durable membership is
-stored in the private dataset repo at `config/pool.json`; the Space variables
-are kept as bootstrap and recovery inputs.
+After setup, admins manage individual members and allowed member organizations
+in the Space Admin tab. Durable membership is stored in the private dataset repo
+at `config/pool.json`; the Space variables are kept as bootstrap and recovery
+inputs.

@@ -66,6 +66,37 @@ describe("PoolMembership", () => {
     expect(membership.isMember("alice")).toBe(false);
   });
 
+  it("authorizes identities through member organization grants", async () => {
+    hub.files.set(
+      "config/pool.json",
+      JSON.stringify({
+        version: 1,
+        admins: ["carol"],
+        members: ["carol"],
+        member_orgs: [{ name: "huggingface", sub: "org-hf", display_name: "Hugging Face" }],
+        updated_at: NOW.toISOString(),
+      }),
+    );
+    const membership = await PoolMembership.load({
+      mirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+
+    expect(
+      membership.accessFor({
+        username: "dana",
+        orgs: [{ sub: "org-hf", name: "huggingface" }],
+      }),
+    ).toMatchObject({ type: "member_org", org: { name: "huggingface" } });
+    expect(membership.memberOrgIds()).toEqual(["org-hf"]);
+    expect(membership.isAdmin("dana")).toBe(false);
+    expect(membership.accessFor({ username: "erin", orgs: [{ sub: "org-other" }] })).toBe(
+      undefined,
+    );
+  });
+
   it("commits member changes to config/pool.json", async () => {
     const membership = await PoolMembership.load({
       mirror,
@@ -81,6 +112,28 @@ describe("PoolMembership", () => {
       updated_by: "osolmaz",
     });
     expect(hub.commits[0]?.title).toBe("config: add pool member alice");
+  });
+
+  it("commits member organization changes to config/pool.json", async () => {
+    const membership = await PoolMembership.load({
+      mirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+    await membership.addMemberOrg("osolmaz", {
+      name: "HuggingFace",
+      sub: "org-hf",
+      display_name: "Hugging Face",
+    });
+    expect(membership.snapshot().member_orgs).toEqual([
+      { name: "huggingface", sub: "org-hf", display_name: "Hugging Face" },
+    ]);
+    expect(hub.commits[0]?.title).toBe("config: add member org huggingface");
+
+    await membership.removeMemberOrg("osolmaz", "huggingface");
+    expect(membership.snapshot().member_orgs).toEqual([]);
+    expect(hub.commits[1]?.title).toBe("config: remove member org huggingface");
   });
 
   it("leaves membership unchanged when a config commit fails", async () => {

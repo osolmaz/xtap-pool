@@ -4,10 +4,13 @@ import type { PoolSnapshot } from "../lib/api.js";
 import {
   addPoolAdmin,
   addPoolMember,
+  addPoolMemberOrg,
   fetchAdminPool,
   removePoolAdmin,
   removePoolMember,
+  removePoolMemberOrg,
 } from "../lib/api.js";
+import type { MemberOrgGrant } from "../lib/api.js";
 
 type AdminState =
   | { status: "loading" }
@@ -18,10 +21,15 @@ function sortUsers(users: readonly string[]): string[] {
   return [...users].sort((a, b) => a.localeCompare(b));
 }
 
+function sortMemberOrgs(orgs: readonly MemberOrgGrant[]): MemberOrgGrant[] {
+  return [...orgs].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function AdminPanel(): React.JSX.Element {
   const [state, setState] = useState<AdminState>({ status: "loading" });
   const [memberInput, setMemberInput] = useState("");
   const [adminInput, setAdminInput] = useState("");
+  const [orgInput, setOrgInput] = useState("");
 
   useEffect(() => {
     void fetchAdminPool().then(
@@ -62,7 +70,7 @@ export function AdminPanel(): React.JSX.Element {
         <h2 className="text-lg font-bold">Pool Admin</h2>
         <p className="text-sm text-(--x-muted)">
           {pool.members.length.toLocaleString()} members · {pool.admins.length.toLocaleString()}{" "}
-          admins
+          admins · {pool.member_orgs.length.toLocaleString()} orgs
         </p>
       </header>
 
@@ -133,6 +141,60 @@ export function AdminPanel(): React.JSX.Element {
                   </button>
                 ) : null}
               </div>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const orgName = orgInput.trim();
+          if (orgName === "") return;
+          setOrgInput("");
+          void mutate(`member-org:${orgName}`, () => addPoolMemberOrg(orgName));
+        }}
+      >
+        <input
+          aria-label="Member organization"
+          className="min-w-0 flex-1 rounded-md border border-(--x-border) bg-(--x-soft) px-3 py-2 text-sm outline-none focus:border-(--x-accent)"
+          placeholder="HF organization"
+          value={orgInput}
+          onChange={(event) => {
+            setOrgInput(event.target.value);
+          }}
+        />
+        <button
+          type="submit"
+          className="rounded-md bg-(--x-accent) px-3 py-2 text-sm font-semibold text-white"
+          disabled={busy !== undefined}
+        >
+          Add org
+        </button>
+      </form>
+
+      <section>
+        <h3 className="mb-2 font-bold">Member Organizations</h3>
+        <ul className="divide-y divide-(--x-border) border-y border-(--x-border)">
+          {sortMemberOrgs(pool.member_orgs).map((org) => (
+            <li key={org.sub} className="flex items-center justify-between gap-3 py-2">
+              <span>
+                @{org.name}
+                {org.display_name === undefined ? null : (
+                  <span className="ml-2 text-sm text-(--x-muted)">{org.display_name}</span>
+                )}
+              </span>
+              <button
+                type="button"
+                className="rounded-md border border-(--x-border) px-2 py-1 text-sm"
+                disabled={busy !== undefined}
+                onClick={() => {
+                  void mutate(`member-org:${org.name}`, () => removePoolMemberOrg(org.name));
+                }}
+              >
+                Remove
+              </button>
             </li>
           ))}
         </ul>

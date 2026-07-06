@@ -59,10 +59,13 @@ scripts/deploy-space.sh <namespace>
 scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/Downloads/xtap
 ```
 
-After setup, admins manage pool users from the Space's **Admin** tab. The Space
-stores membership in `config/pool.json` inside the private dataset repo, so
-adding friends does not require CLI access, repo permissions, org membership, or
-a Space restart. `ALLOWED_USERS` and `POOL_ADMINS` remain bootstrap/recovery
+After setup, admins manage pool users and allowed Hugging Face organizations
+from the Space's **Admin** tab. The Space stores membership in
+`config/pool.json` inside the private dataset repo, so adding friends does not
+require CLI access, repo permissions, or a Space restart. Individual users and
+members of allowed organizations can connect through HF sign-in; org-based pool
+tokens are shorter-lived so removed org members eventually lose access without
+manual cleanup. `ALLOWED_USERS` and `POOL_ADMINS` remain bootstrap/recovery
 variables for first setup and break-glass access.
 
 ## Join a pool (each friend)

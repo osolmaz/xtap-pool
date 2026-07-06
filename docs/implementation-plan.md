@@ -112,24 +112,27 @@ Target friend onboarding: **install extension, one OAuth authorize, done.**
    **"Sign in with Hugging Face"** (one click if already logged into HF).
    Everything beyond the sign-in page is enforced in-app by the allowlist;
    the dataset repo stays private.
-4. `/connect` verifies the username against the pool membership config,
-   mints a **pool token**, and renders it in the page DOM.
+4. `/connect` verifies the HF identity against the pool membership config
+   (individual users plus allowed HF organizations), mints a **pool token**,
+   and renders it in the page DOM.
 5. A content script (matching the Space origin only) picks the token up
    automatically and stores it in `chrome.storage.local`. Popup flips to
    "Connected as @user". **No copy-paste, no manual HF token creation.**
 
 Pool token design: stateless signed token (HMAC-SHA256 with a Space secret;
-payload = username + issued-at + expiry ~180 days). The Space verifies
-signatures without any user database. Revocation = rotate the signing secret
-(re-connect is one click) — acceptable at friend scale. A "paste token
+payload = username + expiry + optional OAuth-proven organization IDs). The
+Space verifies signatures against current pool membership. Explicit user tokens
+last ~180 days; organization-derived tokens are shorter-lived so org removals
+take effect without keeping HF access tokens. Revocation = remove the user/org
+grant or rotate the signing secret (re-connect is one click). A "paste token
 manually" field in extension options is the fallback for browsers where the
 content-script handoff fails.
 
-Explorer access: same private-Space HF login; session cookie (signed,
-httpOnly) issued after OAuth. Friends need **zero** repo permissions —
-the allowlist variable is the entire membership system. Optionally friends
-can also be given read access on the dataset repo for `load_dataset`/DuckDB
-power use; not required for any flow.
+Explorer access: same HF login; session cookie (signed, httpOnly) issued after
+OAuth. Friends need **zero** repo permissions — the app-level pool membership
+config is the entire access system. Optionally friends can also be given read
+access on the dataset repo for `load_dataset`/DuckDB power use; not required for
+any flow.
 
 ## Components
 

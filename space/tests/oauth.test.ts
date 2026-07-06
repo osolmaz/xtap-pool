@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { authorizeUrl, exchangeCodeForUsername } from "../src/oauth.js";
+import { authorizeUrl, exchangeCodeForIdentity, exchangeCodeForUsername } from "../src/oauth.js";
 import type { OAuthSettings } from "../src/oauth.js";
 
 const settings: OAuthSettings = {
@@ -28,6 +28,14 @@ describe("authorizeUrl", () => {
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("scope")).toBe("openid profile");
     expect(url.searchParams.get("state")).toBe("state-123");
+    expect(url.searchParams.getAll("orgIds")).toEqual([]);
+  });
+
+  it("adds configured organization ids to the authorize URL", () => {
+    const url = new URL(
+      authorizeUrl(settings, "state-123", { orgIds: ["org-b", "org-a", "org-b"] }),
+    );
+    expect(url.searchParams.getAll("orgIds")).toEqual(["org-a", "org-b"]);
   });
 });
 
@@ -40,6 +48,28 @@ describe("exchangeCodeForUsername", () => {
     await expect(exchangeCodeForUsername({ ...settings, fetchFn }, "code")).resolves.toBe(
       "osolmaz",
     );
+  });
+
+  it("returns stable organization identities from userinfo", async () => {
+    const fetchFn = fakeFetch(
+      () => Response.json({ access_token: "at" }),
+      () =>
+        Response.json({
+          preferred_username: "osolmaz",
+          orgs: [{ sub: "org-hf", preferred_username: "HuggingFace" }],
+          organizations: [
+            { sub: "org-hf", preferred_username: "huggingface" },
+            { sub: "org-other", name: "OtherOrg" },
+          ],
+        }),
+    );
+    await expect(exchangeCodeForIdentity({ ...settings, fetchFn }, "code")).resolves.toEqual({
+      username: "osolmaz",
+      orgs: [
+        { sub: "org-hf", name: "huggingface" },
+        { sub: "org-other", name: "otherorg" },
+      ],
+    });
   });
 
   it("authenticates the client with HTTP Basic on the token exchange", async () => {

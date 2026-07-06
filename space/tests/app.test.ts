@@ -22,12 +22,19 @@ let store: TweetStore;
 let app: Hono;
 let membership: PoolMembership;
 
-function sessionCookie(username: string): string {
-  return `xtap_pool_session=${mintPoolToken(testConfig.sessionSecret, username, FUTURE)}`;
+function sessionCookie(
+  username: string,
+  orgs: readonly { sub: string; name?: string }[] = [],
+): string {
+  return `xtap_pool_session=${mintPoolToken(testConfig.sessionSecret, { username, orgs }, FUTURE)}`;
 }
 
-function bearer(username: string): string {
-  return `Bearer ${mintPoolToken(testConfig.poolSigningSecret, username, FUTURE)}`;
+function bearer(username: string, orgs: readonly { sub: string; name?: string }[] = []): string {
+  return `Bearer ${mintPoolToken(testConfig.poolSigningSecret, { username, orgs }, FUTURE)}`;
+}
+
+function sessionCookieFrom(setCookie: string | null): string {
+  return /xtap_pool_session=[^;,]+/.exec(setCookie ?? "")?.[0] ?? "";
 }
 
 beforeEach(async () => {
@@ -221,6 +228,61 @@ describe("oauth + connect flow", () => {
     expect(response.status).toBe(403);
   });
 
+  it("callback accepts member organization users and mints usable pool tokens", async () => {
+    await membership.addMemberOrg("osolmaz", {
+      name: "huggingface",
+      sub: "org-hf",
+      display_name: "Hugging Face",
+    });
+    const oauthFetch: typeof fetch = (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/oauth/token"))
+        return Promise.resolve(Response.json({ access_token: "t" }));
+      return Promise.resolve(
+        Response.json({
+          preferred_username: "dana",
+          orgs: [{ sub: "org-hf", preferred_username: "huggingface" }],
+        }),
+      );
+    };
+    const oauthApp = createApp({
+      config: testConfig,
+      store,
+      membership,
+      now: () => NOW,
+      ingest: (username, payload) =>
+        new Mutex().run(() =>
+          ingestBatch(
+            { store, mirror: new DatasetMirror(hub, dir), now: () => NOW },
+            username,
+            payload,
+          ),
+        ),
+      oauthFetch,
+    });
+
+    const success = await oauthApp.request("/oauth/callback?code=c&state=s1", {
+      headers: { cookie: "xtap_pool_oauth=s1|/connect" },
+    });
+    expect(success.status).toBe(302);
+    const cookie = sessionCookieFrom(success.headers.get("set-cookie"));
+    expect(cookie).toContain("xtap_pool_session=");
+    const connect = await oauthApp.request("/connect", { headers: { cookie } });
+    const html = await connect.text();
+    const match = /data-token="([^"]+)"/.exec(html);
+    expect(match).not.toBeNull();
+
+    const ingestResponse = await oauthApp.request("/api/ingest", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${match?.[1] ?? ""}`,
+      },
+      body: JSON.stringify({ tweets: [makeTweet()] }),
+    });
+    expect(ingestResponse.status).toBe(200);
+  });
+
   it("renders the connect page with a working pool token for a session", async () => {
     const response = await app.request("/connect", {
       headers: { cookie: sessionCookie("osolmaz") },
@@ -306,5 +368,50 @@ describe("admin pool management", () => {
       headers: adminHeaders,
     });
     expect(bootstrapDemote.status).toBe(400);
+  });
+
+  it("adds and removes member organizations", async () => {
+    const orgApp = createApp({
+      config: testConfig,
+      store,
+      membership,
+      now: () => NOW,
+      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+      resolveOrg: (orgName) =>
+        Promise.resolve({
+          name: orgName.toLowerCase(),
+          sub: "org-hf",
+          display_name: "Hugging Face",
+        }),
+    });
+    const adminHeaders = { cookie: sessionCookie("osolmaz") };
+    const added = await orgApp.request("/api/admin/member-orgs/huggingface", {
+      method: "PUT",
+      headers: adminHeaders,
+    });
+    expect(added.status).toBe(200);
+    await expect(added.json()).resolves.toMatchObject({
+      pool: { member_orgs: [{ name: "huggingface", sub: "org-hf" }] },
+    });
+    expect(
+      (
+        await orgApp.request("/api/me", {
+          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+        })
+      ).status,
+    ).toBe(200);
+
+    const removed = await orgApp.request("/api/admin/member-orgs/huggingface", {
+      method: "DELETE",
+      headers: adminHeaders,
+    });
+    expect(removed.status).toBe(200);
+    expect(
+      (
+        await orgApp.request("/api/me", {
+          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+        })
+      ).status,
+    ).toBe(401);
   });
 });

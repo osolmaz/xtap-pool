@@ -10,6 +10,8 @@ import {
   fetchTweets,
   removePoolAdmin,
   removePoolMember,
+  addPoolMemberOrg,
+  removePoolMemberOrg,
   tweetsQueryString,
 } from "../src/lib/api.js";
 
@@ -87,6 +89,7 @@ describe("api client", () => {
       version: 1,
       admins: ["osolmaz"],
       members: ["osolmaz"],
+      member_orgs: [{ name: "huggingface", sub: "org-hf", display_name: "Hugging Face" }],
       bootstrap_admins: ["osolmaz"],
       updated_at: "2026-07-06T00:00:00.000Z",
       source: "dataset",
@@ -107,5 +110,7 @@ describe("api client", () => {
     await expect(removePoolMember("alice")).resolves.toEqual(pool);
     await expect(addPoolAdmin("alice")).resolves.toEqual(pool);
     await expect(removePoolAdmin("alice")).resolves.toEqual(pool);
+    await expect(addPoolMemberOrg("huggingface")).resolves.toEqual(pool);
+    await expect(removePoolMemberOrg("huggingface")).resolves.toEqual(pool);
   });
 });

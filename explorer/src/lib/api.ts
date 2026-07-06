@@ -21,10 +21,17 @@ export type Me = {
   isAdmin: boolean;
 };
 
+export type MemberOrgGrant = {
+  name: string;
+  sub: string;
+  display_name?: string;
+};
+
 export type PoolSnapshot = {
   version: 1;
   admins: readonly string[];
   members: readonly string[];
+  member_orgs: readonly MemberOrgGrant[];
   bootstrap_admins: readonly string[];
   updated_at: string;
   updated_by?: string;
@@ -156,6 +163,24 @@ export async function removePoolAdmin(username: string): Promise<PoolSnapshot> {
   return (
     await sendJson<{ pool: PoolSnapshot }>(
       `/api/admin/admins/${encodeURIComponent(username)}`,
+      "DELETE",
+    )
+  ).pool;
+}
+
+export async function addPoolMemberOrg(orgName: string): Promise<PoolSnapshot> {
+  return (
+    await sendJson<{ pool: PoolSnapshot }>(
+      `/api/admin/member-orgs/${encodeURIComponent(orgName)}`,
+      "PUT",
+    )
+  ).pool;
+}
+
+export async function removePoolMemberOrg(orgName: string): Promise<PoolSnapshot> {
+  return (
+    await sendJson<{ pool: PoolSnapshot }>(
+      `/api/admin/member-orgs/${encodeURIComponent(orgName)}`,
       "DELETE",
     )
   ).pool;

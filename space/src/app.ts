@@ -8,9 +8,11 @@ import { z } from "zod";
 
 import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
-import { authorizeUrl, exchangeCodeForUsername } from "./oauth.js";
+import { createHuggingFaceOrgResolver } from "./hf-orgs.js";
+import type { OrgResolver } from "./hf-orgs.js";
 import type { IngestOutcome } from "./ingest.js";
-import type { PoolMembership } from "./membership.js";
+import type { PoolAccessGrant, PoolIdentity, PoolMembership } from "./membership.js";
+import { authorizeUrl, exchangeCodeForIdentity } from "./oauth.js";
 import { mintPoolToken, verifyPoolToken } from "./pool-token.js";
 import type { TweetStore, TweetQuery } from "./store.js";
 
@@ -18,6 +20,7 @@ const SESSION_COOKIE = "xtap_pool_session";
 const OAUTH_STATE_COOKIE = "xtap_pool_oauth";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const POOL_TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const ORG_GRANT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type AppDeps = {
   config: SpaceConfig;
@@ -26,6 +29,11 @@ export type AppDeps = {
   ingest: (username: string, payload: unknown) => Promise<IngestOutcome>;
   now?: () => Date;
   oauthFetch?: typeof fetch;
+  resolveOrg?: OrgResolver;
+};
+
+type AuthorizedIdentity = PoolIdentity & {
+  grant: PoolAccessGrant;
 };
 
 const tweetsQuerySchema = z.object({
@@ -67,26 +75,39 @@ function toTweetQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
 export function createApp(deps: AppDeps): Hono {
   const { config, store, membership } = deps;
   const now = deps.now ?? ((): Date => new Date());
+  const resolveOrg =
+    deps.resolveOrg ?? createHuggingFaceOrgResolver(config.openidProviderUrl, deps.oauthFetch);
 
-  const sessionUser = (c: Context): string | undefined => {
+  const authorizeIdentity = (identity: PoolIdentity): AuthorizedIdentity | undefined => {
+    const grant = membership.accessFor(identity);
+    if (grant === undefined) return undefined;
+    return {
+      username: identity.username,
+      grant,
+      ...(identity.orgs === undefined ? {} : { orgs: identity.orgs }),
+    };
+  };
+
+  const sessionIdentity = (c: Context): AuthorizedIdentity | undefined => {
     const cookie = getCookie(c, SESSION_COOKIE);
     if (cookie === undefined) return undefined;
     const verified = verifyPoolToken(config.sessionSecret, cookie, now());
-    return verified.ok && membership.isMember(verified.username) ? verified.username : undefined;
+    return verified.ok ? authorizeIdentity(verified) : undefined;
   };
 
-  const bearerUser = (c: Context): string | undefined => {
+  const bearerIdentity = (c: Context): AuthorizedIdentity | undefined => {
     const header = c.req.header("authorization");
     if (header?.toLowerCase().startsWith("bearer ") !== true) return undefined;
     const verified = verifyPoolToken(config.poolSigningSecret, header.slice(7).trim(), now());
-    return verified.ok && membership.isMember(verified.username) ? verified.username : undefined;
+    return verified.ok ? authorizeIdentity(verified) : undefined;
   };
 
   const adminUser = (c: Context): string | Response => {
-    const username = sessionUser(c);
-    if (username === undefined) return c.json({ error: "unauthenticated" }, 401);
-    if (!membership.isAdmin(username)) return c.json({ error: "admin access required" }, 403);
-    return username;
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    if (!membership.isAdmin(identity.username))
+      return c.json({ error: "admin access required" }, 403);
+    return identity.username;
   };
 
   const app = new Hono();
@@ -113,6 +134,7 @@ export function createApp(deps: AppDeps): Hono {
           redirectUri: `${config.publicUrl}/oauth/callback`,
         },
         state,
+        { orgIds: membership.memberOrgIds() },
       ),
     );
   });
@@ -135,49 +157,52 @@ export function createApp(deps: AppDeps): Hono {
       redirectUri: `${config.publicUrl}/oauth/callback`,
       ...(deps.oauthFetch === undefined ? {} : { fetchFn: deps.oauthFetch }),
     };
-    const username = await exchangeCodeForUsername(settings, code);
-    if (username === undefined) return c.text("oauth exchange failed", 401);
-    if (!membership.isMember(username)) {
-      return c.text(`@${username} is not on this pool's allowlist`, 403);
+    const identity = await exchangeCodeForIdentity(settings, code);
+    if (identity === undefined) return c.text("oauth exchange failed", 401);
+    const authorized = authorizeIdentity(identity);
+    if (authorized === undefined) {
+      return c.text(`@${identity.username} is not on this pool's allowlist`, 403);
     }
+    const sessionTtl = tokenTtlForGrant(authorized.grant, SESSION_TTL_MS);
     const session = mintPoolToken(
       config.sessionSecret,
-      username,
-      new Date(now().getTime() + SESSION_TTL_MS),
+      authorized,
+      new Date(now().getTime() + sessionTtl),
     );
     setCookie(c, SESSION_COOKIE, session, {
       httpOnly: true,
       secure: true,
       sameSite: "Lax",
       path: "/",
-      maxAge: SESSION_TTL_MS / 1000,
+      maxAge: sessionTtl / 1000,
     });
     return c.redirect(next);
   });
 
   app.get("/connect", (c) => {
-    const username = sessionUser(c);
-    if (username === undefined) return c.redirect("/oauth/login?next=/connect");
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.redirect("/oauth/login?next=/connect");
+    const poolTokenTtl = tokenTtlForGrant(identity.grant, POOL_TOKEN_TTL_MS);
     const token = mintPoolToken(
       config.poolSigningSecret,
-      username,
-      new Date(now().getTime() + POOL_TOKEN_TTL_MS),
+      identity,
+      new Date(now().getTime() + poolTokenTtl),
     );
-    return c.html(renderConnectPage(username, token));
+    return c.html(renderConnectPage(identity.username, token));
   });
 
   app.use("/api/*", cors({ origin: "*", allowHeaders: ["authorization", "content-type"] }));
 
   app.post("/api/ingest", async (c) => {
-    const username = bearerUser(c);
-    if (username === undefined) return c.json({ error: "invalid or missing pool token" }, 401);
+    const identity = bearerIdentity(c);
+    if (identity === undefined) return c.json({ error: "invalid or missing pool token" }, 401);
     let payload: unknown;
     try {
       payload = await c.req.json();
     } catch {
       return c.json({ error: "body must be JSON" }, 400);
     }
-    const outcome = await deps.ingest(username, payload);
+    const outcome = await deps.ingest(identity.username, payload);
     if (!outcome.ok) return c.json({ error: outcome.error }, outcome.status);
     return c.json({
       added: outcome.added,
@@ -187,14 +212,14 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/me", (c) => {
-    const username = bearerUser(c) ?? sessionUser(c);
-    if (username === undefined) return c.json({ error: "unauthenticated" }, 401);
-    return c.json({ username, isAdmin: membership.isAdmin(username) });
+    const identity = bearerIdentity(c) ?? sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    return c.json({ username: identity.username, isAdmin: membership.isAdmin(identity.username) });
   });
 
   app.get("/api/tweets", (c) => {
-    const username = sessionUser(c);
-    if (username === undefined) return c.json({ error: "unauthenticated" }, 401);
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
     const parsed = tweetsQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
     const page = store.query(toTweetQuery(parsed.data));
@@ -202,8 +227,8 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/contributors", (c) => {
-    const username = sessionUser(c);
-    if (username === undefined) return c.json({ error: "unauthenticated" }, 401);
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
     return c.json({ contributors: store.contributors() });
   });
 
@@ -253,7 +278,33 @@ export function createApp(deps: AppDeps): Hono {
     }
   });
 
+  app.put("/api/admin/member-orgs/:org", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      return c.json({
+        pool: await membership.addMemberOrg(actor, await resolveOrg(c.req.param("org"))),
+      });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.delete("/api/admin/member-orgs/:org", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      return c.json({ pool: await membership.removeMemberOrg(actor, c.req.param("org")) });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
   return app;
+}
+
+function tokenTtlForGrant(grant: PoolAccessGrant, fallback: number): number {
+  return grant.type === "member_org" ? ORG_GRANT_TOKEN_TTL_MS : fallback;
 }
 
 function errorMessage(error: unknown): string {

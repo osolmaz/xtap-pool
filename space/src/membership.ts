@@ -6,15 +6,36 @@ export const POOL_CONFIG_PATH = "config/pool.json";
 
 const USERNAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+const memberOrgSchema = z.object({
+  name: z.string(),
+  sub: z.string().min(1),
+  display_name: z.string().min(1).optional(),
+});
+
 const poolConfigSchema = z.object({
   version: z.literal(1),
   admins: z.array(z.string()).default([]),
   members: z.array(z.string()).default([]),
+  member_orgs: z.array(memberOrgSchema).default([]),
   updated_at: z.string(),
   updated_by: z.string().optional(),
 });
 
 export type PoolConfig = z.infer<typeof poolConfigSchema>;
+export type MemberOrgGrant = z.infer<typeof memberOrgSchema>;
+
+export type PoolIdentityOrg = {
+  sub: string;
+  name?: string;
+};
+
+export type PoolIdentity = {
+  username: string;
+  orgs?: readonly PoolIdentityOrg[];
+};
+
+export type PoolAccessGrant =
+  { type: "admin" } | { type: "member" } | { type: "member_org"; org: MemberOrgGrant };
 
 export type PoolSnapshot = PoolConfig & {
   bootstrap_admins: readonly string[];
@@ -69,8 +90,22 @@ export class PoolMembership {
     return this.memberSet().has(normalizeUsername(username));
   }
 
+  accessFor(identity: PoolIdentity): PoolAccessGrant | undefined {
+    const user = normalizeUsername(identity.username);
+    if (this.adminSet().has(user)) return { type: "admin" };
+    if (normalizeUsers(this.config.members).includes(user)) return { type: "member" };
+
+    const matchingOrg = this.memberOrgFor(identity.orgs ?? []);
+    if (matchingOrg !== undefined) return { type: "member_org", org: matchingOrg };
+    return undefined;
+  }
+
   isAdmin(username: string): boolean {
     return this.adminSet().has(normalizeUsername(username));
+  }
+
+  memberOrgIds(): string[] {
+    return normalizeMemberOrgs(this.config.member_orgs).map((org) => org.sub);
   }
 
   snapshot(): PoolSnapshot {
@@ -80,6 +115,7 @@ export class PoolMembership {
       version: 1,
       admins,
       members,
+      member_orgs: normalizeMemberOrgs(this.config.member_orgs),
       updated_at: this.config.updated_at,
       bootstrap_admins: this.bootstrapAdmins,
       source: this.source,
@@ -152,12 +188,58 @@ export class PoolMembership {
     });
   }
 
+  async addMemberOrg(actor: string, org: MemberOrgGrant): Promise<PoolSnapshot> {
+    return this.enqueueMutation(async () => {
+      const grant = normalizeMemberOrg(org);
+      if (this.memberOrgSet().has(grant.sub)) return this.snapshot();
+      const nextConfig = {
+        ...this.config,
+        member_orgs: [...normalizeMemberOrgs(this.config.member_orgs), grant].sort((a, b) =>
+          a.name.localeCompare(b.name),
+        ),
+      };
+      await this.commit(nextConfig, actor, `config: add member org ${grant.name}`);
+      return this.snapshot();
+    });
+  }
+
+  async removeMemberOrg(actor: string, orgName: string): Promise<PoolSnapshot> {
+    return this.enqueueMutation(async () => {
+      const name = normalizeOrgName(orgName);
+      const nextOrgs = normalizeMemberOrgs(this.config.member_orgs).filter(
+        (org) => org.name !== name,
+      );
+      if (nextOrgs.length === this.config.member_orgs.length) return this.snapshot();
+      await this.commit(
+        { ...this.config, member_orgs: nextOrgs },
+        actor,
+        `config: remove member org ${name}`,
+      );
+      return this.snapshot();
+    });
+  }
+
   private adminSet(): Set<string> {
     return new Set([...normalizeUsers(this.config.admins), ...this.bootstrapAdmins]);
   }
 
   private memberSet(): Set<string> {
     return new Set([...normalizeUsers(this.config.members), ...this.adminSet()]);
+  }
+
+  private memberOrgSet(): Set<string> {
+    return new Set(normalizeMemberOrgs(this.config.member_orgs).map((org) => org.sub));
+  }
+
+  private memberOrgFor(orgs: readonly PoolIdentityOrg[]): MemberOrgGrant | undefined {
+    const grantedBySub = new Map(
+      normalizeMemberOrgs(this.config.member_orgs).map((org) => [org.sub, org]),
+    );
+    for (const org of normalizeIdentityOrgs(orgs)) {
+      const grant = grantedBySub.get(org.sub);
+      if (grant !== undefined) return grant;
+    }
+    return undefined;
   }
 
   private async enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -192,8 +274,45 @@ export function normalizeUsername(username: string): string {
   return normalized;
 }
 
+export function normalizeOrgName(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  if (!USERNAME.test(normalized)) throw new Error(`invalid Hugging Face organization: ${name}`);
+  return normalized;
+}
+
 function normalizeUsers(users: readonly string[]): string[] {
   return [...new Set(users.map(normalizeUsername))].sort();
+}
+
+function normalizeMemberOrg(org: MemberOrgGrant): MemberOrgGrant {
+  const normalized: MemberOrgGrant = {
+    name: normalizeOrgName(org.name),
+    sub: org.sub.trim(),
+  };
+  if (normalized.sub.length === 0) throw new Error("organization sub must not be empty");
+  const displayName = org.display_name?.trim();
+  if (displayName !== undefined && displayName.length > 0) normalized.display_name = displayName;
+  return normalized;
+}
+
+function normalizeMemberOrgs(orgs: readonly MemberOrgGrant[]): MemberOrgGrant[] {
+  const bySub = new Map<string, MemberOrgGrant>();
+  for (const org of orgs.map(normalizeMemberOrg)) {
+    bySub.set(org.sub, org);
+  }
+  return [...bySub.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function normalizeIdentityOrgs(orgs: readonly PoolIdentityOrg[]): PoolIdentityOrg[] {
+  const bySub = new Map<string, PoolIdentityOrg>();
+  for (const org of orgs) {
+    const sub = org.sub.trim();
+    if (sub.length === 0) continue;
+    const normalized: PoolIdentityOrg = { sub };
+    if (org.name !== undefined) normalized.name = normalizeOrgName(org.name);
+    bySub.set(sub, normalized);
+  }
+  return [...bySub.values()];
 }
 
 function normalizeConfig(config: PoolConfig): PoolConfig {
@@ -202,6 +321,7 @@ function normalizeConfig(config: PoolConfig): PoolConfig {
     version: 1,
     admins,
     members: [...new Set([...normalizeUsers(config.members), ...admins])].sort(),
+    member_orgs: normalizeMemberOrgs(config.member_orgs),
     updated_at: config.updated_at,
     ...(config.updated_by === undefined
       ? {}
@@ -220,6 +340,7 @@ function bootstrapConfig(options: PoolMembershipOptions): PoolConfig {
     version: 1,
     admins,
     members: [...new Set([...members, ...admins])].sort(),
+    member_orgs: [],
     updated_at: options.now().toISOString(),
   };
 }

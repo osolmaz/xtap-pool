@@ -13,7 +13,20 @@ describe("pool tokens", () => {
     const token = mintPoolToken(SECRET, "osolmaz", FUTURE);
     expect(token.startsWith("xp1.")).toBe(true);
     const verified = verifyPoolToken(SECRET, token, NOW);
-    expect(verified).toEqual({ ok: true, username: "osolmaz" });
+    expect(verified).toEqual({ ok: true, username: "osolmaz", orgs: [] });
+  });
+
+  it("round-trips organization identities", () => {
+    const token = mintPoolToken(
+      SECRET,
+      { username: "dana", orgs: [{ sub: "org-hf", name: "huggingface" }] },
+      FUTURE,
+    );
+    expect(verifyPoolToken(SECRET, token, NOW)).toEqual({
+      ok: true,
+      username: "dana",
+      orgs: [{ sub: "org-hf", name: "huggingface" }],
+    });
   });
 
   it("rejects an expired token", () => {
@@ -59,6 +72,12 @@ describe("pool tokens", () => {
       JSON.stringify({ expiresAt: FUTURE.getTime() }),
       JSON.stringify({ username: "", expiresAt: FUTURE.getTime() }),
       JSON.stringify({ username: "osolmaz", expiresAt: "soon" }),
+      JSON.stringify({ username: "osolmaz", expiresAt: FUTURE.getTime(), orgs: "huggingface" }),
+      JSON.stringify({
+        username: "osolmaz",
+        expiresAt: FUTURE.getTime(),
+        orgs: [{ name: "huggingface" }],
+      }),
       JSON.stringify("just-a-string"),
       "not json at all",
     ];
