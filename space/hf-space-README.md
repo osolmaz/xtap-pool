@@ -13,7 +13,7 @@ pinned: false
 # xtap-pool
 
 Private tweet pool for a group of friends running the
-[xtap-pool extension](https://github.com/dutifuldev/xtap-pool).
+[xtap-pool extension](https://github.com/osolmaz/xtap-pool).
 
 - `POST /api/ingest` — extension submissions (Bearer pool token)
 - `GET /connect` — sign in with Hugging Face to connect the extension

@@ -14,7 +14,7 @@ type AuthState =
 type View = "feed" | "install" | "admin";
 
 const INSTALL_COMMAND =
-  'rm -rf ~/.local/share/xtap-pool-extension && mkdir -p ~/.local/share/xtap-pool-extension && curl -L https://github.com/dutifuldev/xtap-pool/archive/refs/heads/main.tar.gz | tar -xz --strip-components=2 -C ~/.local/share/xtap-pool-extension xtap-pool-main/extension && open -a "Google Chrome" "chrome://extensions"';
+  'rm -rf ~/.local/share/xtap-pool-extension && mkdir -p ~/.local/share/xtap-pool-extension && curl -L https://github.com/osolmaz/xtap-pool/archive/refs/heads/main.tar.gz | tar -xz --strip-components=2 -C ~/.local/share/xtap-pool-extension xtap-pool-main/extension && open -a "Google Chrome" "chrome://extensions"';
 
 function InstallExtension(): React.JSX.Element {
   const [copied, setCopied] = useState(false);

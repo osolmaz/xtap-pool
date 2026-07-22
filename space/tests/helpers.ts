@@ -6,7 +6,7 @@ import type { HubClient } from "../src/dataset.js";
 export const testConfig: SpaceConfig = {
   port: 7860,
   dataDir: ".data-test",
-  datasetRepo: "dutifuldev/xtap-pool-data",
+  datasetRepo: "osolmaz/xtap-pool-data",
   hfToken: "hf_test_token",
   poolSigningSecret: "pool-secret-0123456789abcdef0123456789abcdef",
   sessionSecret: "session-secret-0123456789abcdef0123456789ab",

@@ -42,7 +42,7 @@ By default this updates `<active-hf-user>/xtap-pool`. Pass a Space repo when
 updating a different namespace:
 
 ```sh
-npm run update -- dutifuldev/xtap-pool
+npm run update -- osolmaz/xtap-pool
 ```
 
 The update command reads the current Space variables, reuses the existing

@@ -81,7 +81,7 @@ jobs:
           RUN_MUTATION_TESTS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: npm run build --workspace explorer && npm run build --workspace space && npm run build --workspace setup
       - name: Slophammer
-        uses: dutifuldev/slophammer@main
+        uses: osolmaz/slophammer@main
         with:
           checker: ts
           version: 0.4.0

@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 
 describe("createHubClient", () => {
-  const client = createHubClient("dutifuldev/xtap-pool-data", "hf_token");
+  const client = createHubClient("osolmaz/xtap-pool-data", "hf_token");
 
   it("lists only jsonl files under data/", async () => {
     hubMocks.listFiles.mockReturnValue(
@@ -46,7 +46,7 @@ describe("createHubClient", () => {
     ]);
     expect(hubMocks.listFiles).toHaveBeenCalledWith(
       expect.objectContaining({
-        repo: { type: "dataset", name: "dutifuldev/xtap-pool-data" },
+        repo: { type: "dataset", name: "osolmaz/xtap-pool-data" },
         path: "data",
         recursive: true,
       }),
