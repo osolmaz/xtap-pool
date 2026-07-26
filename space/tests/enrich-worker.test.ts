@@ -164,7 +164,7 @@ describe("runEnrichTick", () => {
   });
 
   it("retries failing units up to three times, then marks them failed", async () => {
-    const unitId = seedUnit("100", "hello");
+    const unitId = seedUnit("100", "hello vLLM is fast");
     const failing: LlmClient = () => Promise.reject(new Error("router down"));
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const receipt = await runEnrichTick(deps(failing));
@@ -179,7 +179,7 @@ describe("runEnrichTick", () => {
   });
 
   it("fails units missing from the response and units with unparseable output", async () => {
-    const unitId = seedUnit("100", "hello");
+    const unitId = seedUnit("100", "hello vLLM is fast");
     const empty: LlmClient = () =>
       Promise.resolve({
         content: '{"units": {}}',
@@ -202,7 +202,7 @@ describe("runEnrichTick", () => {
   });
 
   it("marks the batch failed and keeps SQLite untouched when the commit fails", async () => {
-    const unitId = seedUnit("100", "hello");
+    const unitId = seedUnit("100", "hello vLLM is fast");
     hub.failNextCommit = true;
     const receipt = await runEnrichTick(deps(respondingClient(classification)));
     expect(receipt).toMatchObject({ units: 0, failures: 1 });
@@ -232,7 +232,7 @@ describe("runEnrichTick", () => {
   });
 
   it("normalizes model output: preset filtering, slugging, caps", async () => {
-    const unitId = seedUnit("100", "hello");
+    const unitId = seedUnit("100", "hello vLLM is fast");
     const messy: LlmClient = () =>
       Promise.resolve({
         content: JSON.stringify({
@@ -240,7 +240,7 @@ describe("runEnrichTick", () => {
             [unitId]: {
               labels: ["AI", "not-a-preset", "Agents"],
               free_labels: ["DGX Spark!", "dgx-spark", "a", "b", "c", "d", "e"],
-              concepts: [{ name: "  vLLM  ", aliases: [" VLLM ", "", "vllm"] }],
+              concepts: [{ name: "  vLLM  ", aliases: [" VLLM ", "", "vllm", "made-up-alias"] }],
             },
           },
         }),
@@ -255,6 +255,8 @@ describe("runEnrichTick", () => {
     };
     expect(row.labels).toEqual(["ai", "agents"]);
     expect(row.free_labels).toEqual(["dgx-spark", "a", "b", "c", "d"]);
+    // aliases must be surface forms of the unit text; "made-up-alias" is
+    // hallucinated and dropped ("VLLM"/"vllm" match case-insensitively)
     expect(row.concepts).toEqual([{ name: "vLLM", aliases: ["VLLM", "vllm"] }]);
   });
 });

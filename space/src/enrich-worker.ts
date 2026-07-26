@@ -283,12 +283,19 @@ function toEnrichmentRow(deps: EnrichWorkerDeps, unit: PromptUnit, entry: LlmUni
   const freeLabels = dedupe(
     entry.free_labels.map(slugifyConcept).filter((label) => label.length > 0),
   ).slice(0, MAX_FREE_LABELS);
+  const unitTextLower = unit.text.toLowerCase();
   const concepts = entry.concepts
     .filter((concept) => slugifyConcept(concept.name).length > 0)
     .slice(0, MAX_CONCEPTS)
     .map((concept) => ({
       name: concept.name.trim(),
-      aliases: dedupe(concept.aliases.map((alias) => alias.trim()).filter((a) => a.length > 0)),
+      // the contract requires aliases to be surface forms present in the
+      // unit; hallucinated aliases would mislink unrelated tweets globally
+      aliases: dedupe(
+        concept.aliases
+          .map((alias) => alias.trim())
+          .filter((a) => a.length > 0 && unitTextLower.includes(a.toLowerCase())),
+      ),
     }));
   return {
     unit_id: unit.unitId,
