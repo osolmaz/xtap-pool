@@ -22,10 +22,12 @@ Creating or copying the credential into another secret store is an explicit oper
 ## Enriched units
 
 ```http
-GET /api/units?labels=ai,local-models&label_mode=any&limit=200
+GET /api/units?labels=ai,local-models&label_mode=any&publication=public-original&limit=200
 ```
 
 The endpoint accepts the tweet query's contributor, author, text, date, media, article, preset-label, free-label, concept, unlabeled, and limit filters. `label_mode` is `any` or `all`; consumers should set it explicitly.
+
+`publication=public-original` excludes an entire unit if any member post is subscriber-only and excludes units containing only retweets. Use this filter for public projections. Apply the same parameter to concept and graph reads so taxonomy names, counts, and edge weights come from exactly the publishable unit set.
 
 Each item is one complete conversation-author unit:
 
@@ -67,7 +69,7 @@ The first page returns a result `revision`. Every cursor embeds that revision. A
 
 Discard the partial result and restart from page one. Invalid cursors return `400`.
 
-The labels, concepts, concept detail, and graph responses also return `revision`. Pass the unit revision as their `revision` query parameter. The graph accepts the same `labels=<csv>` and `label_mode=any|all` selection, and calculates both node and edge counts only from matching units. A revision mismatch returns `409`, preventing one publication from mixing source states.
+The labels, concepts, concept detail, and graph responses also return `revision`. Pass the unit revision as their `revision` query parameter. Concept and graph reads accept the same `labels=<csv>`, `label_mode=any|all`, and `publication=public-original` selection. They return only concepts and graph data from matching publishable units. A revision mismatch returns `409`, preventing one publication from mixing source states.
 
 ## Static publication
 

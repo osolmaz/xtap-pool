@@ -17,6 +17,7 @@ export type UnitQuery = {
   freeLabel?: string;
   concept?: string;
   unlabeled?: boolean;
+  publication?: "public-original";
   limit?: number;
   cursor?: string;
 };
@@ -281,6 +282,7 @@ function buildFilters(query: UnitQuery): { whereSql: string; params: unknown[] }
     ...rangeFilters(query),
     ...labelFilters(query),
     ...conceptFilters(query),
+    ...publicationFilters(query),
   ];
   return {
     whereSql: ["1=1", ...filters.map((filter) => filter.sql)].join(" AND "),
@@ -368,6 +370,27 @@ function conceptFilters(query: UnitQuery): Filter[] {
     });
   }
   return filters;
+}
+
+function publicationFilters(query: UnitQuery): Filter[] {
+  if (query.publication !== "public-original") return [];
+  return [
+    {
+      sql: `NOT EXISTS (
+              SELECT 1 FROM unit_members private_um
+              JOIN tweets private_tweet ON private_tweet.id = private_um.tweet_id
+              WHERE private_um.unit_id = um.unit_id
+                AND json_extract(private_tweet.json, '$.is_subscriber_only') = 1
+            )
+            AND EXISTS (
+              SELECT 1 FROM unit_members original_um
+              JOIN tweets original_tweet ON original_tweet.id = original_um.tweet_id
+              WHERE original_um.unit_id = um.unit_id
+                AND COALESCE(json_extract(original_tweet.json, '$.is_retweet'), 0) != 1
+            )`,
+      values: [],
+    },
+  ];
 }
 
 function parseStringArray(raw: string): string[] {
