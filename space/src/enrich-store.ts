@@ -518,7 +518,7 @@ export class EnrichStore {
 
   /** `GET /api/labels` domain logic: taxonomy counts, free labels, queue, coverage. */
   labelsSummary(taxonomy: readonly LabelConfig[]): Omit<LabelsSummary, "revision"> {
-    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
+    const eligible = eligibleUnits({ taxonomyVersion: this.taxonomyVersion });
     const presetRows = this.db
       .prepare(
         `SELECT tl.label, COUNT(*) AS n FROM tweet_labels tl
@@ -572,23 +572,25 @@ export class EnrichStore {
   }
 
   /** `GET /api/concepts` domain logic: vocabulary sorted by finalized-unit usage. */
-  concepts(): ConceptCount[] {
-    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
+  concepts(options: UnitSelection = {}): ConceptCount[] {
+    const eligible = eligibleUnits({ ...options, taxonomyVersion: this.taxonomyVersion });
+    const filtered = hasSelectionFilter(options);
     const rows = this.db
       .prepare(
         `SELECT v.slug, v.name, v.aliases, COUNT(DISTINCT ca.unit_id) AS unit_count
          FROM concept_vocabulary v
          LEFT JOIN concept_assignments ca ON ca.slug = v.slug
            AND ca.unit_id IN (${eligible.sql})
-         GROUP BY v.slug ORDER BY unit_count DESC, v.name COLLATE NOCASE, v.slug`,
+         GROUP BY v.slug ${filtered ? "HAVING COUNT(DISTINCT ca.unit_id) > 0" : ""}
+         ORDER BY unit_count DESC, v.name COLLATE NOCASE, v.slug`,
       )
       .all(...eligible.params) as VocabularyRow[];
     return rows.map(toConceptCount);
   }
 
-  /** `GET /api/concepts/:slug` domain logic; undefined for unknown slugs. */
-  concept(slug: string): Omit<ConceptSummary, "revision"> | undefined {
-    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
+  /** `GET /api/concepts/:slug` domain logic; undefined for unknown or filtered slugs. */
+  concept(slug: string, options: UnitSelection = {}): Omit<ConceptSummary, "revision"> | undefined {
+    const eligible = eligibleUnits({ ...options, taxonomyVersion: this.taxonomyVersion });
     const row = this.db
       .prepare(
         `SELECT v.slug, v.name, v.aliases, COUNT(DISTINCT ca.unit_id) AS unit_count
@@ -598,7 +600,8 @@ export class EnrichStore {
          WHERE v.slug = ? GROUP BY v.slug`,
       )
       .get(...eligible.params, slug) as VocabularyRow | undefined;
-    if (row === undefined) return undefined;
+    if (row === undefined || (hasSelectionFilter(options) && row.unit_count === 0))
+      return undefined;
     const related = this.db
       .prepare(
         `SELECT b.slug, v.name, COUNT(DISTINCT a.unit_id) AS shared_units
@@ -624,20 +627,12 @@ export class EnrichStore {
    * restricted to units carrying a preset label), plus the strongest edges
    * between them.
    */
-  graph(options: {
-    labels?: readonly string[] | undefined;
-    labelMode?: "any" | "all" | undefined;
-    top: number;
-  }): Omit<ConceptGraph, "revision"> {
-    return this.finalizedGraph(options.labels ?? [], options.labelMode ?? "any", options.top);
+  graph(options: UnitSelection & { top: number }): Omit<ConceptGraph, "revision"> {
+    return this.finalizedGraph(options, options.top);
   }
 
-  private finalizedGraph(
-    labels: readonly string[],
-    labelMode: "any" | "all",
-    top: number,
-  ): Omit<ConceptGraph, "revision"> {
-    const eligible = eligibleUnits(labels, labelMode, this.taxonomyVersion);
+  private finalizedGraph(options: UnitSelection, top: number): Omit<ConceptGraph, "revision"> {
+    const eligible = eligibleUnits({ ...options, taxonomyVersion: this.taxonomyVersion });
     const nodes = this.db
       .prepare(
         `SELECT v.slug AS slug, v.name AS name, COUNT(DISTINCT ca.unit_id) AS unit_count
@@ -664,39 +659,66 @@ export class EnrichStore {
   }
 }
 
-function eligibleUnits(
-  labels: readonly string[],
-  labelMode: "any" | "all",
-  taxonomyVersion: number,
-): { sql: string; params: unknown[] } {
+type UnitSelection = {
+  labels?: readonly string[] | undefined;
+  labelMode?: "any" | "all" | undefined;
+  publication?: "public-original" | undefined;
+};
+
+type EligibleUnitOptions = UnitSelection & { taxonomyVersion: number };
+
+function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unknown[] } {
+  const labels = options.labels ?? [];
   const placeholders = labels.map(() => "?").join(",");
   const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ?
             JOIN enrich_queue q ON q.unit_id = um.unit_id
               AND q.taxonomy_version = ? AND q.status = 'done'`;
+  const publication = publicationWhere(options.publication, "um.unit_id");
   if (labels.length === 0) {
     return {
       sql: `SELECT DISTINCT um.unit_id FROM unit_members um
-            ${finalizedJoins}`,
-      params: [taxonomyVersion, taxonomyVersion],
+            ${finalizedJoins}
+            WHERE 1 = 1${publication}`,
+      params: [options.taxonomyVersion, options.taxonomyVersion],
     };
   }
-  if (labelMode === "any") {
+  if (options.labelMode !== "all") {
     return {
       sql: `SELECT DISTINCT um.unit_id FROM unit_members um
             ${finalizedJoins}
             JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
-            WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})`,
-      params: [taxonomyVersion, taxonomyVersion, ...labels],
+            WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})${publication}`,
+      params: [options.taxonomyVersion, options.taxonomyVersion, ...labels],
     };
   }
   return {
     sql: `SELECT um.unit_id FROM unit_members um
           ${finalizedJoins}
           JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
-          WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})
+          WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})${publication}
           GROUP BY um.unit_id HAVING COUNT(DISTINCT tl.label) = ?`,
-    params: [taxonomyVersion, taxonomyVersion, ...labels, labels.length],
+    params: [options.taxonomyVersion, options.taxonomyVersion, ...labels, labels.length],
   };
+}
+
+function publicationWhere(publication: UnitSelection["publication"], unitIdSql: string): string {
+  if (publication !== "public-original") return "";
+  return ` AND NOT EXISTS (
+             SELECT 1 FROM unit_members private_um
+             JOIN tweets private_tweet ON private_tweet.id = private_um.tweet_id
+             WHERE private_um.unit_id = ${unitIdSql}
+               AND json_extract(private_tweet.json, '$.is_subscriber_only') = 1
+           )
+           AND EXISTS (
+             SELECT 1 FROM unit_members original_um
+             JOIN tweets original_tweet ON original_tweet.id = original_um.tweet_id
+             WHERE original_um.unit_id = ${unitIdSql}
+               AND COALESCE(json_extract(original_tweet.json, '$.is_retweet'), 0) != 1
+           )`;
+}
+
+function hasSelectionFilter(options: UnitSelection): boolean {
+  return (options.labels?.length ?? 0) > 0 || options.publication !== undefined;
 }
 
 function toConceptCount(row: VocabularyRow): ConceptCount {

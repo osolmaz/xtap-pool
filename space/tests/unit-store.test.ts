@@ -125,6 +125,31 @@ describe("UnitStore", () => {
     tweets.close();
   });
 
+  it("excludes subscriber-containing and retweet-only units for public publication", () => {
+    const tweets = new TweetStore();
+    const enrich = new EnrichStore(tweets.database, 1);
+    const units = new UnitStore(tweets.database, 1);
+    const publicPost = pooled("1", { conversation_id: "public" });
+    const privateRoot = pooled("2", { conversation_id: "private" });
+    const privateReply = pooled("3", {
+      conversation_id: "private",
+      is_subscriber_only: true,
+    });
+    const retweet = pooled("4", { conversation_id: "retweet", is_retweet: true });
+    const posts = [publicPost, privateRoot, privateReply, retweet];
+    tweets.insert(posts);
+    enrich.registerTweets(posts);
+    enrich.applyEnrichment(enrichment(["1"], unitIdFor(publicPost), ["ai"]));
+    enrich.applyEnrichment(enrichment(["2", "3"], unitIdFor(privateRoot), ["ai"]));
+    enrich.applyEnrichment(enrichment(["4"], unitIdFor(retweet), ["ai"]));
+
+    expect(units.query({ labels: ["ai"] }).units).toHaveLength(3);
+    expect(
+      units.query({ labels: ["ai"], publication: "public-original" }).units.map((unit) => unit.id),
+    ).toEqual([unitIdFor(publicPost)]);
+    tweets.close();
+  });
+
   it("uses any and all label semantics explicitly", () => {
     const tweets = new TweetStore();
     const enrich = new EnrichStore(tweets.database, 1);

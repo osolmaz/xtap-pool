@@ -303,6 +303,44 @@ describe("summaries", () => {
     expect(agentsOnly.nodes).toEqual([]);
   });
 
+  it("filters publication taxonomy to public units without rebuilding graph data downstream", () => {
+    insertAndRegister([
+      { id: "4", author: { username: "d" }, is_subscriber_only: true },
+      { id: "5", author: { username: "e" }, is_retweet: true },
+    ]);
+    enrich.applyEnrichment(
+      row({
+        unit_id: "4:d",
+        tweet_ids: ["4"],
+        concepts: [{ name: "Private Concept", aliases: [] }],
+      }),
+    );
+    enrich.applyEnrichment(
+      row({
+        unit_id: "5:e",
+        tweet_ids: ["5"],
+        concepts: [{ name: "Retweet Concept", aliases: [] }],
+      }),
+    );
+
+    expect(enrich.concepts().map((concept) => concept.slug)).toContain("private-concept");
+    const selection = { publication: "public-original" as const };
+    expect(
+      enrich
+        .concepts(selection)
+        .map((concept) => concept.slug)
+        .sort(),
+    ).toEqual(["fp8", "vllm"]);
+    expect(enrich.concept("private-concept", selection)).toBeUndefined();
+    expect(enrich.graph({ ...selection, top: 10 })).toEqual({
+      nodes: [
+        { slug: "fp8", name: "FP8", unit_count: 1 },
+        { slug: "vllm", name: "vLLM", unit_count: 1 },
+      ],
+      links: [{ source: "fp8", target: "vllm", weight: 1 }],
+    });
+  });
+
   it("omits stale assignments from filtered graphs while a unit is queued", () => {
     const joined = makePooled({
       id: "4",
