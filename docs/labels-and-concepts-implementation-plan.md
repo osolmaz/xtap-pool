@@ -56,7 +56,7 @@ taxonomy_version, enriched_at}`), and the concept vocabulary lives at
 - **Worker placement**: inside the Space as a background loop (the
   Space is already always-on and the code lives with it), with a
   token-gated `POST /api/enrich/run` for manual drains. Batches are
-  small (~20 units per model call, bounded per tick) so API latency is
+  small (~6 units per model call, bounded per tick) so API latency is
   unaffected; if load ever changes, a scheduled Job can drive the same
   endpoint without redesign.
 - **LLM**: one call per unit batch to the router

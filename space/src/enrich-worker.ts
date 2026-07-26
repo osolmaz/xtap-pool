@@ -23,7 +23,10 @@ import type { EnrichStore, QueueItem } from "./enrich-store.js";
 const ROUTER_URL = "https://router.huggingface.co/v1/chat/completions";
 const UNIT_TEXT_MAX_CHARS = 4000;
 const VOCABULARY_PROMPT_CAP = 150;
-const DEFAULT_UNITS_PER_CALL = 20;
+// 20-unit batches exceed the router's gateway timeout with GLM 5.2
+// (reasoning models spend ~1.3k completion tokens per unit); 6 keeps
+// calls comfortably under it. Verified live 2026-07-26.
+const DEFAULT_UNITS_PER_CALL = 6;
 const MAX_FREE_LABELS = 5;
 const MAX_CONCEPTS = 8;
 
