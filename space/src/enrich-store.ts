@@ -194,10 +194,11 @@ export class EnrichStore {
     const rows = this.db
       .prepare(
         `SELECT text FROM (
-           SELECT id, MIN(sort_ts) AS ts, text FROM tweets
+           SELECT id, sort_ts AS ts, text,
+                  ROW_NUMBER() OVER (PARTITION BY id ORDER BY captured_at DESC) AS rn
+           FROM tweets
            WHERE id IN (SELECT tweet_id FROM unit_members WHERE unit_id = ?)
-           GROUP BY id
-         ) ORDER BY ts, id`,
+         ) WHERE rn = 1 ORDER BY ts, id`,
       )
       .all(unitId) as { text: string }[];
     return rows
@@ -253,7 +254,11 @@ export class EnrichStore {
    */
   applyEnrichment(row: EnrichmentRow): void {
     const apply = this.db.transaction((enrichment: EnrichmentRow) => {
-      this.rewriteTweetLabels(enrichment);
+      // preset labels are defined by the taxonomy: rows from an older
+      // taxonomy version keep their concepts and free labels (which are
+      // taxonomy-independent) but must not serve stale preset labels
+      const stale = enrichment.taxonomy_version !== this.taxonomyVersion;
+      this.rewriteTweetLabels(stale ? { ...enrichment, labels: [] } : enrichment);
       this.rewriteConcepts(enrichment);
       this.upsertEnrichmentRow(enrichment);
       this.settleQueue(enrichment);

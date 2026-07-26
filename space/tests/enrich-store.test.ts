@@ -298,3 +298,40 @@ describe("summaries", () => {
     expect(agentsOnly.nodes).toEqual([]);
   });
 });
+
+describe("taxonomy version and duplicate copies", () => {
+  it("replaying a stale-taxonomy row keeps concepts but not preset labels", () => {
+    insertAndRegister([{ id: "100" }]);
+    enrich.applyEnrichment(row({ taxonomy_version: 0 }));
+    const labels = store.database
+      .prepare("SELECT label, kind FROM tweet_labels WHERE tweet_id = '100' ORDER BY label")
+      .all() as { label: string; kind: string }[];
+    expect(labels).toEqual([{ label: "dgx-spark", kind: "free" }]);
+    const vocab = store.database.prepare("SELECT slug FROM concept_vocabulary").all() as {
+      slug: string;
+    }[];
+    expect(vocab).toEqual([{ slug: "vllm" }]);
+    const queue = store.database
+      .prepare("SELECT status FROM enrich_queue WHERE unit_id = '100:someone'")
+      .get() as { status: string };
+    expect(queue.status).toBe("queued");
+  });
+
+  it("prompts with the freshest contributor copy of a tweet", () => {
+    const stale = makePooled({
+      id: "100",
+      text: "old text",
+      captured_at: "2026-07-01T00:00:00.000Z",
+      contributed_by: "alice",
+    });
+    const fresh = makePooled({
+      id: "100",
+      text: "edited text",
+      captured_at: "2026-07-05T00:00:00.000Z",
+      contributed_by: "bob",
+    });
+    store.insert([stale, fresh]);
+    enrich.registerTweets([stale, fresh]);
+    expect(enrich.unitText("100:someone", 1000)).toBe("edited text");
+  });
+});
