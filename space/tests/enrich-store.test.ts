@@ -335,3 +335,14 @@ describe("taxonomy version and duplicate copies", () => {
     expect(enrich.unitText("100:someone", 1000)).toBe("edited text");
   });
 });
+
+describe("claiming", () => {
+  it("claims atomically so overlapping drains never share units", () => {
+    insertAndRegister([{ id: "100" }, { id: "200", conversation_id: "200" }]);
+    const first = enrich.claimQueued(10);
+    expect(first.length).toBe(2);
+    expect(enrich.claimQueued(10)).toEqual([]);
+    enrich.releaseClaims();
+    expect(enrich.claimQueued(10).length).toBe(2);
+  });
+});

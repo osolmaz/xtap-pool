@@ -224,3 +224,14 @@ describe("contributors + cursors", () => {
     expect(decodeCursor(Buffer.from("[1,2]").toString("base64url"))).toBeUndefined();
   });
 });
+
+describe("punctuation-sensitive search", () => {
+  it("keeps literal matching for queries the tokenizer would distort", () => {
+    store.insert([
+      makePooled({ id: "900", text: "I love C++ so much" }),
+      makePooled({ id: "901", text: "cats and C# forever", conversation_id: "901" }),
+    ]);
+    const page = store.query({ q: "C++" });
+    expect(page.records.map((record) => record.tweet.id)).toEqual(["900"]);
+  });
+});

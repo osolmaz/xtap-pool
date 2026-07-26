@@ -57,6 +57,7 @@ app.use("*", serveStatic({ root: config.staticRoot, path: "index.html" }));
 console.log(`[xtap-pool] rebuilding index from ${config.datasetRepo} ...`);
 const rebuilt = await mirror.rebuild(store, enrichStore);
 const enrichment = await mirror.rebuildEnrichment(enrichStore);
+enrichStore.releaseClaims();
 const pool = membership.snapshot();
 console.log(
   `[xtap-pool] indexed ${String(rebuilt.tweets)} tweets from ${String(rebuilt.files)} files; ` +

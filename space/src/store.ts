@@ -295,6 +295,9 @@ type Filter = { sql: string; values: readonly unknown[] };
 export function ftsMatchQuery(q: string): string | undefined {
   const tokens = q.match(/[\p{L}\p{N}_]+/gu);
   if (tokens === null) return undefined;
+  // punctuation-bearing queries like "C++" or "mistral.rs" lose meaning
+  // when tokenized; keep them on the literal substring path
+  if (tokens.join(" ").length !== q.trim().length) return undefined;
   return `"${tokens.join(" ")}"*`;
 }
 

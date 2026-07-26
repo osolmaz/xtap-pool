@@ -92,6 +92,7 @@ export function ensureEnrichmentTables(db: Database.Database): void {
       weight INTEGER NOT NULL,
       PRIMARY KEY (a, b)
     );
+      CREATE INDEX IF NOT EXISTS idx_concept_edges_b ON concept_edges(b);
   `);
 }
 
@@ -236,17 +237,33 @@ export class EnrichStore {
 
   /** Oldest queued units first, up to `limit`. */
   claimQueued(limit: number): QueueItem[] {
+    // atomically flip queued -> claimed so overlapping drains (interval
+    // tick vs manual /api/enrich/run) never pay the router twice for the
+    // same unit; settle/markFailed release the claim
     const rows = this.db
       .prepare(
-        `SELECT unit_id, tweet_ids, attempts FROM enrich_queue
-         WHERE status = 'queued' ORDER BY updated_at, unit_id LIMIT ?`,
+        `UPDATE enrich_queue SET status = 'claimed', updated_at = ?
+         WHERE unit_id IN (
+           SELECT unit_id FROM enrich_queue
+           WHERE status = 'queued' ORDER BY updated_at, unit_id LIMIT ?
+         )
+         RETURNING unit_id, tweet_ids, attempts`,
       )
-      .all(limit) as { unit_id: string; tweet_ids: string; attempts: number }[];
+      .all(this.now().toISOString(), limit) as {
+      unit_id: string;
+      tweet_ids: string;
+      attempts: number;
+    }[];
     return rows.map((row) => ({
       unitId: row.unit_id,
       tweetIds: JSON.parse(row.tweet_ids) as string[],
       attempts: row.attempts,
     }));
+  }
+
+  /** Recover claims left behind by an interrupted process (boot only). */
+  releaseClaims(): void {
+    this.db.prepare("UPDATE enrich_queue SET status = 'queued' WHERE status = 'claimed'").run();
   }
 
   /** Count one failed attempt; the unit stays queued until MAX_ATTEMPTS. */
@@ -549,17 +566,24 @@ export class EnrichStore {
         ? this.topNodes(options.top)
         : this.labelNodes(options.label, options.top);
     if (nodes.length === 0) return { nodes: [], links: [] };
-    const slugs = new Set(nodes.map((node) => node.slug));
-    const links: GraphLink[] = [];
-    const maxLinks = options.top * 4;
-    const edges = this.db
-      .prepare("SELECT a, b, weight FROM concept_edges WHERE weight > 0 ORDER BY weight DESC, a, b")
-      .iterate() as IterableIterator<{ a: string; b: string; weight: number }>;
-    for (const edge of edges) {
-      if (!slugs.has(edge.a) || !slugs.has(edge.b)) continue;
-      links.push({ source: edge.a, target: edge.b, weight: edge.weight });
-      if (links.length >= maxLinks) break;
-    }
+    const slugList = nodes.map((node) => node.slug);
+    const placeholders = slugList.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT a, b, weight FROM concept_edges
+         WHERE weight > 0 AND a IN (${placeholders}) AND b IN (${placeholders})
+         ORDER BY weight DESC, a, b LIMIT ?`,
+      )
+      .all(...slugList, ...slugList, options.top * 4) as {
+      a: string;
+      b: string;
+      weight: number;
+    }[];
+    const links = rows.map((edge): GraphLink => ({
+      source: edge.a,
+      target: edge.b,
+      weight: edge.weight,
+    }));
     return { nodes, links };
   }
 
