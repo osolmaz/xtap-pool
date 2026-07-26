@@ -24,6 +24,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  window.history.replaceState(null, "", "/");
 });
 
 function stubApi(responses: Record<string, () => Response>): ReturnType<typeof vi.fn> {
@@ -95,6 +96,52 @@ describe("App", () => {
     expect(screen.getByText(/xtap-pool-main\/extension/)).toBeDefined();
     expect(screen.getByText("~/.local/share/xtap-pool-extension")).toBeDefined();
     expect(screen.getByText("Connect").getAttribute("href")).toBe("/connect");
+  });
+
+  it("navigates between the feed and the concept graph", async () => {
+    stubApi({
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: false }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () =>
+        Response.json({ records: [{ tweet: pooledTweet(), contributors: ["osolmaz"] }] }),
+      "/api/labels": () => Response.json({ labels: [{ name: "ai", count: 2 }] }),
+      "/api/concepts": () =>
+        Response.json({
+          concepts: [{ slug: "vllm", name: "vLLM", aliases: ["vllm"], post_count: 3 }],
+        }),
+      "/api/graph": () =>
+        Response.json({ nodes: [{ id: "vllm", name: "vLLM", docs: 3, group: 0 }], links: [] }),
+    });
+    render(<App />);
+    await screen.findByText("hello world");
+
+    fireEvent.click(screen.getByText("Graph"));
+    await screen.findByText("Concept graph");
+    expect(window.location.pathname).toBe("/graph");
+    expect(screen.getByText("All concepts")).toBeDefined();
+    expect(screen.queryByText("Captured by")).toBeNull();
+
+    fireEvent.click(screen.getByText("Feed"));
+    await screen.findByText("hello world");
+    expect(window.location.pathname).toBe("/");
+    expect(screen.getByText("Captured by")).toBeDefined();
+  });
+
+  it("shows label chips and the concept picker once enrichment data loads", async () => {
+    stubApi({
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: false }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+      "/api/labels": () => Response.json({ labels: [{ name: "ai", count: 2 }] }),
+      "/api/concepts": () =>
+        Response.json({
+          concepts: [{ slug: "vllm", name: "vLLM", aliases: ["vllm"], post_count: 3 }],
+        }),
+    });
+    render(<App />);
+    await screen.findByText("Labels");
+    expect(screen.getByRole("button", { name: /^ai/ })).toBeDefined();
+    expect(screen.getByLabelText("Concept")).toBeDefined();
   });
 
   it("refreshes relative timestamps while the feed is visible", async () => {

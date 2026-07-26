@@ -280,3 +280,35 @@ body {
 .x-chip--article {
   color: var(--x-accent);
 }
+
+.x-chip--active {
+  border-color: var(--x-accent);
+  color: var(--x-accent);
+}
+
+button.x-chip {
+  cursor: pointer;
+}
+
+a.x-chip {
+  text-decoration: none;
+}
+
+a.x-chip:hover,
+button.x-chip:hover {
+  border-color: var(--x-strong-border);
+}
+
+/* Inline concept links inside tweet text */
+.x-tweet-card__text a.concept-link {
+  text-decoration: underline dashed;
+  text-underline-offset: 0.2em;
+}
+
+/* Concept graph canvas frame */
+.x-graph-frame {
+  border: 1px solid var(--x-border);
+  border-radius: 1rem;
+  overflow: hidden;
+  background: var(--x-card);
+}

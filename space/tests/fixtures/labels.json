@@ -1,0 +1,5 @@
+[
+  { "name": "ai", "description": "Anything about artificial intelligence." },
+  { "name": "local-models", "description": "Running open-weight models locally." },
+  { "name": "robotics", "description": "Robots, actuators and embodied AI." }
+]

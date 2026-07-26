@@ -3,14 +3,21 @@ import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
 import { commit, downloadFile, listFiles } from "@huggingface/hub";
 
-import { datasetPathFor, validateTweet } from "@xtap-pool/shared";
+import {
+  datasetPathFor,
+  enrichmentRowSchema,
+  parseVocabularyJson,
+  validateTweet,
+  VOCABULARY_PATH,
+} from "@xtap-pool/shared";
 import type { PooledTweet } from "@xtap-pool/shared";
 
+import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
 /** Thin abstraction over the HF Hub so tests can run against a fake. */
 export type HubClient = {
-  listDataFiles(): Promise<string[]>;
+  listJsonlFiles(prefix: string): Promise<string[]>;
   downloadFile(path: string): Promise<string>;
   commitFiles(files: readonly { path: string; content: string }[], title: string): Promise<void>;
 };
@@ -36,14 +43,14 @@ function isMissingDatasetFile(error: unknown, path: string): boolean {
 export function createHubClient(datasetRepo: string, accessToken: string): HubClient {
   const repo = { type: "dataset", name: datasetRepo } as const;
   return {
-    async listDataFiles(): Promise<string[]> {
+    async listJsonlFiles(prefix: string): Promise<string[]> {
       const paths: string[] = [];
       try {
-        for await (const entry of listFiles({ repo, accessToken, recursive: true, path: "data" })) {
+        for await (const entry of listFiles({ repo, accessToken, recursive: true, path: prefix })) {
           if (entry.type === "file" && entry.path.endsWith(".jsonl")) paths.push(entry.path);
         }
       } catch (error) {
-        // A fresh pool has no data/ tree yet; that is a valid empty state.
+        // A fresh pool has no such tree yet; that is a valid empty state.
         if (isNotFound(error)) return [];
         throw error;
       }
@@ -95,8 +102,11 @@ export class DatasetMirror {
   }
 
   /** Download the full dataset snapshot, populate the mirror and the store. */
-  async rebuild(store: TweetStore): Promise<{ files: number; tweets: number }> {
-    const paths = await this.hub.listDataFiles();
+  async rebuild(
+    store: TweetStore,
+    enrich?: EnrichStore,
+  ): Promise<{ files: number; tweets: number }> {
+    const paths = await this.hub.listJsonlFiles("data");
     let tweets = 0;
     for (const path of paths) {
       const content = await this.hub.downloadFile(path);
@@ -105,9 +115,32 @@ export class DatasetMirror {
       writeFileSync(local, content);
       const parsed = parseJsonlTweets(content, path);
       store.insert(parsed);
+      enrich?.registerTweets(parsed);
       tweets += parsed.length;
     }
     return { files: paths.length, tweets };
+  }
+
+  /**
+   * Rebuild the enrichment tables from the dataset: seed the vocabulary from
+   * `enrichment/vocabulary.json`, then replay all enrichment JSONL shards in
+   * chronological order. Run after `rebuild` so unit membership exists.
+   */
+  async rebuildEnrichment(enrich: EnrichStore): Promise<{ files: number; rows: number }> {
+    const vocabularyRaw = await this.readText(VOCABULARY_PATH);
+    if (vocabularyRaw !== undefined) enrich.seedVocabulary(parseVocabularyJson(vocabularyRaw));
+    const paths = (await this.hub.listJsonlFiles("enrichment"))
+      .filter((path) => !path.startsWith("enrichment/receipts/"))
+      .sort();
+    let rows = 0;
+    for (const path of paths) {
+      const content = await this.hub.downloadFile(path);
+      const local = this.localPath(path);
+      mkdirSync(dirname(local), { recursive: true });
+      writeFileSync(local, content);
+      rows += applyEnrichmentLines(enrich, content);
+    }
+    return { files: paths.length, rows };
   }
 
   /** Read a dataset file through the Hub, returning undefined when it is absent. */
@@ -129,24 +162,18 @@ export class DatasetMirror {
   }
 
   /**
-   * Append accepted tweets to their contributors' daily files and commit the
-   * result to the Hub. The mirror is only updated after the commit succeeds.
+   * Append JSONL lines and overwrite whole metadata files in one dataset
+   * commit. The local mirror is only updated after the commit succeeds.
    */
-  async appendAndCommit(accepted: readonly PooledTweet[], title: string): Promise<void> {
-    const byPath = new Map<string, PooledTweet[]>();
-    for (const tweet of accepted) {
-      const path = datasetPathFor(tweet.contributed_by, tweet.captured_at);
-      const bucket = byPath.get(path);
-      if (bucket === undefined) byPath.set(path, [tweet]);
-      else bucket.push(tweet);
-    }
-    const files = [...byPath.entries()].map(([path, tweetsForPath]) => {
-      const local = this.localPath(path);
-      const existing = existsSync(local) ? readFileSync(local, "utf8") : "";
-      const prefix = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
-      const lines = tweetsForPath.map((tweet) => `${JSON.stringify(tweet)}\n`).join("");
-      return { path, content: `${prefix}${lines}` };
-    });
+  async commitBatch(
+    appends: readonly { path: string; lines: readonly string[] }[],
+    writes: readonly { path: string; content: string }[],
+    title: string,
+  ): Promise<void> {
+    const files = [
+      ...appends.map(({ path, lines }) => ({ path, content: this.appendedContent(path, lines) })),
+      ...writes,
+    ];
     await this.hub.commitFiles(files, title);
     for (const file of files) {
       const local = this.localPath(file.path);
@@ -154,6 +181,50 @@ export class DatasetMirror {
       writeFileSync(local, file.content);
     }
   }
+
+  private appendedContent(path: string, lines: readonly string[]): string {
+    const local = this.localPath(path);
+    const existing = existsSync(local) ? readFileSync(local, "utf8") : "";
+    const prefix = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
+    return `${prefix}${lines.map((line) => `${line}\n`).join("")}`;
+  }
+
+  /**
+   * Append accepted tweets to their contributors' daily files and commit the
+   * result to the Hub. The mirror is only updated after the commit succeeds.
+   */
+  async appendAndCommit(accepted: readonly PooledTweet[], title: string): Promise<void> {
+    const byPath = new Map<string, string[]>();
+    for (const tweet of accepted) {
+      const path = datasetPathFor(tweet.contributed_by, tweet.captured_at);
+      const bucket = byPath.get(path);
+      if (bucket === undefined) byPath.set(path, [JSON.stringify(tweet)]);
+      else bucket.push(JSON.stringify(tweet));
+    }
+    await this.commitBatch(
+      [...byPath.entries()].map(([path, lines]) => ({ path, lines })),
+      [],
+      title,
+    );
+  }
+}
+
+function applyEnrichmentLines(enrich: EnrichStore, content: string): number {
+  let rows = 0;
+  for (const line of content.split("\n")) {
+    if (line.trim() === "") continue;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = enrichmentRowSchema.safeParse(candidate);
+    if (!parsed.success) continue;
+    enrich.applyEnrichment(parsed.data);
+    rows += 1;
+  }
+  return rows;
 }
 
 /**

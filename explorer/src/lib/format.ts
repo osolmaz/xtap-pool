@@ -26,6 +26,35 @@ function hrefForToken(token: string): string {
   return token;
 }
 
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+/** Escape text for safe interpolation into HTML markup. */
+export function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (char) => HTML_ESCAPES[char] ?? char);
+}
+
+/**
+ * Tweet text as escaped HTML with URLs, @mentions and #hashtags linkified.
+ * Same output as the old React-element rendering, but as a string so the
+ * inline concept linker can run over it afterwards.
+ */
+export function tweetTextHtml(text: string): string {
+  return tokenizeTweetText(text)
+    .map((segment) =>
+      segment.kind === "link"
+        ? `<a href="${escapeHtml(segment.href)}" target="_blank" rel="noopener noreferrer">` +
+          `${escapeHtml(segment.text)}</a>`
+        : escapeHtml(segment.text),
+    )
+    .join("");
+}
+
 /** X-style compact counts: 999, 1.2K, 3.4M. */
 export function formatCount(count: number): string {
   if (count < 1000) return String(count);

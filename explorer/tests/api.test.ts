@@ -4,8 +4,12 @@ import {
   defaultFilters,
   addPoolAdmin,
   addPoolMember,
+  fetchConcept,
+  fetchConceptGraph,
+  fetchConcepts,
   fetchContributors,
   fetchAdminPool,
+  fetchLabels,
   fetchMe,
   fetchTweets,
   removePoolAdmin,
@@ -28,6 +32,8 @@ describe("tweetsQueryString", () => {
     const query = tweetsQueryString(
       {
         contributors: ["osolmaz", "alice"],
+        labels: ["ai", "agents"],
+        concept: "vllm",
         q: "vllm",
         since: "2026-05-01",
         until: "2026-05-31",
@@ -39,6 +45,8 @@ describe("tweetsQueryString", () => {
     );
     const params = new URLSearchParams(query);
     expect(params.get("contributors")).toBe("osolmaz,alice");
+    expect(params.get("labels")).toBe("ai,agents");
+    expect(params.get("concept")).toBe("vllm");
     expect(params.get("q")).toBe("vllm");
     expect(params.get("since")).toBe("2026-05-01");
     expect(params.get("until")).toBe("2026-05-31T23:59:59.999Z");
@@ -82,6 +90,62 @@ describe("api client", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
     await expect(fetchContributors()).rejects.toThrow("session expired");
+  });
+
+  it("fetches labels, concepts, one concept and the graph", async () => {
+    const labels = [{ name: "ai", description: "AI posts", count: 12 }];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ labels })));
+    await expect(fetchLabels()).resolves.toEqual(labels);
+
+    const apiConcepts = [{ slug: "vllm", name: "vLLM", aliases: ["vllm"], unit_count: 3 }];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ concepts: apiConcepts })));
+    await expect(fetchConcepts()).resolves.toEqual([
+      { slug: "vllm", name: "vLLM", aliases: ["vllm"], post_count: 3 },
+    ]);
+
+    const apiDetail = {
+      slug: "vllm",
+      name: "vLLM",
+      aliases: ["vllm"],
+      unit_count: 3,
+      tweet_count: 3,
+      related: [{ slug: "sglang", name: "SGLang", shared_units: 2 }],
+    };
+    const detailMock = vi.fn().mockResolvedValue(Response.json(apiDetail));
+    vi.stubGlobal("fetch", detailMock);
+    await expect(fetchConcept("vllm")).resolves.toEqual({
+      name: "vLLM",
+      aliases: ["vllm"],
+      related: [{ slug: "sglang", name: "SGLang", shared: 2 }],
+      post_count: 3,
+    });
+    expect(detailMock).toHaveBeenCalledWith("/api/concepts/vllm", expect.anything());
+
+    const apiGraph = {
+      nodes: [
+        { slug: "vllm", name: "vLLM", unit_count: 3 },
+        { slug: "sglang", name: "SGLang", unit_count: 2 },
+      ],
+      links: [{ source: "vllm", target: "sglang", weight: 2 }],
+    };
+    const graphMock = vi.fn().mockResolvedValue(Response.json(apiGraph));
+    vi.stubGlobal("fetch", graphMock);
+    await expect(fetchConceptGraph(300)).resolves.toEqual({
+      nodes: [
+        { id: "vllm", name: "vLLM", docs: 3, group: 0 },
+        { id: "sglang", name: "SGLang", docs: 2, group: 0 },
+      ],
+      links: [{ source: "vllm", target: "sglang", weight: 2 }],
+    });
+    expect(graphMock).toHaveBeenCalledWith("/api/graph?top=300", expect.anything());
+  });
+
+  it("throws session expired for enrichment endpoints on 401", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
+    await expect(fetchLabels()).rejects.toThrow("session expired");
+    await expect(fetchConcepts()).rejects.toThrow("session expired");
+    await expect(fetchConcept("vllm")).rejects.toThrow("session expired");
+    await expect(fetchConceptGraph(300)).rejects.toThrow("session expired");
   });
 
   it("manages pool membership through admin endpoints", async () => {

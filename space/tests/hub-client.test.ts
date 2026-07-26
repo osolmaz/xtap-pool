@@ -33,7 +33,7 @@ beforeEach(() => {
 describe("createHubClient", () => {
   const client = createHubClient("osolmaz/xtap-pool-data", "hf_token");
 
-  it("lists only jsonl files under data/", async () => {
+  it("lists only jsonl files under the requested prefix", async () => {
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([
         { type: "file", path: "data/osolmaz/2026/05/tweets-2026-05-21.jsonl" },
@@ -41,7 +41,7 @@ describe("createHubClient", () => {
         { type: "file", path: "data/osolmaz/notes.txt" },
       ]),
     );
-    await expect(client.listDataFiles()).resolves.toEqual([
+    await expect(client.listJsonlFiles("data")).resolves.toEqual([
       "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
     ]);
     expect(hubMocks.listFiles).toHaveBeenCalledWith(
@@ -51,20 +51,30 @@ describe("createHubClient", () => {
         recursive: true,
       }),
     );
+
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "enrichment/2026/07/enrichment-2026-07-06.jsonl" }]),
+    );
+    await expect(client.listJsonlFiles("enrichment")).resolves.toEqual([
+      "enrichment/2026/07/enrichment-2026-07-06.jsonl",
+    ]);
+    expect(hubMocks.listFiles).toHaveBeenLastCalledWith(
+      expect.objectContaining({ path: "enrichment" }),
+    );
   });
 
-  it("treats a missing data/ tree as an empty pool", async () => {
+  it("treats a missing tree as an empty listing", async () => {
     hubMocks.listFiles.mockImplementation(() => {
       throw Object.assign(new Error("not found"), { statusCode: 404 });
     });
-    await expect(client.listDataFiles()).resolves.toEqual([]);
+    await expect(client.listJsonlFiles("data")).resolves.toEqual([]);
   });
 
   it("propagates non-404 listing failures", async () => {
     hubMocks.listFiles.mockImplementation(() => {
       throw Object.assign(new Error("denied"), { statusCode: 403 });
     });
-    await expect(client.listDataFiles()).rejects.toThrow("denied");
+    await expect(client.listJsonlFiles("data")).rejects.toThrow("denied");
   });
 
   it("downloads file content and fails on missing files", async () => {

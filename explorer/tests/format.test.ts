@@ -12,6 +12,7 @@ import {
   quotedTweetUrl,
   tokenizeTweetText,
   tweetMetrics,
+  tweetTextHtml,
 } from "../src/lib/format.js";
 import { pooledTweet } from "./fixtures.js";
 
@@ -34,6 +35,22 @@ describe("tokenizeTweetText", () => {
   it("returns one plain segment for text without tokens", () => {
     expect(tokenizeTweetText("just words")).toEqual([{ kind: "text", text: "just words" }]);
     expect(tokenizeTweetText("")).toEqual([]);
+  });
+});
+
+describe("tweetTextHtml", () => {
+  it("escapes markup and linkifies tokens", () => {
+    expect(tweetTextHtml('a <b> & "quote" @alice')).toBe(
+      'a &lt;b&gt; &amp; &quot;quote&quot; <a href="https://x.com/alice" target="_blank" ' +
+        'rel="noopener noreferrer">@alice</a>',
+    );
+  });
+
+  it("escapes link text and hrefs", () => {
+    expect(tweetTextHtml("https://e.com/?a=1&b=2")).toBe(
+      '<a href="https://e.com/?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">' +
+        "https://e.com/?a=1&amp;b=2</a>",
+    );
   });
 });
 
