@@ -49,7 +49,9 @@ The update command reads the current Space variables, reuses the existing
 dataset repo and membership bootstrap settings, preserves all secrets, and only
 uploads the latest Space code plus any missing variables.
 It will not create or rotate generated signing/session secrets; run the setup
-flow if those were never initialized.
+flow if those were never initialized. Keep `HF_TOKEN` scoped to read/write the
+private dataset; if enrichment is enabled, use a separate `INFERENCE_TOKEN` for
+Inference Providers.
 
 The lower-level scripts are still available when you want to do those steps
 manually:

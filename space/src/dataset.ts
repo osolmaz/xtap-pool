@@ -40,6 +40,22 @@ function isMissingDatasetFile(error: unknown, path: string): boolean {
   );
 }
 
+async function assertDatasetRepoReadable(
+  repo: { type: "dataset"; name: string },
+  accessToken: string,
+): Promise<void> {
+  try {
+    for await (const _entry of listFiles({ repo, accessToken })) {
+      return;
+    }
+  } catch (error) {
+    throw new Error(
+      `cannot read dataset repo ${repo.name}; check that HF_TOKEN has read access to it`,
+      { cause: error },
+    );
+  }
+}
+
 export function createHubClient(datasetRepo: string, accessToken: string): HubClient {
   const repo = { type: "dataset", name: datasetRepo } as const;
   return {
@@ -50,16 +66,26 @@ export function createHubClient(datasetRepo: string, accessToken: string): HubCl
           if (entry.type === "file" && entry.path.endsWith(".jsonl")) paths.push(entry.path);
         }
       } catch (error) {
-        // A fresh pool has no such tree yet; that is a valid empty state.
-        if (isNotFound(error)) return [];
+        if (isNotFound(error)) {
+          // A fresh pool can lack the requested tree. Verify the repo itself is
+          // readable so auth failures do not look like an empty dataset.
+          await assertDatasetRepoReadable(repo, accessToken);
+          return [];
+        }
         throw error;
       }
       return paths;
     },
     async downloadFile(path: string): Promise<string> {
-      const blob = await downloadFile({ repo, accessToken, path });
-      if (blob === null) throw new Error(`dataset file not found: ${path}`);
-      return blob.text();
+      try {
+        const blob = await downloadFile({ repo, accessToken, path });
+        if (blob !== null) return await blob.text();
+        await assertDatasetRepoReadable(repo, accessToken);
+        throw new Error(`dataset file not found: ${path}`);
+      } catch (error) {
+        if (isNotFound(error)) await assertDatasetRepoReadable(repo, accessToken);
+        throw error;
+      }
     },
     async commitFiles(
       files: readonly { path: string; content: string }[],

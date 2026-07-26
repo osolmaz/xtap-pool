@@ -27,17 +27,24 @@ const membership = await PoolMembership.load({
 });
 const taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
 
-const workerDeps = {
-  enrichStore,
-  mirror,
-  taxonomy,
-  llm: createRouterLlmClient({ hfToken: config.hfToken, model: config.llmModel }),
-  model: config.llmModel,
-  maxUnitsPerTick: config.enrichMaxUnitsPerTick,
-  now: (): Date => new Date(),
-  lock: <T>(fn: () => Promise<T>): Promise<T> => mutex.run(fn),
-};
-const drainOnce = (): ReturnType<typeof runEnrichTick> => runEnrichTick(workerDeps);
+const drainOnce = createEnrichmentDrain();
+
+function createEnrichmentDrain(): () => ReturnType<typeof runEnrichTick> {
+  if (config.inferenceToken === undefined) {
+    return () => Promise.reject(new Error("INFERENCE_TOKEN is required to run enrichment."));
+  }
+  const workerDeps = {
+    enrichStore,
+    mirror,
+    taxonomy,
+    llm: createRouterLlmClient({ hfToken: config.inferenceToken, model: config.llmModel }),
+    model: config.llmModel,
+    maxUnitsPerTick: config.enrichMaxUnitsPerTick,
+    now: (): Date => new Date(),
+    lock: <T>(fn: () => Promise<T>): Promise<T> => mutex.run(fn),
+  };
+  return () => runEnrichTick(workerDeps);
+}
 
 const app = createApp({
   config,

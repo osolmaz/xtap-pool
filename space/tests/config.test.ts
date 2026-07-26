@@ -60,17 +60,25 @@ describe("loadConfig", () => {
     const config = loadConfig({
       ...baseEnv,
       ENRICH_ENABLED: "true",
+      INFERENCE_TOKEN: "hf_inference",
       ENRICH_INTERVAL_MS: "5000",
       ENRICH_MAX_UNITS_PER_TICK: "40",
       LLM_MODEL: "meta-llama/Llama-4",
       TAXONOMY_VERSION: "3",
     });
     expect(config.enrichEnabled).toBe(true);
+    expect(config.inferenceToken).toBe("hf_inference");
     expect(config.enrichIntervalMs).toBe(5000);
     expect(config.enrichMaxUnitsPerTick).toBe(40);
     expect(config.llmModel).toBe("meta-llama/Llama-4");
     expect(config.taxonomyVersion).toBe(3);
     expect(() => loadConfig({ ...baseEnv, TAXONOMY_VERSION: "0" })).toThrow();
     expect(() => loadConfig({ ...baseEnv, ENRICH_ENABLED: "yes" })).toThrow();
+  });
+
+  it("requires a separate inference token when enrichment is enabled", () => {
+    expect(() => loadConfig({ ...baseEnv, ENRICH_ENABLED: "true" })).toThrow(
+      "INFERENCE_TOKEN is required",
+    );
   });
 });

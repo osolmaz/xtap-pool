@@ -20,7 +20,8 @@ Private tweet pool for a group of friends running the
 - `/` — tweet explorer
 
 Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
-dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`.
+dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`. When enrichment is
+enabled, set `INFERENCE_TOKEN` separately for Hugging Face Inference Providers.
 Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
 comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
 (auto-injected by HF).

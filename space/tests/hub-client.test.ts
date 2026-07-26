@@ -63,11 +63,20 @@ describe("createHubClient", () => {
     );
   });
 
-  it("treats a missing tree as an empty listing", async () => {
+  it("treats a missing tree as an empty listing when the repo is readable", async () => {
+    hubMocks.listFiles
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("not found"), { statusCode: 404 });
+      })
+      .mockReturnValueOnce(asyncIterableOf([{ type: "file", path: ".gitattributes" }]));
+    await expect(client.listJsonlFiles("data")).resolves.toEqual([]);
+  });
+
+  it("does not hide private dataset access failures as an empty listing", async () => {
     hubMocks.listFiles.mockImplementation(() => {
       throw Object.assign(new Error("not found"), { statusCode: 404 });
     });
-    await expect(client.listJsonlFiles("data")).resolves.toEqual([]);
+    await expect(client.listJsonlFiles("data")).rejects.toThrow("cannot read dataset repo");
   });
 
   it("propagates non-404 listing failures", async () => {
@@ -81,7 +90,8 @@ describe("createHubClient", () => {
     hubMocks.downloadFile.mockResolvedValue(new Blob(["line\n"]));
     await expect(client.downloadFile("data/x.jsonl")).resolves.toBe("line\n");
     hubMocks.downloadFile.mockResolvedValue(null);
-    await expect(client.downloadFile("data/gone.jsonl")).rejects.toThrow("not found");
+    hubMocks.listFiles.mockReturnValue(asyncIterableOf([{ type: "file", path: ".gitattributes" }]));
+    await expect(client.downloadFile("data/gone.jsonl")).rejects.toThrow("dataset file not found");
   });
 
   it("commits files as addOrUpdate operations", async () => {

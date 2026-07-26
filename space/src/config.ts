@@ -5,6 +5,7 @@ const configSchema = z.object({
   DATA_DIR: z.string().default(".data"),
   DATASET_REPO: z.string().min(1),
   HF_TOKEN: z.string().min(1),
+  INFERENCE_TOKEN: z.string().min(1).optional(),
   POOL_SIGNING_SECRET: z.string().min(32),
   SESSION_SECRET: z.string().min(32),
   ALLOWED_USERS: z.string().min(1),
@@ -26,6 +27,7 @@ export type SpaceConfig = {
   dataDir: string;
   datasetRepo: string;
   hfToken: string;
+  inferenceToken?: string;
   poolSigningSecret: string;
   sessionSecret: string;
   allowedUsers: readonly string[];
@@ -46,6 +48,9 @@ export type SpaceConfig = {
 /** Parse and normalize configuration from environment variables. Throws on invalid config. */
 export function loadConfig(env: Record<string, string | undefined>): SpaceConfig {
   const parsed = configSchema.parse(env);
+  if (parsed.ENRICH_ENABLED === "true" && parsed.INFERENCE_TOKEN === undefined) {
+    throw new Error("INFERENCE_TOKEN is required when ENRICH_ENABLED=true.");
+  }
   const host = parsed.SPACE_HOST.replace(/\/+$/, "");
   const allowedUsers = users(parsed.ALLOWED_USERS);
   const poolAdmins = users(parsed.POOL_ADMINS);
@@ -54,6 +59,7 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     dataDir: parsed.DATA_DIR,
     datasetRepo: parsed.DATASET_REPO,
     hfToken: parsed.HF_TOKEN,
+    ...(parsed.INFERENCE_TOKEN === undefined ? {} : { inferenceToken: parsed.INFERENCE_TOKEN }),
     poolSigningSecret: parsed.POOL_SIGNING_SECRET,
     sessionSecret: parsed.SESSION_SECRET,
     allowedUsers,
