@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DatasetMirror, parseJsonlTweets } from "../src/dataset.js";
 import type { HubClient } from "../src/dataset.js";
+import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 import { FakeHub, makePooled, makeTweet } from "./helpers.js";
 
@@ -70,10 +71,83 @@ describe("DatasetMirror.rebuild", () => {
   });
 });
 
+describe("DatasetMirror enrichment rebuild", () => {
+  it("registers units during rebuild and replays enrichment shards", async () => {
+    hub.files.set(
+      "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
+      `${JSON.stringify(makePooled({ id: "1" }))}\n${JSON.stringify(makePooled({ id: "2", author: { username: "other" } }))}\n`,
+    );
+    hub.files.set(
+      "enrichment/vocabulary.json",
+      JSON.stringify({
+        version: 1,
+        updated_at: "2026-07-06T00:00:00.000Z",
+        concepts: [{ slug: "vllm", name: "vLLM", aliases: ["PagedAttention"] }],
+      }),
+    );
+    hub.files.set(
+      "enrichment/2026/07/enrichment-2026-07-06.jsonl",
+      [
+        JSON.stringify({
+          unit_id: "1:someone",
+          tweet_ids: ["1"],
+          labels: ["ai"],
+          free_labels: [],
+          concepts: [{ name: "vLLM", aliases: [] }],
+          model: "m",
+          taxonomy_version: 1,
+          enriched_at: "2026-07-06T00:00:00.000Z",
+        }),
+        "not json",
+        JSON.stringify({ unit_id: "broken" }),
+      ].join("\n"),
+    );
+    // Receipts must not be replayed as enrichment rows.
+    hub.files.set("enrichment/receipts/2026-07-06.jsonl", '{"units": 1}\n');
+
+    const enrich = new EnrichStore(store.database, 1);
+    await mirror.rebuild(store, enrich);
+    const result = await mirror.rebuildEnrichment(enrich);
+    expect(result).toEqual({ files: 1, rows: 1 });
+    expect(enrich.queueEntry("1:someone")?.status).toBe("done");
+    expect(enrich.queueEntry("2:other")?.status).toBe("queued");
+    expect(enrich.concepts()).toEqual([
+      { slug: "vllm", name: "vLLM", aliases: ["PagedAttention"], unit_count: 1 },
+    ]);
+    expect(store.query({ labels: ["ai"] }).records.map((r) => r.tweet.id)).toEqual(["1"]);
+  });
+});
+
+describe("DatasetMirror.commitBatch", () => {
+  it("appends lines and overwrites metadata files in one commit", async () => {
+    await mirror.commitBatch(
+      [{ path: "enrichment/receipts/2026-07-06.jsonl", lines: ['{"a":1}'] }],
+      [{ path: "enrichment/vocabulary.json", content: "{}\n" }],
+      "enrich: test",
+    );
+    await mirror.commitBatch(
+      [{ path: "enrichment/receipts/2026-07-06.jsonl", lines: ['{"b":2}'] }],
+      [],
+      "enrich: test 2",
+    );
+    expect(hub.files.get("enrichment/receipts/2026-07-06.jsonl")).toBe('{"a":1}\n{"b":2}\n');
+    expect(hub.files.get("enrichment/vocabulary.json")).toBe("{}\n");
+    expect(hub.commits.map((c) => c.title)).toEqual(["enrich: test", "enrich: test 2"]);
+  });
+
+  it("leaves the mirror untouched when the commit fails", async () => {
+    hub.failNextCommit = true;
+    await expect(
+      mirror.commitBatch([{ path: "enrichment/x.jsonl", lines: ["{}"] }], [], "boom"),
+    ).rejects.toThrow("hub unavailable");
+    expect(existsSync(join(dir, "enrichment/x.jsonl"))).toBe(false);
+  });
+});
+
 describe("DatasetMirror.readText", () => {
   it("treats the Hub client's missing-file error as an absent metadata file", async () => {
     const missingHub: HubClient = {
-      listDataFiles: () => Promise.resolve([]),
+      listJsonlFiles: () => Promise.resolve([]),
       downloadFile: (path) => Promise.reject(new Error(`dataset file not found: ${path}`)),
       commitFiles: () => Promise.resolve(),
     };

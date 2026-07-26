@@ -6,8 +6,12 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import { z } from "zod";
 
+import type { EnrichReceipt } from "@xtap-pool/shared";
+
 import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
+import type { EnrichTaxonomy } from "./enrich-config.js";
+import type { EnrichStore } from "./enrich-store.js";
 import { createHuggingFaceOrgResolver } from "./hf-orgs.js";
 import type { OrgResolver } from "./hf-orgs.js";
 import type { IngestOutcome } from "./ingest.js";
@@ -22,10 +26,18 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const POOL_TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 const ORG_GRANT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+export type EnrichDeps = {
+  store: EnrichStore;
+  taxonomy: EnrichTaxonomy;
+  /** Drain one enrichment tick synchronously (manual runs). */
+  run: () => Promise<EnrichReceipt>;
+};
+
 export type AppDeps = {
   config: SpaceConfig;
   store: TweetStore;
   membership: PoolMembership;
+  enrich: EnrichDeps;
   ingest: (username: string, payload: unknown) => Promise<IngestOutcome>;
   now?: () => Date;
   oauthFetch?: typeof fetch;
@@ -44,29 +56,50 @@ const tweetsQuerySchema = z.object({
   until: z.string().optional(),
   has_media: z.enum(["true", "false"]).optional(),
   is_article: z.enum(["true", "false"]).optional(),
+  labels: z.string().optional(),
+  label_mode: z.enum(["any", "all"]).default("any"),
+  free_label: z.string().optional(),
+  concept: z.string().optional(),
+  unlabeled: z.enum(["true", "false"]).optional(),
   dedup: z.enum(["true", "false"]).default("true"),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   cursor: z.string().optional(),
+});
+
+const graphQuerySchema = z.object({
+  label: z.string().optional(),
+  top: z.coerce.number().int().min(1).max(1000).default(300),
 });
 
 function parseFlag(value: "true" | "false" | undefined): boolean | undefined {
   return value === undefined ? undefined : value === "true";
 }
 
+function parseCsv(value: string | undefined): string[] | undefined {
+  const parts = value
+    ?.split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return parts === undefined || parts.length === 0 ? undefined : parts;
+}
+
 function toTweetQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
+  const labels = parseCsv(raw.labels);
   const candidate = {
     dedup: raw.dedup === "true",
     limit: raw.limit,
-    contributors: raw.contributors
-      ?.split(",")
-      .map((user) => user.trim())
-      .filter((user) => user.length > 0),
+    contributors: parseCsv(raw.contributors),
     author: raw.author,
     q: raw.q,
     since: raw.since,
     until: raw.until,
     hasMedia: parseFlag(raw.has_media),
     isArticle: parseFlag(raw.is_article),
+    labels,
+    labelMode: labels === undefined ? undefined : raw.label_mode,
+    freeLabel: raw.free_label,
+    concept: raw.concept,
+    unlabeled: raw.unlabeled === "true" ? true : undefined,
     cursor: raw.cursor,
   };
   return Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== undefined));
@@ -233,6 +266,47 @@ export function createApp(deps: AppDeps): Hono {
     const identity = sessionIdentity(c);
     if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
     return c.json({ contributors: store.contributors() });
+  });
+
+  app.get("/api/labels", (c) => {
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    return c.json(deps.enrich.store.labelsSummary(deps.enrich.taxonomy.labels));
+  });
+
+  app.get("/api/concepts", (c) => {
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    return c.json({ concepts: deps.enrich.store.concepts() });
+  });
+
+  app.get("/api/concepts/:slug", (c) => {
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    const concept = deps.enrich.store.concept(c.req.param("slug"));
+    if (concept === undefined) return c.json({ error: "unknown concept" }, 404);
+    return c.json(concept);
+  });
+
+  app.get("/api/graph", (c) => {
+    const identity = sessionIdentity(c);
+    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    const parsed = graphQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
+    return c.json(deps.enrich.store.graph({ label: parsed.data.label, top: parsed.data.top }));
+  });
+
+  app.post("/api/enrich/run", async (c) => {
+    // Manual drains: any valid pool token, or an admin session.
+    if (bearerIdentity(c) === undefined) {
+      const admin = adminUser(c);
+      if (admin instanceof Response) return admin;
+    }
+    try {
+      return c.json(await deps.enrich.run());
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 500);
+    }
   });
 
   app.get("/api/admin/pool", (c) => {

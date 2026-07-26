@@ -2,6 +2,8 @@ import Database from "better-sqlite3";
 
 import type { PooledTweet } from "@xtap-pool/shared";
 
+import { ensureEnrichmentTables } from "./enrich-store.js";
+
 export type TweetQuery = {
   contributors?: readonly string[];
   author?: string;
@@ -10,6 +12,11 @@ export type TweetQuery = {
   until?: string;
   hasMedia?: boolean;
   isArticle?: boolean;
+  labels?: readonly string[];
+  labelMode?: "any" | "all";
+  freeLabel?: string;
+  concept?: string;
+  unlabeled?: boolean;
   dedup?: boolean;
   limit?: number;
   cursor?: string;
@@ -98,7 +105,30 @@ export class TweetStore {
       CREATE INDEX IF NOT EXISTS idx_tweets_sort ON tweets(sort_ts DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_tweets_contributor ON tweets(contributed_by);
       CREATE INDEX IF NOT EXISTS idx_tweets_author ON tweets(author_username);
+      CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(
+        text, author_username, content='tweets', content_rowid='rowid'
+      );
+      CREATE TRIGGER IF NOT EXISTS tweets_fts_insert AFTER INSERT ON tweets BEGIN
+        INSERT INTO tweets_fts(rowid, text, author_username)
+        VALUES (new.rowid, new.text, new.author_username);
+      END;
+      CREATE TRIGGER IF NOT EXISTS tweets_fts_update AFTER UPDATE ON tweets BEGIN
+        INSERT INTO tweets_fts(tweets_fts, rowid, text, author_username)
+        VALUES ('delete', old.rowid, old.text, old.author_username);
+        INSERT INTO tweets_fts(rowid, text, author_username)
+        VALUES (new.rowid, new.text, new.author_username);
+      END;
+      CREATE TRIGGER IF NOT EXISTS tweets_fts_delete AFTER DELETE ON tweets BEGIN
+        INSERT INTO tweets_fts(tweets_fts, rowid, text, author_username)
+        VALUES ('delete', old.rowid, old.text, old.author_username);
+      END;
     `);
+    ensureEnrichmentTables(this.db);
+  }
+
+  /** Underlying database handle, shared with the enrichment store. */
+  get database(): Database.Database {
+    return this.db;
   }
 
   /** Split a stamped batch into tweets worth storing vs. exact/stale duplicates. */
@@ -256,6 +286,21 @@ function toParams(tweet: PooledTweet): Record<string, unknown> {
 
 type Filter = { sql: string; values: readonly unknown[] };
 
+/**
+ * FTS5 MATCH expression for a raw user query: the whole query becomes one
+ * quoted phrase (safe against MATCH syntax) with a prefix star, keeping the
+ * old LIKE substring behavior for word-boundary prefixes. Queries without a
+ * single word token cannot be expressed in FTS and yield undefined.
+ */
+export function ftsMatchQuery(q: string): string | undefined {
+  const tokens = q.match(/[\p{L}\p{N}_]+/gu);
+  if (tokens === null) return undefined;
+  // punctuation-bearing queries like "C++" or "mistral.rs" lose meaning
+  // when tokenized; keep them on the literal substring path
+  if (tokens.join(" ").length !== q.trim().length) return undefined;
+  return `"${tokens.join(" ")}"*`;
+}
+
 function textFilters(query: TweetQuery): Filter[] {
   const filters: Filter[] = [];
   if (query.contributors !== undefined && query.contributors.length > 0) {
@@ -268,8 +313,66 @@ function textFilters(query: TweetQuery): Filter[] {
     filters.push({ sql: "author_username = ?", values: [query.author.toLowerCase()] });
   }
   if (query.q !== undefined && query.q.length > 0) {
-    const like = `%${query.q}%`;
-    filters.push({ sql: "(text LIKE ? OR author_username LIKE ?)", values: [like, like] });
+    filters.push(qFilter(query.q));
+  }
+  return filters;
+}
+
+function qFilter(q: string): Filter {
+  const match = ftsMatchQuery(q);
+  if (match !== undefined) {
+    return {
+      sql: "tweets.rowid IN (SELECT rowid FROM tweets_fts WHERE tweets_fts MATCH ?)",
+      values: [match],
+    };
+  }
+  // Token-less queries (pure punctuation) fall back to a plain substring scan.
+  const like = `%${q}%`;
+  return { sql: "(text LIKE ? OR author_username LIKE ?)", values: [like, like] };
+}
+
+function labelFilters(query: TweetQuery): Filter[] {
+  const filters: Filter[] = [];
+  if (query.labels !== undefined && query.labels.length > 0) {
+    if (query.labelMode === "all") {
+      for (const label of query.labels) {
+        filters.push({
+          sql: `EXISTS (SELECT 1 FROM tweet_labels tl
+                WHERE tl.tweet_id = tweets.id AND tl.kind = 'preset' AND tl.label = ?)`,
+          values: [label],
+        });
+      }
+    } else {
+      filters.push({
+        sql: `tweets.id IN (SELECT tweet_id FROM tweet_labels
+              WHERE kind = 'preset' AND label IN (${query.labels.map(() => "?").join(",")}))`,
+        values: query.labels,
+      });
+    }
+  }
+  if (query.unlabeled === true) {
+    filters.push({
+      sql: "tweets.id NOT IN (SELECT tweet_id FROM tweet_labels WHERE kind = 'preset')",
+      values: [],
+    });
+  }
+  return filters;
+}
+
+function conceptFilters(query: TweetQuery): Filter[] {
+  const filters: Filter[] = [];
+  if (query.freeLabel !== undefined) {
+    filters.push({
+      sql: "tweets.id IN (SELECT tweet_id FROM tweet_labels WHERE kind = 'free' AND label = ?)",
+      values: [query.freeLabel],
+    });
+  }
+  if (query.concept !== undefined) {
+    filters.push({
+      sql: `tweets.id IN (SELECT um.tweet_id FROM unit_members um
+            JOIN concept_assignments ca ON ca.unit_id = um.unit_id WHERE ca.slug = ?)`,
+      values: [query.concept],
+    });
   }
   return filters;
 }
@@ -288,7 +391,12 @@ function rangeAndFlagFilters(query: TweetQuery): Filter[] {
 }
 
 function buildFilters(query: TweetQuery): { whereSql: string; params: unknown[] } {
-  const filters = [...textFilters(query), ...rangeAndFlagFilters(query)];
+  const filters = [
+    ...textFilters(query),
+    ...rangeAndFlagFilters(query),
+    ...labelFilters(query),
+    ...conceptFilters(query),
+  ];
   const whereSql = ["1=1", ...filters.map((filter) => filter.sql)].join(" AND ");
   return { whereSql, params: filters.flatMap((filter) => [...filter.values]) };
 }

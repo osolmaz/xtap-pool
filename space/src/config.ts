@@ -14,6 +14,11 @@ const configSchema = z.object({
   OPENID_PROVIDER_URL: z.string().default("https://huggingface.co"),
   SPACE_HOST: z.string().min(1),
   STATIC_ROOT: z.string().default("../explorer/dist"),
+  ENRICH_ENABLED: z.enum(["true", "false"]).default("false"),
+  ENRICH_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
+  ENRICH_MAX_UNITS_PER_TICK: z.coerce.number().int().positive().default(100),
+  LLM_MODEL: z.string().min(1).default("zai-org/GLM-5.2"),
+  TAXONOMY_VERSION: z.coerce.number().int().min(1).default(1),
 });
 
 export type SpaceConfig = {
@@ -31,6 +36,11 @@ export type SpaceConfig = {
   /** Public base URL of the Space, e.g. `https://user-xtap-pool.hf.space`. */
   publicUrl: string;
   staticRoot: string;
+  enrichEnabled: boolean;
+  enrichIntervalMs: number;
+  enrichMaxUnitsPerTick: number;
+  llmModel: string;
+  taxonomyVersion: number;
 };
 
 /** Parse and normalize configuration from environment variables. Throws on invalid config. */
@@ -53,6 +63,11 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     openidProviderUrl: parsed.OPENID_PROVIDER_URL.replace(/\/+$/, ""),
     publicUrl: host.startsWith("http") ? host : `https://${host}`,
     staticRoot: parsed.STATIC_ROOT,
+    enrichEnabled: parsed.ENRICH_ENABLED === "true",
+    enrichIntervalMs: parsed.ENRICH_INTERVAL_MS,
+    enrichMaxUnitsPerTick: parsed.ENRICH_MAX_UNITS_PER_TICK,
+    llmModel: parsed.LLM_MODEL,
+    taxonomyVersion: parsed.TAXONOMY_VERSION,
   };
 }
 

@@ -46,4 +46,31 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnv, POOL_SIGNING_SECRET: "short" })).toThrow();
     expect(() => loadConfig({ ...baseEnv, HF_TOKEN: "" })).toThrow();
   });
+
+  it("defaults the enrichment settings with the worker off", () => {
+    const config = loadConfig(baseEnv);
+    expect(config.enrichEnabled).toBe(false);
+    expect(config.enrichIntervalMs).toBe(60000);
+    expect(config.enrichMaxUnitsPerTick).toBe(100);
+    expect(config.llmModel).toBe("zai-org/GLM-5.2");
+    expect(config.taxonomyVersion).toBe(1);
+  });
+
+  it("parses explicit enrichment settings", () => {
+    const config = loadConfig({
+      ...baseEnv,
+      ENRICH_ENABLED: "true",
+      ENRICH_INTERVAL_MS: "5000",
+      ENRICH_MAX_UNITS_PER_TICK: "40",
+      LLM_MODEL: "meta-llama/Llama-4",
+      TAXONOMY_VERSION: "3",
+    });
+    expect(config.enrichEnabled).toBe(true);
+    expect(config.enrichIntervalMs).toBe(5000);
+    expect(config.enrichMaxUnitsPerTick).toBe(40);
+    expect(config.llmModel).toBe("meta-llama/Llama-4");
+    expect(config.taxonomyVersion).toBe(3);
+    expect(() => loadConfig({ ...baseEnv, TAXONOMY_VERSION: "0" })).toThrow();
+    expect(() => loadConfig({ ...baseEnv, ENRICH_ENABLED: "yes" })).toThrow();
+  });
 });

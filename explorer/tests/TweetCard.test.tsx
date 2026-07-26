@@ -1,12 +1,19 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { TweetCard } from "../src/components/TweetCard.js";
+import type { LinkableConcept } from "../src/lib/concept-links.js";
+import { VocabularyContext } from "../src/lib/vocabulary.js";
 import { pooledTweet } from "./fixtures.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 
-afterEach(cleanup);
+const VOCABULARY: LinkableConcept[] = [{ slug: "vllm", name: "vLLM", aliases: ["vllm"] }];
+
+afterEach(() => {
+  cleanup();
+  window.history.replaceState(null, "", "/");
+});
 
 describe("TweetCard", () => {
   it("renders identity, text, date and the view-on-X link", () => {
@@ -57,5 +64,35 @@ describe("TweetCard", () => {
     const tweet = pooledTweet({ created_at: undefined });
     render(<TweetCard tweet={tweet} contributors={[]} now={NOW} />);
     expect(screen.getByText("May 21")).toBeDefined();
+  });
+
+  it("escapes raw markup in tweet text", () => {
+    const tweet = pooledTweet({ text: "look <b>bold</b> & fine" });
+    const { container } = render(<TweetCard tweet={tweet} contributors={[]} now={NOW} />);
+    expect(container.querySelector("b")).toBeNull();
+    expect(screen.getByText("look <b>bold</b> & fine")).toBeDefined();
+  });
+
+  it("links the first concept mention and navigates on click", () => {
+    const tweet = pooledTweet({ text: "vllm is fast. I benchmarked vllm twice." });
+    const { container } = render(
+      <VocabularyContext.Provider value={VOCABULARY}>
+        <TweetCard tweet={tweet} contributors={[]} now={NOW} />
+      </VocabularyContext.Provider>,
+    );
+    const anchors = container.querySelectorAll("a.concept-link");
+    expect(anchors).toHaveLength(1);
+    const anchor = anchors[0];
+    expect(anchor?.getAttribute("href")).toBe("/graph/vllm");
+    expect(anchor?.textContent).toBe("vllm");
+    if (anchor !== undefined) fireEvent.click(anchor);
+    expect(window.location.pathname).toBe("/graph/vllm");
+  });
+
+  it("renders plain text when the vocabulary is empty", () => {
+    const tweet = pooledTweet({ text: "vllm is fast" });
+    const { container } = render(<TweetCard tweet={tweet} contributors={[]} now={NOW} />);
+    expect(container.querySelector("a.concept-link")).toBeNull();
+    expect(screen.getByText("vllm is fast")).toBeDefined();
   });
 });

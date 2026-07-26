@@ -1,10 +1,21 @@
 import { useEffect, useState } from "react";
 
 import { AdminPanel } from "./components/AdminPanel.js";
+import { ConceptPage } from "./components/ConceptPage.js";
 import { FiltersPanel } from "./components/Filters.js";
 import { Feed } from "./components/Feed.js";
-import type { ContributorStats, Filters } from "./lib/api.js";
-import { defaultFilters, fetchContributors, fetchMe } from "./lib/api.js";
+import { GraphPage } from "./components/GraphPage.js";
+import type { ConceptSummary, ContributorStats, Filters, LabelStat } from "./lib/api.js";
+import {
+  defaultFilters,
+  fetchConcepts,
+  fetchContributors,
+  fetchLabels,
+  fetchMe,
+} from "./lib/api.js";
+import type { Route } from "./lib/router.js";
+import { navigate, useRoute } from "./lib/router.js";
+import { VocabularyContext } from "./lib/vocabulary.js";
 
 type AuthState =
   | { status: "checking" }
@@ -81,12 +92,32 @@ function SignIn(): React.JSX.Element {
   );
 }
 
-/** Root explorer app: auth gate, filter rail and tweet feed. */
-export function App(): React.JSX.Element {
-  const [auth, setAuth] = useState<AuthState>({ status: "checking" });
-  const [view, setView] = useState<View>("feed");
-  const [filters, setFilters] = useState<Filters>(defaultFilters);
-  const [contributors, setContributors] = useState<readonly ContributorStats[]>([]);
+type SidebarProps = {
+  username: string;
+  isAdmin: boolean;
+  view: View;
+  onGraphRoute: boolean;
+  filters: Filters;
+  contributors: readonly ContributorStats[];
+  labels: readonly LabelStat[];
+  concepts: readonly ConceptSummary[];
+  onView: (view: View) => void;
+  onFilters: (filters: Filters) => void;
+};
+
+/** Left rail: identity, view tabs (including the graph route) and filters. */
+function Sidebar({
+  username,
+  isAdmin,
+  view,
+  onGraphRoute,
+  filters,
+  contributors,
+  labels,
+  concepts,
+  onView,
+  onFilters,
+}: SidebarProps): React.JSX.Element {
   const tabClass = (active: boolean, tone: "default" | "accent" = "default"): string =>
     [
       "rounded-md border px-3 py-1.5 text-sm font-semibold",
@@ -95,6 +126,98 @@ export function App(): React.JSX.Element {
     ]
       .filter(Boolean)
       .join(" ");
+  const feedActive = !onGraphRoute && view === "feed";
+  const installActive = !onGraphRoute && view === "install";
+  const adminActive = !onGraphRoute && view === "admin";
+
+  return (
+    <aside>
+      <header className="mb-4">
+        <h1 className="text-xl font-bold">xtap-pool</h1>
+        <p className="text-sm text-(--x-muted)">signed in as @{username}</p>
+      </header>
+      <nav className="mb-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          aria-pressed={feedActive}
+          className={tabClass(feedActive)}
+          onClick={() => {
+            onView("feed");
+          }}
+        >
+          Feed
+        </button>
+        <button
+          type="button"
+          aria-pressed={onGraphRoute}
+          className={tabClass(onGraphRoute)}
+          onClick={() => {
+            navigate("/graph");
+          }}
+        >
+          Graph
+        </button>
+        <button
+          type="button"
+          aria-pressed={installActive}
+          className={tabClass(installActive, "accent")}
+          onClick={() => {
+            onView("install");
+          }}
+        >
+          Install
+        </button>
+        {isAdmin ? (
+          <button
+            type="button"
+            aria-pressed={adminActive}
+            className={tabClass(adminActive)}
+            onClick={() => {
+              onView("admin");
+            }}
+          >
+            Admin
+          </button>
+        ) : null}
+      </nav>
+      {feedActive ? (
+        <FiltersPanel
+          filters={filters}
+          contributors={contributors}
+          labels={labels}
+          concepts={concepts}
+          onChange={onFilters}
+        />
+      ) : null}
+    </aside>
+  );
+}
+
+type MainContentProps = {
+  route: Route;
+  view: View;
+  isAdmin: boolean;
+  filters: Filters;
+};
+
+/** Active main pane: graph routes win over the feed-shell view tabs. */
+function MainContent({ route, view, isAdmin, filters }: MainContentProps): React.JSX.Element {
+  if (route.kind === "concept") return <ConceptPage key={route.slug} slug={route.slug} />;
+  if (route.kind === "graph") return <GraphPage />;
+  if (view === "install") return <InstallExtension />;
+  if (view === "admin" && isAdmin) return <AdminPanel />;
+  return <Feed filters={filters} />;
+}
+
+/** Root explorer app: auth gate, routing, filter rail and tweet feed. */
+export function App(): React.JSX.Element {
+  const [auth, setAuth] = useState<AuthState>({ status: "checking" });
+  const [view, setView] = useState<View>("feed");
+  const [filters, setFilters] = useState<Filters>(defaultFilters);
+  const [contributors, setContributors] = useState<readonly ContributorStats[]>([]);
+  const [labels, setLabels] = useState<readonly LabelStat[]>([]);
+  const [vocabulary, setVocabulary] = useState<readonly ConceptSummary[]>([]);
+  const route = useRoute();
 
   useEffect(() => {
     void (async (): Promise<void> => {
@@ -114,6 +237,8 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (auth.status !== "signed-in") return;
     void fetchContributors().then(setContributors, () => undefined);
+    void fetchLabels().then(setLabels, () => undefined);
+    void fetchConcepts().then(setVocabulary, () => undefined);
   }, [auth.status]);
 
   if (auth.status === "checking") {
@@ -123,60 +248,30 @@ export function App(): React.JSX.Element {
     return <SignIn />;
   }
 
+  const selectView = (next: View): void => {
+    setView(next);
+    if (route.kind !== "home") navigate("/");
+  };
+
   return (
-    <div className="mx-auto grid max-w-4xl grid-cols-1 gap-6 px-4 py-6 md:grid-cols-[14rem_minmax(0,1fr)]">
-      <aside>
-        <header className="mb-4">
-          <h1 className="text-xl font-bold">xtap-pool</h1>
-          <p className="text-sm text-(--x-muted)">signed in as @{auth.username}</p>
-        </header>
-        <nav className="mb-4 flex gap-2">
-          <button
-            type="button"
-            aria-pressed={view === "feed"}
-            className={tabClass(view === "feed")}
-            onClick={() => {
-              setView("feed");
-            }}
-          >
-            Feed
-          </button>
-          <button
-            type="button"
-            aria-pressed={view === "install"}
-            className={tabClass(view === "install", "accent")}
-            onClick={() => {
-              setView("install");
-            }}
-          >
-            Install
-          </button>
-          {auth.isAdmin ? (
-            <button
-              type="button"
-              aria-pressed={view === "admin"}
-              className={tabClass(view === "admin")}
-              onClick={() => {
-                setView("admin");
-              }}
-            >
-              Admin
-            </button>
-          ) : null}
-        </nav>
-        {view === "feed" ? (
-          <FiltersPanel filters={filters} contributors={contributors} onChange={setFilters} />
-        ) : null}
-      </aside>
-      <main className="border-x border-(--x-border)">
-        {view === "install" ? (
-          <InstallExtension />
-        ) : view === "admin" && auth.isAdmin ? (
-          <AdminPanel />
-        ) : (
-          <Feed filters={filters} />
-        )}
-      </main>
-    </div>
+    <VocabularyContext.Provider value={vocabulary}>
+      <div className="mx-auto grid max-w-4xl grid-cols-1 gap-6 px-4 py-6 md:grid-cols-[14rem_minmax(0,1fr)]">
+        <Sidebar
+          username={auth.username}
+          isAdmin={auth.isAdmin}
+          view={view}
+          onGraphRoute={route.kind !== "home"}
+          filters={filters}
+          contributors={contributors}
+          labels={labels}
+          concepts={vocabulary}
+          onView={selectView}
+          onFilters={setFilters}
+        />
+        <main className="border-x border-(--x-border)">
+          <MainContent route={route} view={view} isAdmin={auth.isAdmin} filters={filters} />
+        </main>
+      </div>
+    </VocabularyContext.Provider>
   );
 }

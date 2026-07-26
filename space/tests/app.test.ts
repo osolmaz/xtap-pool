@@ -5,8 +5,13 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { EnrichReceipt } from "@xtap-pool/shared";
+
 import { createApp } from "../src/app.js";
+import type { EnrichDeps } from "../src/app.js";
 import { DatasetMirror } from "../src/dataset.js";
+import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
+import { EnrichStore } from "../src/enrich-store.js";
 import { Mutex, ingestBatch } from "../src/ingest.js";
 import { PoolMembership } from "../src/membership.js";
 import { mintPoolToken } from "../src/pool-token.js";
@@ -16,11 +21,22 @@ import { FakeHub, makeTweet, testConfig } from "./helpers.js";
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
 
+const EMPTY_RECEIPT: EnrichReceipt = {
+  started_at: NOW.toISOString(),
+  finished_at: NOW.toISOString(),
+  units: 0,
+  calls: 0,
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  failures: 0,
+};
+
 let dir: string;
 let hub: FakeHub;
 let store: TweetStore;
 let app: Hono;
 let membership: PoolMembership;
+let enrich: EnrichDeps;
 
 function sessionCookie(
   username: string,
@@ -49,13 +65,21 @@ beforeEach(async () => {
     now: () => NOW,
   });
   const mutex = new Mutex();
+  enrich = {
+    store: new EnrichStore(store.database, 1, () => NOW),
+    taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
+    run: () => Promise.resolve(EMPTY_RECEIPT),
+  };
   app = createApp({
     config: testConfig,
     store,
     membership,
+    enrich,
     now: () => NOW,
     ingest: (username, payload) =>
-      mutex.run(() => ingestBatch({ store, mirror, now: () => NOW }, username, payload)),
+      mutex.run(() =>
+        ingestBatch({ store, mirror, enrich: enrich.store, now: () => NOW }, username, payload),
+      ),
   });
 });
 
@@ -159,6 +183,153 @@ describe("session-guarded reads", () => {
   });
 });
 
+describe("enrichment endpoints", () => {
+  const headers = { cookie: sessionCookie("osolmaz") };
+
+  async function seedEnrichedTweets(): Promise<void> {
+    await app.request("/api/ingest", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: bearer("alice") },
+      body: JSON.stringify({
+        tweets: [
+          makeTweet({ id: "1", text: "vllm ships fp8" }),
+          makeTweet({ id: "2", text: "agents!", author: { username: "swyx" } }),
+        ],
+      }),
+    });
+    enrich.store.applyEnrichment({
+      unit_id: "1:someone",
+      tweet_ids: ["1"],
+      labels: ["ai", "inference-performance"],
+      free_labels: ["fp8"],
+      concepts: [
+        { name: "vLLM", aliases: ["vllm engine"] },
+        { name: "FP8", aliases: [] },
+      ],
+      model: "m",
+      taxonomy_version: 1,
+      enriched_at: NOW.toISOString(),
+    });
+  }
+
+  it("rejects unauthenticated enrichment reads", async () => {
+    expect((await app.request("/api/labels")).status).toBe(401);
+    expect((await app.request("/api/concepts")).status).toBe(401);
+    expect((await app.request("/api/concepts/vllm")).status).toBe(401);
+    expect((await app.request("/api/graph")).status).toBe(401);
+  });
+
+  it("filters /api/tweets by labels, free labels, concepts and unlabeled", async () => {
+    await seedEnrichedTweets();
+    const ids = async (query: string): Promise<string[]> => {
+      const response = await app.request(`/api/tweets?${query}`, { headers });
+      const page = (await response.json()) as { records: { tweet: { id: string } }[] };
+      return page.records.map((record) => record.tweet.id).sort();
+    };
+    await expect(ids("labels=ai")).resolves.toEqual(["1"]);
+    await expect(ids("labels=ai,agents&label_mode=all")).resolves.toEqual([]);
+    await expect(ids("labels=ai,inference-performance&label_mode=all")).resolves.toEqual(["1"]);
+    await expect(ids("free_label=fp8")).resolves.toEqual(["1"]);
+    await expect(ids("concept=vllm")).resolves.toEqual(["1"]);
+    await expect(ids("unlabeled=true")).resolves.toEqual(["2"]);
+    await expect(ids("labels=ai&q=vllm")).resolves.toEqual(["1"]);
+  });
+
+  it("serves the labels summary with counts, queue depth and coverage", async () => {
+    await seedEnrichedTweets();
+    const summary = (await (await app.request("/api/labels", { headers })).json()) as {
+      taxonomy_version: number;
+      labels: { name: string; count: number }[];
+      free_labels: { name: string; count: number }[];
+      queue: { queued: number; done: number };
+      coverage: { units_total: number; units_enriched: number };
+    };
+    expect(summary.taxonomy_version).toBe(1);
+    expect(summary.labels.find((label) => label.name === "ai")?.count).toBe(1);
+    expect(summary.free_labels).toEqual([{ name: "fp8", count: 1 }]);
+    expect(summary.queue).toMatchObject({ queued: 1, done: 1 });
+    expect(summary.coverage).toEqual({ units_total: 2, units_enriched: 1 });
+  });
+
+  it("serves concepts, one concept with relations, and 404 for unknown slugs", async () => {
+    await seedEnrichedTweets();
+    const list = (await (await app.request("/api/concepts", { headers })).json()) as {
+      concepts: { slug: string }[];
+    };
+    expect(list.concepts.map((concept) => concept.slug)).toEqual(["fp8", "vllm"]);
+
+    const detail = (await (await app.request("/api/concepts/vllm", { headers })).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(detail).toMatchObject({
+      slug: "vllm",
+      name: "vLLM",
+      aliases: ["vllm engine"],
+      unit_count: 1,
+      tweet_count: 1,
+      related: [{ slug: "fp8", name: "FP8", shared_units: 1 }],
+    });
+    expect((await app.request("/api/concepts/nope", { headers })).status).toBe(404);
+  });
+
+  it("serves a bounded concept graph with an optional label filter", async () => {
+    await seedEnrichedTweets();
+    const graph = (await (await app.request("/api/graph", { headers })).json()) as {
+      nodes: { slug: string }[];
+      links: { source: string; target: string; weight: number }[];
+    };
+    expect(graph.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
+    expect(graph.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
+
+    const bounded = (await (await app.request("/api/graph?top=1", { headers })).json()) as {
+      nodes: unknown[];
+      links: unknown[];
+    };
+    expect(bounded.nodes).toHaveLength(1);
+    expect(bounded.links).toHaveLength(0);
+
+    const labeled = (await (await app.request("/api/graph?label=agents", { headers })).json()) as {
+      nodes: unknown[];
+    };
+    expect(labeled.nodes).toHaveLength(0);
+
+    expect((await app.request("/api/graph?top=0", { headers })).status).toBe(400);
+    expect((await app.request("/api/graph?top=5000", { headers })).status).toBe(400);
+  });
+
+  it("gates manual enrichment runs to pool tokens and admin sessions", async () => {
+    const run = async (init: RequestInit = {}): Promise<Response> =>
+      app.request("/api/enrich/run", { method: "POST", ...init });
+    expect((await run()).status).toBe(401);
+    expect((await run({ headers: { cookie: sessionCookie("alice") } })).status).toBe(403);
+
+    const viaAdmin = await run({ headers: { cookie: sessionCookie("osolmaz") } });
+    expect(viaAdmin.status).toBe(200);
+    await expect(viaAdmin.json()).resolves.toEqual(EMPTY_RECEIPT);
+
+    const viaToken = await run({ headers: { authorization: bearer("alice") } });
+    expect(viaToken.status).toBe(200);
+  });
+
+  it("returns 500 with the error message when a manual run fails", async () => {
+    const failingApp = createApp({
+      config: testConfig,
+      store,
+      membership,
+      enrich: { ...enrich, run: () => Promise.reject(new Error("router down")) },
+      now: () => NOW,
+      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+    });
+    const response = await failingApp.request("/api/enrich/run", {
+      method: "POST",
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ error: "router down" });
+  });
+});
+
 describe("oauth + connect flow", () => {
   it("redirects /connect to login without a session", async () => {
     const response = await app.request("/connect");
@@ -186,6 +357,7 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
@@ -218,6 +390,7 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
@@ -249,6 +422,7 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      enrich,
       now: () => NOW,
       ingest: (username, payload) =>
         new Mutex().run(() =>
@@ -304,6 +478,7 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
@@ -422,6 +597,7 @@ describe("admin pool management", () => {
       config: testConfig,
       store,
       membership,
+      enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       resolveOrg: (orgName) =>

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { TweetStore, decodeCursor, encodeCursor } from "../src/store.js";
+import { TweetStore, decodeCursor, encodeCursor, ftsMatchQuery } from "../src/store.js";
 import { makePooled } from "./helpers.js";
 
 let store: TweetStore;
@@ -152,6 +152,57 @@ describe("query", () => {
   });
 });
 
+describe("full-text search (q)", () => {
+  beforeEach(() => {
+    store.insert([
+      makePooled({ id: "1", text: "vLLM is fast", author: { username: "karpathy" } }),
+      makePooled({ id: "2", text: "agents everywhere now", author: { username: "swyx" } }),
+      makePooled({ id: "3", text: "don't quantize blindly", author: { username: "simonw" } }),
+    ]);
+  });
+
+  const ids = (q: string): string[] =>
+    store
+      .query({ q, dedup: false })
+      .records.map((record) => record.tweet.id)
+      .sort();
+
+  it("still matches word-boundary substrings previously matched by LIKE", () => {
+    expect(ids("vllm")).toEqual(["1"]);
+    expect(ids("VLLM")).toEqual(["1"]);
+    expect(ids("agents everywhere")).toEqual(["2"]);
+    expect(ids("simonw")).toEqual(["3"]);
+    expect(ids("quant")).toEqual(["3"]);
+    expect(ids("everyw")).toEqual(["2"]);
+    expect(ids("nomatch")).toEqual([]);
+  });
+
+  it("matches punctuated text and treats MATCH syntax as literal", () => {
+    expect(ids("don't quantize")).toEqual(["3"]);
+    expect(ids('vllm" OR "agents')).toEqual([]);
+    expect(ids("agents NOT everywhere")).toEqual([]);
+  });
+
+  it("falls back to a substring scan for token-less queries", () => {
+    expect(ftsMatchQuery("'?!")).toBeUndefined();
+    expect(ids("'t quantize")).toEqual(["3"]);
+    expect(ids("!!!")).toEqual([]);
+  });
+
+  it("reindexes re-captured tweets so stale text stops matching", () => {
+    store.insert([
+      makePooled({
+        id: "1",
+        captured_at: "2026-05-22T00:00:00.000Z",
+        text: "sglang is fast",
+        author: { username: "karpathy" },
+      }),
+    ]);
+    expect(ids("vllm")).toEqual([]);
+    expect(ids("sglang")).toEqual(["1"]);
+  });
+});
+
 describe("contributors + cursors", () => {
   it("reports per-contributor stats", () => {
     store.insert([
@@ -171,5 +222,16 @@ describe("contributors + cursors", () => {
     expect(decodeCursor("zzz")).toBeUndefined();
     expect(decodeCursor(Buffer.from("[1]").toString("base64url"))).toBeUndefined();
     expect(decodeCursor(Buffer.from("[1,2]").toString("base64url"))).toBeUndefined();
+  });
+});
+
+describe("punctuation-sensitive search", () => {
+  it("keeps literal matching for queries the tokenizer would distort", () => {
+    store.insert([
+      makePooled({ id: "900", text: "I love C++ so much" }),
+      makePooled({ id: "901", text: "cats and C# forever", conversation_id: "901" }),
+    ]);
+    const page = store.query({ q: "C++" });
+    expect(page.records.map((record) => record.tweet.id)).toEqual(["900"]);
   });
 });

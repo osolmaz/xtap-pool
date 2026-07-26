@@ -3,6 +3,7 @@ import type { PooledTweet } from "@xtap-pool/shared";
 import { z } from "zod";
 
 import type { DatasetMirror } from "./dataset.js";
+import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
 const MAX_BATCH = 1000;
@@ -23,6 +24,8 @@ export type IngestOutcome =
 export type IngestDeps = {
   store: TweetStore;
   mirror: DatasetMirror;
+  /** When present, ingested tweets enqueue their units for enrichment. */
+  enrich?: EnrichStore;
   now: () => Date;
 };
 
@@ -81,5 +84,6 @@ export async function ingestBatch(
   }
 
   deps.store.insert(accepted);
+  deps.enrich?.registerTweets(accepted);
   return { ok: true, added: accepted.length, duplicates: skippedDuplicates, rejected };
 }

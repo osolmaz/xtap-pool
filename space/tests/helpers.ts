@@ -17,6 +17,11 @@ export const testConfig: SpaceConfig = {
   openidProviderUrl: "https://huggingface.co",
   publicUrl: "https://dutifuldev-xtap-pool.hf.space",
   staticRoot: "../explorer/dist",
+  enrichEnabled: false,
+  enrichIntervalMs: 60000,
+  enrichMaxUnitsPerTick: 100,
+  llmModel: "zai-org/GLM-5.2",
+  taxonomyVersion: 1,
 };
 
 export function makeTweet(overrides: Record<string, unknown> = {}): Tweet {
@@ -47,9 +52,11 @@ export class FakeHub implements HubClient {
   commits: { paths: string[]; title: string }[] = [];
   failNextCommit = false;
 
-  listDataFiles(): Promise<string[]> {
+  listJsonlFiles(prefix: string): Promise<string[]> {
     return Promise.resolve(
-      [...this.files.keys()].filter((path) => path.startsWith("data/") && path.endsWith(".jsonl")),
+      [...this.files.keys()].filter(
+        (path) => path.startsWith(`${prefix}/`) && path.endsWith(".jsonl"),
+      ),
     );
   }
 
