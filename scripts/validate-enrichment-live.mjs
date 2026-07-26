@@ -15,6 +15,10 @@ if (!token) {
   process.exit(1);
 }
 const maxUnits = Number(process.argv[2] ?? "40");
+if (!Number.isInteger(maxUnits) || maxUnits < 1 || maxUnits > 200) {
+  console.error("maxUnits must be an integer between 1 and 200");
+  process.exit(1);
+}
 
 async function fetchPoolSample() {
   const headers = { authorization: `Bearer ${token}` };
