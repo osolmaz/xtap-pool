@@ -7,7 +7,7 @@
     "xtap-pool-setup": "dist/src/main.js"
   },
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc --build ../shared tsconfig.json",
     "dev": "npm run build && npm run start",
     "start": "node dist/src/main.js",
     "format": "prettier --check .",
@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
-    "@huggingface/hub": "^2.13.2"
+    "@huggingface/hub": "^2.13.2",
+    "@xtap-pool/shared": "*"
   }
 }

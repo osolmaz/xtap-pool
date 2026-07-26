@@ -15,9 +15,20 @@ describe("setup CLI command parsing", () => {
     });
   });
 
-  it("rejects unknown commands and invalid update arguments", () => {
+  it("parses doctor mode with optional output and fix flags", () => {
+    expect(parseSetupCommand(["doctor"])).toEqual({ kind: "doctor", json: false, fix: false });
+    expect(parseSetupCommand(["doctor", "alice/xtap-pool", "--json", "--fix"])).toEqual({
+      kind: "doctor",
+      spaceRepo: "alice/xtap-pool",
+      json: true,
+      fix: true,
+    });
+  });
+
+  it("rejects unknown commands and invalid arguments", () => {
     expect(() => parseSetupCommand(["deploy"])).toThrow("Unknown command");
     expect(() => parseSetupCommand(["update", "not-a-repo"])).toThrow("owner/name");
     expect(() => parseSetupCommand(["update", "alice/xtap-pool", "extra"])).toThrow("Usage");
+    expect(() => parseSetupCommand(["doctor", "alice/xtap-pool", "extra"])).toThrow("Usage");
   });
 });

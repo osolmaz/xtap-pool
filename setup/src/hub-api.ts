@@ -44,6 +44,17 @@ export async function setSpaceSecret(
   });
 }
 
+export async function getSpaceSecrets(
+  client: HubClient,
+  spaceRepo: string,
+): Promise<ReadonlySet<string>> {
+  const response = await hubRequest(client, `/api/spaces/${spaceRepo}/secrets`, {
+    method: "GET",
+  });
+  const payload: unknown = await response.json();
+  return parseSpaceSecrets(payload);
+}
+
 export async function getRepoPrivateState(client: HubClient, repo: HubRepo): Promise<boolean> {
   const payload = await hubRequestJson(client, `/api/${repo.type}s/${repo.name}`, {
     method: "GET",
@@ -62,6 +73,27 @@ export function parseSpaceVariables(payload: unknown): ReadonlyMap<string, strin
     else if (typeof variable["value"] === "string") result.set(key, variable["value"]);
   }
   return result;
+}
+
+export function parseSpaceSecrets(payload: unknown): ReadonlySet<string> {
+  const result = new Set<string>();
+  for (const item of arrayPayload(payload)) {
+    const secret = asRecord(item);
+    if (typeof secret["key"] === "string") result.add(secret["key"]);
+  }
+  const root = asRecord(payload);
+  if (!("secrets" in root)) {
+    for (const key of Object.keys(root)) result.add(key);
+  }
+  return result;
+}
+
+function arrayPayload(payload: unknown): readonly unknown[] {
+  if (Array.isArray(payload)) return payload;
+  const root = asRecord(payload);
+  const secrets = root["secrets"];
+  if (Array.isArray(secrets)) return secrets;
+  return [];
 }
 
 async function hubRequest(client: HubClient, path: string, init: RequestInit): Promise<Response> {

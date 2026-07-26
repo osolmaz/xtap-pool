@@ -131,6 +131,11 @@ export class TweetStore {
     return this.db;
   }
 
+  /** Clear the tweet index before replaying a complete dataset snapshot. */
+  clearForRebuild(): void {
+    this.db.prepare("DELETE FROM tweets").run();
+  }
+
   /** Split a stamped batch into tweets worth storing vs. exact/stale duplicates. */
   classify(tweets: readonly PooledTweet[]): ClassifiedBatch {
     const existingStmt = this.db.prepare(

@@ -60,7 +60,7 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   outro(`Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`);
 }
 
-async function activeHfToken(): Promise<string> {
+export async function activeHfToken(): Promise<string> {
   const result = await captureCommand("hf", ["auth", "token", "--quiet"]);
   const token = result.stdout.trim();
   if (token.length === 0) throw new Error("No active hf token. Run `hf auth login` first.");

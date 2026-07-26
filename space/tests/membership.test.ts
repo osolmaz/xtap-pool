@@ -191,6 +191,80 @@ describe("PoolMembership", () => {
     expect(membership.snapshot().members).toEqual(["alice", "osolmaz"]);
   });
 
+  it("falls back to bootstrap members when config cannot be read", async () => {
+    const brokenMirror = new DatasetMirror(
+      {
+        listJsonlFiles: () => Promise.resolve([]),
+        downloadFile: () => Promise.reject(new Error("cannot read dataset")),
+        commitFiles: () => Promise.resolve(),
+      },
+      dir,
+    );
+    const membership = await PoolMembership.load({
+      mirror: brokenMirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+    expect(membership.snapshot()).toMatchObject({
+      source: "bootstrap",
+      config_error: "cannot read dataset",
+    });
+    expect(membership.isAdmin("osolmaz")).toBe(true);
+    expect(membership.hasPermanentConfigError()).toBe(false);
+    await expect(membership.repairConfig("osolmaz")).rejects.toThrow(
+      "does not have a repairable validation error",
+    );
+    await expect(membership.addMember("osolmaz", "alice")).rejects.toThrow(
+      "pool config is unavailable",
+    );
+  });
+
+  it("reloads dataset membership after a transient read failure", async () => {
+    hub.files.set(
+      "config/pool.json",
+      JSON.stringify({
+        version: 1,
+        admins: ["carol"],
+        members: ["carol"],
+        updated_at: NOW.toISOString(),
+      }),
+    );
+    let failReads = true;
+    const flakyMirror = new DatasetMirror(
+      {
+        listJsonlFiles: (prefix) => hub.listJsonlFiles(prefix),
+        downloadFile: (path) => {
+          if (failReads) return Promise.reject(new Error("temporary hub failure"));
+          return hub.downloadFile(path);
+        },
+        commitFiles: (files, title) => hub.commitFiles(files, title),
+      },
+      dir,
+    );
+    const membership = await PoolMembership.load({
+      mirror: flakyMirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+    expect(membership.snapshot()).toMatchObject({
+      source: "bootstrap",
+      config_error: "temporary hub failure",
+    });
+
+    failReads = false;
+    await expect(membership.reload()).resolves.toMatchObject({
+      source: "dataset",
+      members: ["carol", "osolmaz"],
+      admins: ["carol", "osolmaz"],
+    });
+    expect(membership.snapshot().config_error).toBeUndefined();
+    await expect(membership.addMember("carol", "alice")).resolves.toMatchObject({
+      members: ["alice", "carol", "osolmaz"],
+    });
+  });
+
   it("falls back to bootstrap admins when config is invalid", async () => {
     hub.files.set("config/pool.json", "not json");
     const membership = await PoolMembership.load({
@@ -201,6 +275,43 @@ describe("PoolMembership", () => {
     });
     expect(membership.snapshot().source).toBe("bootstrap");
     expect(membership.snapshot().config_error).toBeDefined();
+    expect(membership.isAdmin("osolmaz")).toBe(true);
+    expect(membership.hasPermanentConfigError()).toBe(true);
+
+    await expect(membership.repairConfig("osolmaz")).resolves.toMatchObject({
+      source: "dataset",
+      members: ["osolmaz"],
+      admins: ["osolmaz"],
+    });
+    expect(membership.snapshot().config_error).toBeUndefined();
+    expect(JSON.parse(hub.files.get("config/pool.json") ?? "{}")).toMatchObject({
+      members: ["osolmaz"],
+      admins: ["osolmaz"],
+      updated_by: "osolmaz",
+    });
+    expect(hub.commits.at(-1)?.title).toBe("config: repair pool membership");
+  });
+
+  it("falls back when schema-valid config contains an invalid username", async () => {
+    hub.files.set(
+      "config/pool.json",
+      JSON.stringify({
+        version: 1,
+        admins: ["not a username"],
+        members: [],
+        updated_at: NOW.toISOString(),
+      }),
+    );
+    const membership = await PoolMembership.load({
+      mirror,
+      bootstrapMembers: ["osolmaz"],
+      bootstrapAdmins: ["osolmaz"],
+      now: () => NOW,
+    });
+    expect(membership.snapshot()).toMatchObject({
+      source: "bootstrap",
+      config_error: "invalid Hugging Face username: not a username",
+    });
     expect(membership.isAdmin("osolmaz")).toBe(true);
   });
 });

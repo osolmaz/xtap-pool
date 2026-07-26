@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   getRepoPrivateState,
+  getSpaceSecrets,
   getSpaceVariables,
+  parseSpaceSecrets,
   parseSpaceVariables,
   setSpaceSecret,
   setSpaceVariable,
@@ -21,12 +23,24 @@ describe("space variable parsing", () => {
     ]);
   });
 
+  it("accepts secret list shapes", () => {
+    expect([...parseSpaceSecrets([{ key: "HF_TOKEN" }, { key: "SESSION_SECRET" }])]).toEqual([
+      "HF_TOKEN",
+      "SESSION_SECRET",
+    ]);
+    expect([...parseSpaceSecrets({ secrets: [{ key: "HF_TOKEN" }] })]).toEqual(["HF_TOKEN"]);
+    expect([...parseSpaceSecrets({ HF_TOKEN: { updated_at: "now" } })]).toEqual(["HF_TOKEN"]);
+  });
+
   it("sends authenticated variable and secret requests", async () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const fetchFn: typeof fetch = (input, init) => {
       requests.push({ url: requestUrl(input), init: init ?? {} });
       if (init?.method === "POST") {
         return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      if (requestUrl(input).endsWith("/secrets")) {
+        return Promise.resolve(Response.json([{ key: "HF_TOKEN" }]));
       }
       return Promise.resolve(Response.json({ DATASET_REPO: { value: "alice/xtap-pool-data" } }));
     };
@@ -35,11 +49,15 @@ describe("space variable parsing", () => {
     await expect(getSpaceVariables(client, "alice/xtap-pool")).resolves.toEqual(
       new Map([["DATASET_REPO", "alice/xtap-pool-data"]]),
     );
+    await expect(getSpaceSecrets(client, "alice/xtap-pool")).resolves.toEqual(
+      new Set(["HF_TOKEN"]),
+    );
     await setSpaceVariable(client, "alice/xtap-pool", "ALLOWED_USERS", "alice,bob");
     await setSpaceSecret(client, "alice/xtap-pool", "HF_TOKEN", "hf_dataset");
 
     expect(requests.map((request) => [request.url, request.init.method])).toEqual([
       ["https://hub.test/api/spaces/alice/xtap-pool/variables", "GET"],
+      ["https://hub.test/api/spaces/alice/xtap-pool/secrets", "GET"],
       ["https://hub.test/api/spaces/alice/xtap-pool/variables", "POST"],
       ["https://hub.test/api/spaces/alice/xtap-pool/secrets", "POST"],
     ]);

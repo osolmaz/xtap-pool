@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
-import type { Context } from "hono";
+import type { Context, Next } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import { z } from "zod";
@@ -15,7 +15,7 @@ import type { EnrichStore } from "./enrich-store.js";
 import { createHuggingFaceOrgResolver } from "./hf-orgs.js";
 import type { OrgResolver } from "./hf-orgs.js";
 import type { IngestOutcome } from "./ingest.js";
-import type { PoolAccessGrant, PoolIdentity, PoolMembership } from "./membership.js";
+import type { PoolAccessGrant, PoolIdentity, PoolMembership, PoolSnapshot } from "./membership.js";
 import { authorizeUrl, exchangeCodeForIdentity } from "./oauth.js";
 import { mintPoolToken, verifyPoolToken } from "./pool-token.js";
 import type { TweetStore, TweetQuery } from "./store.js";
@@ -33,12 +33,35 @@ export type EnrichDeps = {
   run: () => Promise<EnrichReceipt>;
 };
 
+export type AppReadiness = {
+  ok: boolean;
+  dataset: {
+    indexed_files: number;
+    indexed_tweets: number;
+    enrichment_rows: number;
+    credential: "ok" | "invalid" | "unknown";
+    credential_error?: string;
+    state: "ready" | "invalid" | "unknown";
+    error?: string;
+  };
+  enrichment: {
+    enabled: boolean;
+    model: string;
+    credential: "ok" | "not_required" | "missing" | "invalid" | "unknown";
+    credential_error?: string;
+    state: "ready" | "disabled" | "invalid" | "unknown";
+    error?: string;
+  };
+};
+
 export type AppDeps = {
   config: SpaceConfig;
   store: TweetStore;
   membership: PoolMembership;
   enrich: EnrichDeps;
   ingest: (username: string, payload: unknown) => Promise<IngestOutcome>;
+  repairMembership?: (actor: string) => Promise<PoolSnapshot>;
+  readiness?: () => AppReadiness;
   now?: () => Date;
   oauthFetch?: typeof fetch;
   resolveOrg?: OrgResolver;
@@ -147,7 +170,39 @@ export function createApp(deps: AppDeps): Hono {
 
   const app = new Hono();
 
-  app.get("/healthz", (c) => c.json({ ok: true, tweets: store.count() }));
+  const requireReady = async (c: Context, next: Next) => {
+    const readiness = deps.readiness?.();
+    const membershipRecovery =
+      membership.hasPermanentConfigError() && isMembershipRecoveryRequest(c);
+    if (readiness !== undefined && !readiness.ok && !membershipRecovery) {
+      return c.json({ error: "pool is not ready", readiness }, 503);
+    }
+    await next();
+  };
+  app.use("/api/*", requireReady);
+  app.use("/oauth/*", requireReady);
+  app.use("/connect", requireReady);
+
+  const health = (): { ok: true; tweets: number; readiness?: AppReadiness } => {
+    const readiness = deps.readiness?.();
+    return {
+      ok: true,
+      tweets: store.count(),
+      ...(readiness === undefined ? {} : { readiness }),
+    };
+  };
+
+  app.get("/healthz", (c) => c.json(health()));
+
+  app.get("/readyz", (c) => {
+    const readiness = deps.readiness?.();
+    const body = {
+      ok: readiness?.ok ?? true,
+      tweets: store.count(),
+      ...(readiness === undefined ? {} : { readiness }),
+    };
+    return c.json(body, body.ok ? 200 : 503);
+  });
 
   app.get("/oauth/login", (c) => {
     const next = c.req.query("next") ?? "/";
@@ -315,6 +370,18 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ pool: membership.snapshot(), viewer: { username } });
   });
 
+  app.post("/api/admin/pool/repair", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      const repair =
+        deps.repairMembership ?? ((username: string) => membership.repairConfig(username));
+      return c.json({ pool: await repair(actor) });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
   app.put("/api/admin/members/:username", async (c) => {
     const actor = adminUser(c);
     if (actor instanceof Response) return actor;
@@ -378,6 +445,13 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   return app;
+}
+
+function isMembershipRecoveryRequest(c: Context): boolean {
+  const path = c.req.path;
+  if (path.startsWith("/oauth/")) return true;
+  if (c.req.method === "GET" && (path === "/api/me" || path === "/api/admin/pool")) return true;
+  return c.req.method === "POST" && path === "/api/admin/pool/repair";
 }
 
 function tokenTtlForGrant(grant: PoolAccessGrant, fallback: number): number {

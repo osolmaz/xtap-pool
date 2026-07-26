@@ -12,6 +12,7 @@ export type EnrichTaxonomy = {
   labels: readonly LabelConfig[];
   version: number;
   source: "dataset" | "default";
+  error?: string;
 };
 
 /** Built-in taxonomy used until `config/labels.json` exists in the dataset. */
@@ -69,7 +70,12 @@ export async function loadEnrichTaxonomy(
   mirror: DatasetMirror,
   version: number,
 ): Promise<EnrichTaxonomy> {
-  const raw = await mirror.readText(LABELS_CONFIG_PATH);
+  let raw: string | undefined;
+  try {
+    raw = await mirror.readText(LABELS_CONFIG_PATH);
+  } catch (error) {
+    return { labels: DEFAULT_TAXONOMY, version, source: "default", error: errorMessage(error) };
+  }
   if (raw === undefined) return { labels: DEFAULT_TAXONOMY, version, source: "default" };
   try {
     const labels = labelsFileSchema.parse(JSON.parse(raw));
@@ -77,4 +83,8 @@ export async function loadEnrichTaxonomy(
   } catch {
     return { labels: DEFAULT_TAXONOMY, version, source: "default" };
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "unknown error";
 }

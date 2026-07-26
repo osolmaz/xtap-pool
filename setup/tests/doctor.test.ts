@@ -1,0 +1,820 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const hubMocks = vi.hoisted(() => ({
+  downloadFile: vi.fn(),
+  listFiles: vi.fn(),
+  HUB_URL: "https://hub.test",
+}));
+
+vi.mock("@huggingface/hub", () => hubMocks);
+
+import { collectDoctorReport, runDoctor } from "../src/doctor.js";
+
+function asyncIterableOf(entries: { type: string; path: string }[]): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator]() {
+      let index = 0;
+      return {
+        next: () =>
+          Promise.resolve(
+            index < entries.length
+              ? { value: entries[index++], done: false }
+              : { value: undefined, done: true },
+          ),
+      };
+    },
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  hubMocks.downloadFile.mockResolvedValue(new Blob([`${JSON.stringify(sampleTweet())}\n`]));
+});
+
+describe("doctor", () => {
+  it("flags a live Space that indexed zero tweets while the dataset has files", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn: fetchFixture({ tweets: 0 }) },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: fetchFixture({ tweets: 0 }) },
+    );
+
+    expect(report.datasetRepo).toBe("alice/xtap-pool-data");
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.indexed_dataset", status: "fail" }),
+    );
+  });
+
+  it("reports malformed dataset data without offering a token repair", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    hubMocks.downloadFile.mockResolvedValue(new Blob(["not json\n{}\n"]));
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+
+    const report = await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        confirmDatasetTokenRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: () => Promise.resolve(),
+      },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "dataset.records", status: "fail", details: { count: 0 } }),
+    );
+    expect(report.checks).not.toContainEqual(
+      expect.objectContaining({ code: "live.indexed_dataset" }),
+    );
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([]);
+  });
+
+  it("passes the live indexing check when health reports tweets", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const report = await collectDoctorReport(
+      {
+        accessToken: "hf_owner",
+        hubUrl: "https://hub.test",
+        fetchFn: fetchFixture({ tweets: 12 }),
+      },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: fetchFixture({ tweets: 12 }) },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.indexed_dataset", status: "pass" }),
+    );
+  });
+
+  it("treats a missing data tree as an empty readable dataset", async () => {
+    hubMocks.listFiles
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("not found"), { statusCode: 404 });
+      })
+      .mockReturnValueOnce(asyncIterableOf([{ type: "file", path: ".gitattributes" }]));
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn: fetchFixture({ tweets: 0 }) },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: fetchFixture({ tweets: 0 }) },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "dataset.files", status: "warn", details: { count: 0 } }),
+    );
+  });
+
+  it("fails a public dataset because pooled data must stay private", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const report = await collectDoctorReport(
+      {
+        accessToken: "hf_owner",
+        hubUrl: "https://hub.test",
+        fetchFn: fetchFixture({ tweets: 12, datasetPrivate: false }),
+      },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: fetchFixture({ tweets: 12, datasetPrivate: false }) },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "dataset.visibility", status: "fail" }),
+    );
+  });
+
+  it("fails invalid ENRICH_ENABLED values while deriving the manifest", async () => {
+    const fetchFn = fetchFixture({ tweets: 0, variables: { ENRICH_ENABLED: "yes" } });
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn },
+    );
+
+    expect(report.datasetRepo).toBeUndefined();
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        code: "pool.manifest",
+        status: "fail",
+        message: "ENRICH_ENABLED must be 'true' or 'false', got 'yes'.",
+      }),
+    );
+  });
+
+  it("fails required runtime variables that are present but empty", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const report = await collectDoctorReport(
+      {
+        accessToken: "hf_owner",
+        hubUrl: "https://hub.test",
+        fetchFn: fetchFixture({
+          tweets: 12,
+          variables: { ALLOWED_USERS: "", POOL_ADMINS: "" },
+        }),
+      },
+      "alice",
+      "alice/xtap-pool",
+      {
+        fetchFn: fetchFixture({
+          tweets: 12,
+          variables: { ALLOWED_USERS: "", POOL_ADMINS: "" },
+        }),
+      },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.ALLOWED_USERS", status: "fail" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.POOL_ADMINS", status: "fail" }),
+    );
+  });
+
+  it("fails malformed bootstrap username variables", async () => {
+    const fetchFn = fetchFixture({
+      tweets: 0,
+      variables: { ALLOWED_USERS: "not a username", POOL_ADMINS: "also bad" },
+    });
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.ALLOWED_USERS", status: "fail" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.POOL_ADMINS", status: "fail" }),
+    );
+  });
+
+  it("fails live readiness without misclassifying dataset state as a token failure", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const fetchFn = fetchFixture({
+      tweets: 1,
+      datasetCredential: "ok",
+      datasetState: "invalid",
+      datasetStateError: "enrichment/vocabulary.json is malformed",
+      inferenceCredential: "ok",
+    });
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.readiness", status: "fail" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.dataset", status: "pass" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.dataset_state", status: "fail" }),
+    );
+  });
+
+  it("reports unresolved live readiness without assuming missing diagnostic text", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const fetchFn = fetchFixture({
+      tweets: "pending",
+      datasetCredential: "unknown",
+      datasetState: "unknown",
+      inferenceCredential: "unknown",
+      inferenceState: "unknown",
+    });
+
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn },
+    );
+
+    for (const code of [
+      "live.healthz",
+      "live.dataset",
+      "live.dataset_state",
+      "live.enrichment",
+      "live.enrichment_state",
+    ]) {
+      expect(report.checks).toContainEqual(expect.objectContaining({ code, status: "warn" }));
+    }
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "live.readiness", status: "fail" }),
+    );
+
+    const diagnosticFetch = fetchFixture({
+      tweets: "pending",
+      datasetCredential: "unknown",
+      datasetError: "dataset credential check pending",
+      datasetState: "unknown",
+      datasetStateError: "dataset rebuild pending",
+      inferenceCredential: "unknown",
+      inferenceError: "inference credential check pending",
+      inferenceState: "unknown",
+      inferenceStateError: "taxonomy reload pending",
+    });
+    const diagnosticReport = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn: diagnosticFetch },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: diagnosticFetch },
+    );
+    expect(
+      diagnosticReport.checks.find((check) => check.code === "live.readiness")?.message,
+    ).toContain("dataset rebuild pending");
+    expect(
+      diagnosticReport.checks.find((check) => check.code === "live.dataset")?.message,
+    ).toContain("dataset credential check pending");
+    expect(
+      diagnosticReport.checks.find((check) => check.code === "live.enrichment")?.message,
+    ).toContain("inference credential check pending");
+  });
+
+  it("repairs missing role secrets with validated replacement tokens", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, omitSecrets: true });
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken: () => Promise.resolve("hf_dataset"),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(secretWrites).toEqual([
+      { key: "HF_TOKEN", value: "hf_dataset" },
+      { key: "INFERENCE_TOKEN", value: "hf_inference" },
+    ]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("repairs an existing dataset token reported invalid by the live Space", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 1,
+      secretWrites,
+      datasetCredential: "invalid",
+      datasetError:
+        "HF_TOKEN must include repo.content.write or repo.write on alice/xtap-pool-data.",
+    });
+    const promptInferenceToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken: () => Promise.resolve("hf_dataset"),
+        promptInferenceToken,
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptInferenceToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("repairs an existing inference token reported invalid by the live Space", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 1,
+      secretWrites,
+      inferenceCredential: "invalid",
+      inferenceError: "INFERENCE_TOKEN must include inference.serverless.write.",
+    });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([{ key: "INFERENCE_TOKEN", value: "hf_inference" }]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("repairs missing generated secrets after explicit confirmation", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 0,
+      secretWrites,
+      omitGeneratedSecrets: true,
+      healthStatus: 503,
+    });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        confirmGeneratedSecretRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites.map((write) => write.key).sort()).toEqual([
+      "POOL_SIGNING_SECRET",
+      "SESSION_SECRET",
+    ]);
+    expect(secretWrites.every((write) => /^[0-9a-f]{64}$/.test(write.value))).toBe(true);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("rotates the existing generated secret when another is missing and health is unavailable", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 0,
+      secretWrites,
+      generatedSecrets: ["SESSION_SECRET"],
+      healthStatus: 503,
+    });
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        confirmGeneratedSecretRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: () => Promise.resolve(),
+      },
+    );
+
+    expect(secretWrites.map((write) => write.key).sort()).toEqual([
+      "POOL_SIGNING_SECRET",
+      "SESSION_SECRET",
+    ]);
+  });
+
+  it("offers generated-secret repair for possibly malformed existing generated secrets", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, healthStatus: 503 });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        confirmGeneratedSecretRepair: () => Promise.resolve(true),
+        confirmDatasetTokenRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites.map((write) => write.key).sort()).toEqual([
+      "POOL_SIGNING_SECRET",
+      "SESSION_SECRET",
+    ]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("offers dataset token repair when live health is unavailable", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, healthStatus: 503 });
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken: () => Promise.resolve("hf_dataset"),
+        confirmGeneratedSecretRepair: () => Promise.resolve(false),
+        confirmDatasetTokenRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+
+  it("does not replace the dataset token when indeterminate health repair is declined", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, healthStatus: 503 });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        confirmGeneratedSecretRepair: () => Promise.resolve(false),
+        confirmDatasetTokenRepair: () => Promise.resolve(false),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([]);
+    expect(restarts).toEqual([]);
+  });
+
+  it("does not replace the dataset token for zero indexed tweets when repair is declined", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites });
+    const promptDatasetToken = vi.fn<() => Promise<string>>();
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        confirmDatasetTokenRepair: () => Promise.resolve(false),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(promptDatasetToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([]);
+    expect(restarts).toEqual([]);
+  });
+
+  it("offers dataset token repair for an empty pool when live health is unavailable", async () => {
+    hubMocks.listFiles
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("not found"), { statusCode: 404 });
+      })
+      .mockReturnValueOnce(asyncIterableOf([{ type: "file", path: ".gitattributes" }]))
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error("not found"), { statusCode: 404 });
+      })
+      .mockReturnValueOnce(asyncIterableOf([{ type: "file", path: ".gitattributes" }]));
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, healthStatus: 503 });
+    const restarts: string[] = [];
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken: () => Promise.resolve("hf_dataset"),
+        confirmGeneratedSecretRepair: () => Promise.resolve(false),
+        confirmDatasetTokenRepair: () => Promise.resolve(true),
+        promptInferenceToken: () => Promise.resolve("hf_inference"),
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+        restartAndWait: (spaceRepo) => {
+          restarts.push(spaceRepo);
+          return Promise.resolve();
+        },
+      },
+    );
+
+    expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
+    expect(restarts).toEqual(["alice/xtap-pool"]);
+  });
+});
+
+function sampleTweet(): Record<string, unknown> {
+  return {
+    id: "1",
+    url: "https://x.com/alice/status/1",
+    text: "hello",
+    captured_at: "2026-07-26T12:00:00Z",
+    author: { username: "alice" },
+  };
+}
+
+function fetchFixture(options: {
+  tweets: unknown;
+  secretWrites?: { key: string; value: string }[];
+  omitSecrets?: boolean;
+  omitGeneratedSecrets?: boolean;
+  generatedSecrets?: readonly ("POOL_SIGNING_SECRET" | "SESSION_SECRET")[];
+  healthStatus?: number;
+  datasetPrivate?: boolean;
+  variables?: Record<string, string>;
+  datasetCredential?: "ok" | "invalid" | "unknown";
+  datasetError?: string;
+  datasetState?: "ready" | "invalid" | "unknown";
+  datasetStateError?: string;
+  inferenceCredential?: "ok" | "invalid" | "missing" | "unknown";
+  inferenceError?: string;
+  inferenceState?: "ready" | "invalid" | "unknown";
+  inferenceStateError?: string;
+}): typeof fetch {
+  return (input, init) => routeFixtureRequest(requestUrl(input), init, options);
+}
+
+type FixtureOptions = Parameters<typeof fetchFixture>[0];
+
+function routeFixtureRequest(
+  url: string,
+  init: RequestInit | undefined,
+  options: FixtureOptions,
+): Promise<Response> {
+  if (url.endsWith("/variables")) return Promise.resolve(variablesResponse(options.variables));
+  if (url.endsWith("/secrets")) return handleSecretsRequest(init, options);
+  return handleReadRequest(url, options);
+}
+
+function handleSecretsRequest(
+  init: RequestInit | undefined,
+  options: {
+    secretWrites?: { key: string; value: string }[];
+    omitSecrets?: boolean;
+    omitGeneratedSecrets?: boolean;
+    generatedSecrets?: readonly ("POOL_SIGNING_SECRET" | "SESSION_SECRET")[];
+  },
+): Promise<Response> {
+  if (init?.method === "POST") {
+    options.secretWrites?.push(jsonBody(init));
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }
+  return Promise.resolve(secretsResponse(options));
+}
+
+function handleReadRequest(url: string, options: FixtureOptions): Promise<Response> {
+  if (url.includes("/api/datasets/alice/xtap-pool-data")) {
+    return Promise.resolve(Response.json({ private: options.datasetPrivate ?? true }));
+  }
+  if (url === "https://alice-xtap-pool.hf.space/healthz") {
+    return Promise.resolve(
+      Response.json(healthPayload(options), { status: options.healthStatus ?? 200 }),
+    );
+  }
+  return Promise.resolve(new Response("unexpected", { status: 500 }));
+}
+
+function healthPayload(options: FixtureOptions): Record<string, unknown> {
+  if (options.inferenceCredential === undefined && options.datasetCredential === undefined) {
+    return { ok: true, tweets: options.tweets };
+  }
+  return {
+    ok: true,
+    tweets: options.tweets,
+    readiness: {
+      ok: fixtureReadinessOk(options),
+      dataset: fixtureDatasetReadiness(options),
+      enrichment: fixtureEnrichmentReadiness(options),
+    },
+  };
+}
+
+function fixtureDatasetReadiness(options: FixtureOptions): Record<string, unknown> | undefined {
+  if (options.datasetCredential === undefined) return undefined;
+  return {
+    indexed_files: 1,
+    indexed_tweets: options.tweets,
+    enrichment_rows: 0,
+    credential: options.datasetCredential,
+    credential_error: options.datasetError,
+    state: options.datasetState ?? "ready",
+    error: options.datasetStateError,
+  };
+}
+
+function fixtureEnrichmentReadiness(options: FixtureOptions): Record<string, unknown> | undefined {
+  if (options.inferenceCredential === undefined) return undefined;
+  return {
+    enabled: true,
+    model: "zai-org/GLM-5.2",
+    credential: options.inferenceCredential,
+    credential_error: options.inferenceError,
+    state: options.inferenceState ?? "ready",
+    error: options.inferenceStateError,
+  };
+}
+
+function fixtureReadinessOk(options: FixtureOptions): boolean {
+  return (
+    credentialReady(options.datasetCredential) &&
+    componentReady(options.datasetState) &&
+    credentialReady(options.inferenceCredential) &&
+    componentReady(options.inferenceState)
+  );
+}
+
+function credentialReady(value: string | undefined): boolean {
+  return value === undefined || value === "ok";
+}
+
+function componentReady(value: string | undefined): boolean {
+  return value === undefined || value === "ready";
+}
+
+function variablesResponse(overrides: Record<string, string> | undefined): Response {
+  const values = {
+    DATASET_REPO: "alice/xtap-pool-data",
+    ALLOWED_USERS: "alice",
+    POOL_ADMINS: "alice",
+    ENRICH_ENABLED: "true",
+    ...overrides,
+  };
+  return Response.json(
+    Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { value }])),
+  );
+}
+
+function secretsResponse(options: {
+  omitSecrets?: boolean;
+  omitGeneratedSecrets?: boolean;
+  generatedSecrets?: readonly ("POOL_SIGNING_SECRET" | "SESSION_SECRET")[];
+}): Response {
+  if (options.omitSecrets) {
+    return Response.json([{ key: "POOL_SIGNING_SECRET" }, { key: "SESSION_SECRET" }]);
+  }
+  const secrets = [
+    { key: "HF_TOKEN" },
+    { key: "INFERENCE_TOKEN" },
+    ...(
+      options.generatedSecrets ??
+      (options.omitGeneratedSecrets ? [] : ["POOL_SIGNING_SECRET", "SESSION_SECRET"])
+    ).map((key) => ({ key })),
+  ];
+  return Response.json(secrets);
+}
+
+function jsonBody(init: RequestInit): { key: string; value: string } {
+  if (typeof init.body !== "string") throw new Error("expected string body");
+  return JSON.parse(init.body) as { key: string; value: string };
+}
+
+function requestUrl(input: string | URL | Request): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  return input.url;
+}

@@ -94,6 +94,99 @@ describe("health", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true, tweets: 0 });
   });
+
+  it("reports structured readiness when provided", async () => {
+    const readyApp = createApp({
+      config: testConfig,
+      store,
+      membership,
+      enrich,
+      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+      readiness: () => ({
+        ok: false,
+        dataset: {
+          indexed_files: 1,
+          indexed_tweets: 0,
+          enrichment_rows: 0,
+          credential: "ok",
+          state: "ready",
+        },
+        enrichment: {
+          enabled: true,
+          model: "zai-org/GLM-5.2",
+          credential: "invalid",
+          credential_error: "INFERENCE_TOKEN must include inference.serverless.write.",
+          state: "ready",
+        },
+      }),
+    });
+    const healthResponse = await readyApp.request("/healthz");
+    expect(healthResponse.status).toBe(200);
+    await expect(healthResponse.json()).resolves.toMatchObject({ ok: true, tweets: 0 });
+    expect((await readyApp.request("/api/tweets")).status).toBe(503);
+    expect((await readyApp.request("/oauth/login")).status).toBe(503);
+
+    const response = await readyApp.request("/readyz");
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      tweets: 0,
+      readiness: { dataset: { indexed_files: 1, indexed_tweets: 0 } },
+    });
+  });
+
+  it("lets a bootstrap admin authenticate and repair malformed membership", async () => {
+    hub.files.set("config/pool.json", "not json");
+    const brokenMembership = await PoolMembership.load({
+      mirror: new DatasetMirror(hub, dir),
+      bootstrapMembers: testConfig.allowedUsers,
+      bootstrapAdmins: testConfig.poolAdmins,
+      now: () => NOW,
+    });
+    const recoveryApp = createApp({
+      config: testConfig,
+      store,
+      membership: brokenMembership,
+      enrich,
+      now: () => NOW,
+      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+      readiness: () => ({
+        ok: !brokenMembership.hasConfigError(),
+        dataset: {
+          indexed_files: 1,
+          indexed_tweets: 0,
+          enrichment_rows: 0,
+          credential: "ok",
+          state: brokenMembership.hasConfigError() ? "invalid" : "ready",
+        },
+        enrichment: {
+          enabled: false,
+          model: testConfig.llmModel,
+          credential: "not_required",
+          state: "disabled",
+        },
+      }),
+    });
+    const headers = { cookie: sessionCookie("osolmaz") };
+
+    expect((await recoveryApp.request("/oauth/login")).status).toBe(302);
+    expect((await recoveryApp.request("/api/me", { headers })).status).toBe(200);
+    expect((await recoveryApp.request("/api/admin/pool", { headers })).status).toBe(200);
+    expect((await recoveryApp.request("/api/tweets", { headers })).status).toBe(503);
+    expect((await recoveryApp.request("/api/admin/pool/repair", { method: "POST" })).status).toBe(
+      401,
+    );
+
+    const repaired = await recoveryApp.request("/api/admin/pool/repair", {
+      method: "POST",
+      headers,
+    });
+    expect(repaired.status).toBe(200);
+    await expect(repaired.json()).resolves.toMatchObject({
+      pool: { source: "dataset", members: ["alice", "osolmaz"] },
+    });
+    expect((await recoveryApp.request("/api/tweets", { headers })).status).toBe(200);
+  });
 });
 
 describe("/api/ingest", () => {

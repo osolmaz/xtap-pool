@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
 import { commit, downloadFile, listFiles } from "@huggingface/hub";
@@ -127,6 +127,11 @@ export class DatasetMirror {
     return resolved;
   }
 
+  /** Remove local files before replaying a complete Hub snapshot. */
+  clearForRebuild(): void {
+    rmSync(this.rootDir, { recursive: true, force: true });
+  }
+
   /** Download the full dataset snapshot, populate the mirror and the store. */
   async rebuild(
     store: TweetStore,
@@ -149,24 +154,26 @@ export class DatasetMirror {
 
   /**
    * Rebuild the enrichment tables from the dataset: seed the vocabulary from
-   * `enrichment/vocabulary.json`, then replay all enrichment JSONL shards in
-   * chronological order. Run after `rebuild` so unit membership exists.
+   * `enrichment/vocabulary.json`, restore receipt files to the local mirror,
+   * then replay enrichment JSONL shards in chronological order. Run after
+   * `rebuild` so unit membership exists.
    */
   async rebuildEnrichment(enrich: EnrichStore): Promise<{ files: number; rows: number }> {
     const vocabularyRaw = await this.readText(VOCABULARY_PATH);
     if (vocabularyRaw !== undefined) enrich.seedVocabulary(parseVocabularyJson(vocabularyRaw));
-    const paths = (await this.hub.listJsonlFiles("enrichment"))
-      .filter((path) => !path.startsWith("enrichment/receipts/"))
-      .sort();
+    const paths = (await this.hub.listJsonlFiles("enrichment")).sort();
+    let files = 0;
     let rows = 0;
     for (const path of paths) {
       const content = await this.hub.downloadFile(path);
       const local = this.localPath(path);
       mkdirSync(dirname(local), { recursive: true });
       writeFileSync(local, content);
+      if (path.startsWith("enrichment/receipts/")) continue;
       rows += applyEnrichmentLines(enrich, content);
+      files += 1;
     }
-    return { files: paths.length, rows };
+    return { files, rows };
   }
 
   /** Read a dataset file through the Hub, returning undefined when it is absent. */

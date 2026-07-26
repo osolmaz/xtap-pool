@@ -10,8 +10,9 @@
     "setup"
   ],
   "scripts": {
-    "setup": "npm run build --workspace setup && npm run start --workspace setup",
-    "update": "npm run build --workspace setup && npm run start --workspace setup -- update",
+    "setup": "npm run build --workspace shared && npm run build --workspace setup && npm run start --workspace setup",
+    "update": "npm run build --workspace shared && npm run build --workspace setup && npm run start --workspace setup -- update",
+    "doctor": "npm run --silent build --workspace shared && npm run --silent build --workspace setup && npm run --silent start --workspace setup -- doctor",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",

@@ -107,6 +107,24 @@ export class EnrichStore {
     ensureEnrichmentTables(db);
   }
 
+  /** Clear all derived enrichment state before replaying a complete dataset snapshot. */
+  clearForRebuild(): void {
+    const clear = this.db.transaction(() => {
+      for (const table of [
+        "tweet_labels",
+        "concept_assignments",
+        "concept_edges",
+        "enrichment",
+        "enrich_queue",
+        "unit_members",
+        "concept_vocabulary",
+      ]) {
+        this.db.prepare(`DELETE FROM ${table}`).run();
+      }
+    });
+    clear();
+  }
+
   /**
    * Record unit membership for ingested tweets and enqueue affected units.
    * A unit is (re-)enqueued when a tweet newly joins it — including tweets

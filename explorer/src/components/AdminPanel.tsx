@@ -9,6 +9,7 @@ import {
   removePoolAdmin,
   removePoolMember,
   removePoolMemberOrg,
+  repairPoolConfig,
 } from "../lib/api.js";
 import type { MemberOrgGrant } from "../lib/api.js";
 
@@ -75,9 +76,19 @@ export function AdminPanel(): React.JSX.Element {
       </header>
 
       {pool.config_error === undefined ? null : (
-        <p className="rounded-md border border-red-400 px-3 py-2 text-sm text-red-500">
-          {pool.config_error}
-        </p>
+        <div className="rounded-md border border-red-400 px-3 py-2 text-sm text-red-500">
+          <p>{pool.config_error}</p>
+          <button
+            type="button"
+            className="mt-2 rounded-md border border-red-400 px-2 py-1 font-semibold"
+            disabled={busy !== undefined}
+            onClick={() => {
+              void mutate("repair-config", repairPoolConfig);
+            }}
+          >
+            Replace with bootstrap membership
+          </button>
+        </div>
       )}
       {error === undefined ? null : <p className="text-sm text-red-500">{error}</p>}
 

@@ -69,6 +69,30 @@ describe("DatasetMirror.rebuild", () => {
     expect(store.count()).toBe(3);
     expect(existsSync(join(dir, "data/alice/2026/05/tweets-2026-05-21.jsonl"))).toBe(true);
   });
+
+  it("replays retries from clean cache and mirror state", async () => {
+    const enrich = new EnrichStore(store.database, 1);
+    const oldPath = "data/osolmaz/2026/05/tweets-2026-05-21.jsonl";
+    const newPath = "data/alice/2026/05/tweets-2026-05-22.jsonl";
+    hub.files.set(oldPath, `${JSON.stringify(makePooled({ id: "old" }))}\n`);
+    await mirror.rebuild(store, enrich);
+    expect(store.count()).toBe(1);
+
+    hub.files.delete(oldPath);
+    hub.files.set(
+      newPath,
+      `${JSON.stringify(makePooled({ id: "new", contributed_by: "alice" }))}\n`,
+    );
+    mirror.clearForRebuild();
+    enrich.clearForRebuild();
+    store.clearForRebuild();
+    await mirror.rebuild(store, enrich);
+
+    expect(store.count()).toBe(1);
+    expect(store.query({}).records.map((record) => record.tweet.id)).toEqual(["new"]);
+    expect(existsSync(join(dir, oldPath))).toBe(false);
+    expect(existsSync(join(dir, newPath))).toBe(true);
+  });
 });
 
 describe("DatasetMirror enrichment rebuild", () => {
@@ -102,13 +126,17 @@ describe("DatasetMirror enrichment rebuild", () => {
         JSON.stringify({ unit_id: "broken" }),
       ].join("\n"),
     );
-    // Receipts must not be replayed as enrichment rows.
-    hub.files.set("enrichment/receipts/2026-07-06.jsonl", '{"units": 1}\n');
+    // Receipts must be restored to the mirror without being replayed as enrichment rows.
+    const receiptPath = "enrichment/receipts/2026-07-06.jsonl";
+    hub.files.set(receiptPath, '{"units":1}\n');
 
     const enrich = new EnrichStore(store.database, 1);
     await mirror.rebuild(store, enrich);
     const result = await mirror.rebuildEnrichment(enrich);
     expect(result).toEqual({ files: 1, rows: 1 });
+    expect(readFileSync(join(dir, receiptPath), "utf8")).toBe('{"units":1}\n');
+    await mirror.commitBatch([{ path: receiptPath, lines: ['{"units":2}'] }], [], "receipt");
+    expect(hub.files.get(receiptPath)).toBe('{"units":1}\n{"units":2}\n');
     expect(enrich.queueEntry("1:someone")?.status).toBe("done");
     expect(enrich.queueEntry("2:other")?.status).toBe("queued");
     expect(enrich.concepts()).toEqual([
