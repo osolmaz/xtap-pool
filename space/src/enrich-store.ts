@@ -41,7 +41,8 @@ export function ensureEnrichmentTables(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS unit_members (
       tweet_id TEXT PRIMARY KEY,
-      unit_id TEXT NOT NULL
+      unit_id TEXT NOT NULL,
+      captured_at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_unit_members_unit ON unit_members(unit_id, tweet_id);
     CREATE TABLE IF NOT EXISTS enrich_queue (
@@ -117,7 +118,7 @@ export class EnrichStore {
       const toEnqueue = new Set<string>();
       for (const tweet of batch) {
         const unitId = unitIdFor(tweet);
-        const result = this.registerMembership(tweet.id, unitId);
+        const result = this.registerMembership(tweet, unitId);
         if (result.enqueue) toEnqueue.add(unitId);
         if (result.previousUnitId !== undefined) {
           // a tweet moved between units (e.g. a later capture supplied its
@@ -128,6 +129,13 @@ export class EnrichStore {
           }
         }
       }
+      // a batch can empty a unit after it was marked for enqueueing
+      for (const unitId of [...toEnqueue]) {
+        if (this.unitMemberIds(unitId).length === 0) {
+          toEnqueue.delete(unitId);
+          this.clearUnitEnrichment(unitId);
+        }
+      }
       for (const unitId of toEnqueue) this.enqueueUnit(unitId);
       return [...toEnqueue].sort();
     });
@@ -135,24 +143,32 @@ export class EnrichStore {
   }
 
   private registerMembership(
-    tweetId: string,
+    tweet: PooledTweet,
     unitId: string,
   ): { enqueue: boolean; previousUnitId?: string } {
+    const tweetId = tweet.id;
+    const capturedAt = tweet.captured_at;
     const existing = this.db
-      .prepare("SELECT unit_id FROM unit_members WHERE tweet_id = ?")
-      .get(tweetId) as { unit_id: string } | undefined;
+      .prepare("SELECT unit_id, captured_at FROM unit_members WHERE tweet_id = ?")
+      .get(tweetId) as { unit_id: string; captured_at: string } | undefined;
     if (existing === undefined) {
       this.db
-        .prepare("INSERT INTO unit_members (tweet_id, unit_id) VALUES (?, ?)")
-        .run(tweetId, unitId);
+        .prepare("INSERT INTO unit_members (tweet_id, unit_id, captured_at) VALUES (?, ?, ?)")
+        .run(tweetId, unitId, capturedAt);
       return { enqueue: true };
     }
+    // rebuilds replay historical copies in arbitrary order: only a fresher
+    // capture may change a tweet's unit
+    if (existing.captured_at > capturedAt) return { enqueue: false };
     if (existing.unit_id !== unitId) {
       this.db
-        .prepare("UPDATE unit_members SET unit_id = ? WHERE tweet_id = ?")
-        .run(unitId, tweetId);
+        .prepare("UPDATE unit_members SET unit_id = ?, captured_at = ? WHERE tweet_id = ?")
+        .run(unitId, capturedAt, tweetId);
       return { enqueue: true, previousUnitId: existing.unit_id };
     }
+    this.db
+      .prepare("UPDATE unit_members SET captured_at = ? WHERE tweet_id = ?")
+      .run(capturedAt, tweetId);
     return {
       enqueue: !this.hasCurrentEnrichment(unitId) && !this.hasQueueEntry(unitId),
     };
@@ -298,6 +314,12 @@ export class EnrichStore {
    */
   applyEnrichment(row: EnrichmentRow): void {
     const apply = this.db.transaction((enrichment: EnrichmentRow) => {
+      if (this.unitMemberIds(enrichment.unit_id).length === 0) {
+        // append-only shards can replay rows for units whose members all
+        // moved away; applying them would resurrect orphaned concepts
+        this.clearUnitEnrichment(enrichment.unit_id);
+        return;
+      }
       // preset labels are defined by the taxonomy: rows from an older
       // taxonomy version keep their concepts and free labels (which are
       // taxonomy-independent) but must not serve stale preset labels

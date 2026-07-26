@@ -346,3 +346,64 @@ describe("claiming", () => {
     expect(enrich.claimQueued(10).length).toBe(2);
   });
 });
+
+describe("capture freshness and empty units", () => {
+  it("a stale copy cannot move a tweet back to a conversation-less unit", () => {
+    const fresh = makePooled({
+      id: "300",
+      conversation_id: "299",
+      captured_at: "2026-07-05T00:00:00.000Z",
+    });
+    const stale = makePooled({
+      id: "300",
+      conversation_id: null,
+      captured_at: "2026-07-01T00:00:00.000Z",
+    });
+    store.insert([fresh]);
+    enrich.registerTweets([fresh]);
+    enrich.registerTweets([stale]);
+    expect(enrich.unitMemberIds("299:someone")).toEqual(["300"]);
+    expect(enrich.unitMemberIds("300:someone")).toEqual([]);
+  });
+
+  it("emptying a unit within one batch removes its queue entry", () => {
+    const before = [
+      makePooled({ id: "400", conversation_id: null, captured_at: "2026-07-01T00:00:00.000Z" }),
+      makePooled({ id: "401", conversation_id: null, captured_at: "2026-07-01T00:00:00.000Z" }),
+    ];
+    store.insert(before);
+    enrich.registerTweets(before);
+    // both re-captures now carry the conversation, leaving 400:someone and
+    // 401:someone empty
+    const after = [
+      makePooled({ id: "400", conversation_id: "399", captured_at: "2026-07-02T00:00:00.000Z" }),
+      makePooled({ id: "401", conversation_id: "399", captured_at: "2026-07-02T00:00:00.000Z" }),
+    ];
+    store.insert(after);
+    const enqueued = enrich.registerTweets(after);
+    expect(enqueued).toEqual(["399:someone"]);
+    const empties = store.database
+      .prepare("SELECT unit_id FROM enrich_queue WHERE unit_id IN ('400:someone', '401:someone')")
+      .all();
+    expect(empties).toEqual([]);
+  });
+
+  it("replaying enrichment for a memberless unit does not resurrect concepts", () => {
+    insertAndRegister([{ id: "500" }]);
+    enrich.applyEnrichment(row({ unit_id: "500:someone", tweet_ids: ["500"] }));
+    // the tweet moves away; the old unit is cleared
+    const moved = makePooled({
+      id: "500",
+      conversation_id: "499",
+      captured_at: "2026-07-09T00:00:00.000Z",
+    });
+    store.insert([moved]);
+    enrich.registerTweets([moved]);
+    // boot-style replay of the old append-only row
+    enrich.applyEnrichment(row({ unit_id: "500:someone", tweet_ids: ["500"] }));
+    const vocab = store.database
+      .prepare("SELECT slug, unit_count FROM concept_vocabulary WHERE unit_count > 0")
+      .all();
+    expect(vocab).toEqual([]);
+  });
+});
