@@ -9,7 +9,11 @@ export function parseRoute(pathname: string): Route {
   if (segments[0] !== "graph") return { kind: "home" };
   const slug = segments[1];
   if (slug === undefined) return { kind: "graph" };
-  return { kind: "concept", slug: decodeURIComponent(slug) };
+  try {
+    return { kind: "concept", slug: decodeURIComponent(slug) };
+  } catch {
+    return { kind: "graph" };
+  }
 }
 
 /** SPA navigation: push the path and let useRoute listeners re-render. */

@@ -135,7 +135,10 @@ export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichRecei
     await processBatch(deps, claimed.slice(start, start + size), receipt);
   }
   receipt.finished_at = deps.now().toISOString();
-  if (receipt.calls > 0) await writeReceipt(deps, receipt);
+  if (receipt.calls > 0) {
+    const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+    await lock(() => writeReceipt(deps, receipt));
+  }
   return receipt;
 }
 
