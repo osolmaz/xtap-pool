@@ -85,6 +85,7 @@ function SignIn(): React.JSX.Element {
       <a
         className="rounded-full bg-(--x-accent) px-5 py-2 font-semibold text-white"
         href="/oauth/login?next=/"
+        target="_top"
       >
         Sign in with Hugging Face
       </a>
