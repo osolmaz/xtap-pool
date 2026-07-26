@@ -116,7 +116,16 @@ export class EnrichStore {
       const toEnqueue = new Set<string>();
       for (const tweet of batch) {
         const unitId = unitIdFor(tweet);
-        if (this.registerMembership(tweet.id, unitId)) toEnqueue.add(unitId);
+        const result = this.registerMembership(tweet.id, unitId);
+        if (result.enqueue) toEnqueue.add(unitId);
+        if (result.previousUnitId !== undefined) {
+          // a tweet moved between units (e.g. a later capture supplied its
+          // conversation_id): the old unit's enrichment is now stale
+          this.clearUnitEnrichment(result.previousUnitId);
+          if (this.unitMemberIds(result.previousUnitId).length > 0) {
+            toEnqueue.add(result.previousUnitId);
+          }
+        }
       }
       for (const unitId of toEnqueue) this.enqueueUnit(unitId);
       return [...toEnqueue].sort();
@@ -124,7 +133,10 @@ export class EnrichStore {
     return register(tweets);
   }
 
-  private registerMembership(tweetId: string, unitId: string): boolean {
+  private registerMembership(
+    tweetId: string,
+    unitId: string,
+  ): { enqueue: boolean; previousUnitId?: string } {
     const existing = this.db
       .prepare("SELECT unit_id FROM unit_members WHERE tweet_id = ?")
       .get(tweetId) as { unit_id: string } | undefined;
@@ -132,15 +144,30 @@ export class EnrichStore {
       this.db
         .prepare("INSERT INTO unit_members (tweet_id, unit_id) VALUES (?, ?)")
         .run(tweetId, unitId);
-      return true;
+      return { enqueue: true };
     }
     if (existing.unit_id !== unitId) {
       this.db
         .prepare("UPDATE unit_members SET unit_id = ? WHERE tweet_id = ?")
         .run(unitId, tweetId);
-      return true;
+      return { enqueue: true, previousUnitId: existing.unit_id };
     }
-    return !this.hasCurrentEnrichment(unitId) && !this.hasQueueEntry(unitId);
+    return {
+      enqueue: !this.hasCurrentEnrichment(unitId) && !this.hasQueueEntry(unitId),
+    };
+  }
+
+  /** Remove a unit's indexed enrichment (labels, concepts, edges, row, queue). */
+  private clearUnitEnrichment(unitId: string): void {
+    const removeLabel = this.db.prepare("DELETE FROM tweet_labels WHERE tweet_id = ?");
+    for (const tweetId of this.previousTweetIds(unitId)) removeLabel.run(tweetId);
+    const slugs = this.assignedSlugs(unitId);
+    this.adjustEdges(slugs, -1);
+    this.adjustUnitCounts(slugs, -1);
+    this.db.prepare("DELETE FROM concept_assignments WHERE unit_id = ?").run(unitId);
+    this.db.prepare("DELETE FROM concept_edges WHERE weight <= 0").run();
+    this.db.prepare("DELETE FROM enrichment WHERE unit_id = ?").run(unitId);
+    this.db.prepare("DELETE FROM enrich_queue WHERE unit_id = ?").run(unitId);
   }
 
   private hasCurrentEnrichment(unitId: string): boolean {

@@ -92,10 +92,19 @@ function firstMatchFor(
   text: string,
 ): { index: number; length: number } | null {
   for (const pattern of candidate.patterns) {
-    const match = pattern.exec(text);
-    if (!match) continue;
-    if (insideInsertedAnchor(text, match.index)) continue;
-    return { index: match.index, length: match[0].length };
+    // scan past matches that landed inside already-inserted anchors (an
+    // overlapping longer concept) so a later occurrence can still link
+    const global = new RegExp(
+      pattern.source,
+      pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
+    );
+    for (let match = global.exec(text); match !== null; match = global.exec(text)) {
+      if (insideInsertedAnchor(text, match.index)) {
+        if (global.lastIndex === match.index) global.lastIndex += 1;
+        continue;
+      }
+      return { index: match.index, length: match[0].length };
+    }
   }
   return null;
 }

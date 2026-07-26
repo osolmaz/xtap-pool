@@ -64,3 +64,15 @@ describe("linkConcepts", () => {
     expect(linkConcepts(html, [FEM])).toBe(html);
   });
 });
+
+it("links a later occurrence when the first is inside an overlapping longer link", () => {
+  const [html] = linkConceptsAcrossFragments(
+    ["Inference Performance matters and inference is hard"],
+    [
+      { slug: "inference-performance", name: "Inference Performance", aliases: [] },
+      { slug: "inference", name: "inference", aliases: [] },
+    ],
+  );
+  expect(html).toContain('href="/graph/inference-performance"');
+  expect(html).toMatch(/and <a class="concept-link" href="\/graph\/inference">inference<\/a>/);
+});

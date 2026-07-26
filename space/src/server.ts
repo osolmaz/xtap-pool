@@ -35,9 +35,9 @@ const workerDeps = {
   model: config.llmModel,
   maxUnitsPerTick: config.enrichMaxUnitsPerTick,
   now: (): Date => new Date(),
+  lock: <T>(fn: () => Promise<T>): Promise<T> => mutex.run(fn),
 };
-const drainOnce = (): ReturnType<typeof runEnrichTick> =>
-  mutex.run(() => runEnrichTick(workerDeps));
+const drainOnce = (): ReturnType<typeof runEnrichTick> => runEnrichTick(workerDeps);
 
 const app = createApp({
   config,

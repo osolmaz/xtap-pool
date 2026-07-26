@@ -95,6 +95,11 @@ export type EnrichWorkerDeps = {
   maxUnitsPerTick: number;
   unitsPerCall?: number;
   now: () => Date;
+  /**
+   * Serializes dataset/index mutations against ingest. LLM calls run
+   * outside it so a slow model call never blocks /api/ingest.
+   */
+  lock?: <T>(fn: () => Promise<T>) => Promise<T>;
 };
 
 const llmUnitSchema = z.object({
@@ -235,13 +240,16 @@ async function persistAndApply(
   receipt: EnrichReceipt,
 ): Promise<boolean> {
   try {
-    await persistRows(deps, rows);
+    const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+    await lock(async () => {
+      await persistRows(deps, rows);
+      for (const row of rows) deps.enrichStore.applyEnrichment(row);
+    });
   } catch (error) {
     for (const unit of units) deps.enrichStore.markFailed(unit.unitId, errorMessage(error));
     receipt.failures += units.length;
     return false;
   }
-  for (const row of rows) deps.enrichStore.applyEnrichment(row);
   receipt.units += rows.length;
   return true;
 }
