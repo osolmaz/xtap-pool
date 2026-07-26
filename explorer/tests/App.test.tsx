@@ -242,6 +242,50 @@ describe("App", () => {
     await screen.findByText("@alice");
   });
 
+  it("lets bootstrap admins replace malformed membership config", async () => {
+    const malformed = {
+      pool: {
+        version: 1,
+        admins: ["osolmaz"],
+        members: ["osolmaz"],
+        member_orgs: [],
+        bootstrap_admins: ["osolmaz"],
+        updated_at: "2026-07-06T00:00:00.000Z",
+        source: "bootstrap",
+        config_error: "invalid pool config",
+      },
+      viewer: { username: "osolmaz" },
+    };
+    const routes: Record<string, (init?: RequestInit) => Response> = {
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+      "/api/admin/pool": () => Response.json(malformed),
+      "/api/admin/pool/repair": (init) =>
+        init?.method === "POST"
+          ? poolResponse(["osolmaz"])
+          : new Response("missing", { status: 404 }),
+    };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const path = url.split("?")[0] ?? url;
+      return Promise.resolve(routes[path]?.(init) ?? new Response("missing", { status: 404 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    fireEvent.click(await screen.findByText("Admin"));
+    await screen.findByText("invalid pool config");
+    fireEvent.click(screen.getByText("Replace with bootstrap membership"));
+    await waitFor(() => {
+      expect(screen.queryByText("invalid pool config")).toBeNull();
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/admin/pool/repair",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("lets admins set the member organization", async () => {
     const routes: Record<string, (init?: RequestInit) => Response> = {
       "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),

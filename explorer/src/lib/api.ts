@@ -148,7 +148,7 @@ async function getJson<T>(path: string): Promise<T | undefined> {
   return (await response.json()) as T;
 }
 
-async function sendJson<T>(path: string, method: "PUT" | "DELETE"): Promise<T> {
+async function sendJson<T>(path: string, method: "POST" | "PUT" | "DELETE"): Promise<T> {
   const response = await fetch(path, {
     method,
     headers: { accept: "application/json" },
@@ -237,6 +237,10 @@ export async function fetchAdminPool(): Promise<AdminPoolResponse> {
   const body = await getJson<AdminPoolResponse>("/api/admin/pool");
   if (body === undefined) throw new Error("session expired");
   return body;
+}
+
+export async function repairPoolConfig(): Promise<PoolSnapshot> {
+  return (await sendJson<{ pool: PoolSnapshot }>("/api/admin/pool/repair", "POST")).pool;
 }
 
 export async function addPoolMember(username: string): Promise<PoolSnapshot> {

@@ -50,6 +50,21 @@ describe("loadEnrichTaxonomy", () => {
     ]);
   });
 
+  it("falls back with a retryable error when the config cannot be read", async () => {
+    const brokenMirror = new DatasetMirror(
+      {
+        listJsonlFiles: () => Promise.resolve([]),
+        downloadFile: () => Promise.reject(new Error("cannot read dataset")),
+        commitFiles: () => Promise.resolve(),
+      },
+      dir,
+    );
+    await expect(loadEnrichTaxonomy(brokenMirror, 1)).resolves.toMatchObject({
+      source: "default",
+      error: "cannot read dataset",
+    });
+  });
+
   it("falls back on invalid content", async () => {
     hub.files.set(LABELS_CONFIG_PATH, "not json");
     await expect(loadEnrichTaxonomy(mirror, 1)).resolves.toMatchObject({ source: "default" });

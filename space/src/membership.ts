@@ -50,18 +50,27 @@ type PoolMembershipOptions = {
   now: () => Date;
 };
 
+type LoadedPoolConfig = {
+  config: PoolConfig;
+  source: PoolSnapshot["source"];
+  configError?: string;
+  retryable: boolean;
+};
+
 export class PoolMembership {
   private config: PoolConfig;
   private readonly bootstrapAdmins: readonly string[];
   private source: PoolSnapshot["source"];
   private configError: string | undefined;
+  private configErrorRetryable: boolean;
   private mutationTail: Promise<void> = Promise.resolve();
 
   private constructor(
     private readonly options: PoolMembershipOptions,
     config: PoolConfig,
     source: PoolSnapshot["source"],
-    configError?: string,
+    configError: string | undefined,
+    configErrorRetryable: boolean,
   ) {
     this.bootstrapAdmins = normalizeUsers(
       options.bootstrapAdmins.length > 0
@@ -71,19 +80,52 @@ export class PoolMembership {
     this.config = normalizeConfig(config);
     this.source = source;
     this.configError = configError;
+    this.configErrorRetryable = configErrorRetryable;
   }
 
   static async load(options: PoolMembershipOptions): Promise<PoolMembership> {
-    const fallback = bootstrapConfig(options);
-    const raw = await options.mirror.readText(POOL_CONFIG_PATH);
-    if (raw === undefined) return new PoolMembership(options, fallback, "bootstrap");
-    try {
-      const parsed = poolConfigSchema.parse(JSON.parse(raw));
-      return new PoolMembership(options, parsed, "dataset");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "invalid pool config";
-      return new PoolMembership(options, fallback, "bootstrap", message);
-    }
+    const loaded = await loadConfigFromMirror(options);
+    return new PoolMembership(
+      options,
+      loaded.config,
+      loaded.source,
+      loaded.configError,
+      loaded.retryable,
+    );
+  }
+
+  async reload(): Promise<PoolSnapshot> {
+    return this.enqueueMutation(async () => {
+      const loaded = await loadConfigFromMirror(this.options);
+      this.config = normalizeConfig(loaded.config);
+      this.source = loaded.source;
+      this.configError = loaded.configError;
+      this.configErrorRetryable = loaded.retryable;
+      return this.snapshot();
+    });
+  }
+
+  hasConfigError(): boolean {
+    return this.configError !== undefined;
+  }
+
+  hasRetryableConfigError(): boolean {
+    return this.configError !== undefined && this.configErrorRetryable;
+  }
+
+  hasPermanentConfigError(): boolean {
+    return this.configError !== undefined && !this.configErrorRetryable;
+  }
+
+  /** Replace a malformed durable config with the active bootstrap membership. */
+  async repairConfig(actor: string): Promise<PoolSnapshot> {
+    return this.enqueueMutation(async () => {
+      if (!this.hasPermanentConfigError()) {
+        throw new Error("pool config does not have a repairable validation error");
+      }
+      await this.commit(this.config, actor, "config: repair pool membership");
+      return this.snapshot();
+    });
   }
 
   isMember(username: string): boolean {
@@ -133,6 +175,7 @@ export class PoolMembership {
 
   async addMember(actor: string, username: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const user = normalizeUsername(username);
       if (this.memberSet().has(user)) return this.snapshot();
       const nextConfig = {
@@ -146,6 +189,7 @@ export class PoolMembership {
 
   async removeMember(actor: string, username: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const user = normalizeUsername(username);
       if (this.adminSet().has(user))
         throw new Error(`@${user} is an admin; demote before removing`);
@@ -162,6 +206,7 @@ export class PoolMembership {
 
   async addAdmin(actor: string, username: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const user = normalizeUsername(username);
       if (this.adminSet().has(user)) return this.snapshot();
       const nextConfig = {
@@ -176,6 +221,7 @@ export class PoolMembership {
 
   async removeAdmin(actor: string, username: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const user = normalizeUsername(username);
       if (this.bootstrapAdmins.includes(user)) {
         throw new Error(`@${user} is a bootstrap admin; change POOL_ADMINS to demote`);
@@ -196,6 +242,7 @@ export class PoolMembership {
 
   async addMemberOrg(actor: string, org: MemberOrgGrant): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const grant = normalizeMemberOrg(org);
       const current = normalizeMemberOrgs(this.config.member_orgs)[0];
       if (current?.sub === grant.sub) return this.snapshot();
@@ -210,6 +257,7 @@ export class PoolMembership {
 
   async removeMemberOrg(actor: string, orgName: string): Promise<PoolSnapshot> {
     return this.enqueueMutation(async () => {
+      this.assertConfigWritable();
       const name = normalizeOrgName(orgName);
       const currentOrgs = normalizeMemberOrgs(this.config.member_orgs);
       const nextOrgs = currentOrgs.filter((org) => org.name !== name);
@@ -251,6 +299,12 @@ export class PoolMembership {
     return result;
   }
 
+  private assertConfigWritable(): void {
+    if (this.configError !== undefined) {
+      throw new Error(`pool config is unavailable: ${this.configError}`);
+    }
+  }
+
   private async commit(nextConfig: PoolConfig, actor: string, title: string): Promise<void> {
     const committedConfig = normalizeConfig({
       ...nextConfig,
@@ -265,6 +319,7 @@ export class PoolMembership {
     this.config = committedConfig;
     this.source = "dataset";
     this.configError = undefined;
+    this.configErrorRetryable = false;
   }
 }
 
@@ -324,6 +379,40 @@ function normalizeConfig(config: PoolConfig): PoolConfig {
       ? {}
       : { updated_by: normalizeUsername(config.updated_by) }),
   };
+}
+
+async function loadConfigFromMirror(options: PoolMembershipOptions): Promise<LoadedPoolConfig> {
+  const fallback = bootstrapConfig(options);
+  let raw: string | undefined;
+  try {
+    raw = await options.mirror.readText(POOL_CONFIG_PATH);
+  } catch (error) {
+    return {
+      config: fallback,
+      source: "bootstrap",
+      configError: errorMessage(error),
+      retryable: true,
+    };
+  }
+  if (raw === undefined) return { config: fallback, source: "bootstrap", retryable: false };
+  try {
+    return {
+      config: normalizeConfig(poolConfigSchema.parse(JSON.parse(raw))),
+      source: "dataset",
+      retryable: false,
+    };
+  } catch (error) {
+    return {
+      config: fallback,
+      source: "bootstrap",
+      configError: errorMessage(error),
+      retryable: false,
+    };
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "invalid pool config";
 }
 
 function bootstrapConfig(options: PoolMembershipOptions): PoolConfig {

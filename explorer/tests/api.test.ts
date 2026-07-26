@@ -16,6 +16,7 @@ import {
   removePoolMember,
   addPoolMemberOrg,
   removePoolMemberOrg,
+  repairPoolConfig,
   tweetsQueryString,
 } from "../src/lib/api.js";
 
@@ -170,6 +171,7 @@ describe("api client", () => {
       "fetch",
       vi.fn().mockImplementation(() => Promise.resolve(Response.json({ pool }))),
     );
+    await expect(repairPoolConfig()).resolves.toEqual(pool);
     await expect(addPoolMember("alice")).resolves.toEqual(pool);
     await expect(removePoolMember("alice")).resolves.toEqual(pool);
     await expect(addPoolAdmin("alice")).resolves.toEqual(pool);

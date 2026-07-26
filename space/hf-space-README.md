@@ -18,10 +18,12 @@ Private tweet pool for a group of friends running the
 - `POST /api/ingest` — extension submissions (Bearer pool token)
 - `GET /connect` — sign in with Hugging Face to connect the extension
 - `/` — tweet explorer
+- `GET /healthz` and `GET /readyz` — machine-readable runtime health
 
 Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
 dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`. When enrichment is
-enabled, set `INFERENCE_TOKEN` separately for Hugging Face Inference Providers.
+enabled, set `INFERENCE_TOKEN` separately as a fine-grained token with the
+`Make calls to Inference Providers` permission.
 Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
 comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
 (auto-injected by HF).
