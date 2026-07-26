@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import type { ServiceAccountsSnapshot } from "@xtap-pool/shared";
 
 import type { PoolSnapshot } from "../lib/api.js";
 import {
@@ -6,10 +8,16 @@ import {
   addPoolMember,
   addPoolMemberOrg,
   fetchAdminPool,
+  fetchAdminServiceAccounts,
+  issueServiceAccount,
   removePoolAdmin,
   removePoolMember,
   removePoolMemberOrg,
   repairPoolConfig,
+  repairServiceAccounts,
+  revokeServiceAccount,
+  revokeServiceAccountKey,
+  rotateServiceAccount,
 } from "../lib/api.js";
 import type { MemberOrgGrant } from "../lib/api.js";
 
@@ -263,7 +271,242 @@ export function AdminPanel(): React.JSX.Element {
           ))}
         </ul>
       </section>
+
+      <ServiceAccountsPanel />
     </div>
+  );
+}
+
+type ServiceState =
+  | { status: "loading" }
+  | {
+      status: "ready";
+      snapshot: ServiceAccountsSnapshot;
+      busy?: string;
+      error?: string;
+      issued?: { name: string; token: string };
+    }
+  | { status: "error"; error: string };
+
+function optionalIssued(issued: { name: string; token: string } | undefined): {
+  issued?: { name: string; token: string };
+} {
+  return issued === undefined ? {} : { issued };
+}
+
+function ServiceAccountsPanel(): React.JSX.Element {
+  const [state, setState] = useState<ServiceState>({ status: "loading" });
+  const [name, setName] = useState("");
+  const issuedRef = useRef<{ name: string; token: string } | undefined>(undefined);
+
+  useEffect(() => {
+    void fetchAdminServiceAccounts().then(
+      (snapshot) => {
+        setState({ status: "ready", snapshot });
+      },
+      (error: unknown) => {
+        setState({ status: "error", error: message(error) });
+      },
+    );
+  }, []);
+
+  async function mutateServices(
+    label: string,
+    operation: () => Promise<{ name?: string; token?: string } | undefined>,
+  ): Promise<void> {
+    if (state.status !== "ready") return;
+    setState({
+      status: "ready",
+      snapshot: state.snapshot,
+      busy: label,
+      ...optionalIssued(issuedRef.current),
+    });
+    try {
+      const result = await operation();
+      if (result?.token !== undefined && result.name !== undefined) {
+        issuedRef.current = { name: result.name, token: result.token };
+        setState({
+          status: "ready",
+          snapshot: state.snapshot,
+          busy: label,
+          issued: issuedRef.current,
+        });
+      }
+      const snapshot = await fetchAdminServiceAccounts();
+      setState({
+        status: "ready",
+        snapshot,
+        ...optionalIssued(issuedRef.current),
+      });
+    } catch (error) {
+      setState({
+        status: "ready",
+        snapshot: state.snapshot,
+        error: message(error),
+        ...optionalIssued(issuedRef.current),
+      });
+    }
+  }
+
+  if (state.status === "loading") return <p className="text-sm text-(--x-muted)">Loading…</p>;
+  if (state.status === "error") return <p className="text-sm text-red-500">{state.error}</p>;
+
+  return (
+    <section className="grid gap-3 border-t border-(--x-border) pt-5">
+      <div>
+        <h3 className="font-bold">Service Accounts</h3>
+        <p className="text-sm text-(--x-muted)">
+          Read-only machine access. Credentials appear once and cannot ingest or administer.
+        </p>
+      </div>
+
+      {state.snapshot.config_error === undefined ? null : (
+        <div className="rounded-md border border-red-400 px-3 py-2 text-sm text-red-500">
+          <p>{state.snapshot.config_error}</p>
+          <button
+            type="button"
+            className="mt-2 rounded-md border border-red-400 px-2 py-1 font-semibold"
+            disabled={state.busy !== undefined}
+            onClick={() => {
+              void mutateServices("repair", async () => {
+                await repairServiceAccounts();
+                return undefined;
+              });
+            }}
+          >
+            Replace with empty registry
+          </button>
+        </div>
+      )}
+
+      {state.issued === undefined ? null : (
+        <div className="rounded-md border border-amber-400 px-3 py-2 text-sm">
+          <p className="font-semibold">Copy the {state.issued.name} credential now.</p>
+          <p className="text-(--x-muted)">It will not be shown again.</p>
+          <textarea
+            aria-label="Issued service credential"
+            className="mt-2 h-20 w-full rounded-md border border-(--x-border) bg-(--x-soft) p-2 font-mono text-xs"
+            readOnly
+            value={state.issued.token}
+          />
+          <button
+            type="button"
+            className="rounded-md border border-(--x-border) px-2 py-1 text-sm"
+            onClick={() => {
+              issuedRef.current = undefined;
+              setState({ status: "ready", snapshot: state.snapshot });
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {state.error === undefined ? null : <p className="text-sm text-red-500">{state.error}</p>}
+
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const accountName = name.trim();
+          if (accountName === "") return;
+          setName("");
+          void mutateServices(`issue:${accountName}`, async () => {
+            const credential = await issueServiceAccount(accountName, [
+              "units:read",
+              "taxonomy:read",
+            ]);
+            return { name: credential.account.name, token: credential.token };
+          });
+        }}
+      >
+        <input
+          aria-label="Service account name"
+          className="min-w-0 flex-1 rounded-md border border-(--x-border) bg-(--x-soft) px-3 py-2 text-sm"
+          placeholder="local-frontier"
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+          }}
+        />
+        <button
+          type="submit"
+          className="rounded-md bg-(--x-accent) px-3 py-2 text-sm font-semibold text-white"
+          disabled={state.busy !== undefined || state.snapshot.config_error !== undefined}
+        >
+          Issue reader
+        </button>
+      </form>
+
+      <ul className="divide-y divide-(--x-border) border-y border-(--x-border)">
+        {state.snapshot.accounts.map((account) => (
+          <li key={account.id} className="grid gap-2 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                <strong>{account.name}</strong>{" "}
+                <span className="text-sm text-(--x-muted)">
+                  {account.status} · {account.scopes.join(", ")}
+                </span>
+              </span>
+              {account.status === "active" ? (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md border border-(--x-border) px-2 py-1 text-sm"
+                    disabled={state.busy !== undefined}
+                    onClick={() => {
+                      void mutateServices(`rotate:${account.id}`, async () => {
+                        const credential = await rotateServiceAccount(account.id);
+                        return { name: credential.account.name, token: credential.token };
+                      });
+                    }}
+                  >
+                    Rotate
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-red-400 px-2 py-1 text-sm text-red-500"
+                    disabled={state.busy !== undefined}
+                    onClick={() => {
+                      void mutateServices(`revoke:${account.id}`, async () => {
+                        await revokeServiceAccount(account.id);
+                        return undefined;
+                      });
+                    }}
+                  >
+                    Revoke
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {account.keys.length === 0 ? null : (
+              <ul className="grid gap-1 pl-3 text-xs text-(--x-muted)">
+                {account.keys.map((key) => (
+                  <li key={key.id} className="flex items-center justify-between gap-2">
+                    <span>
+                      key {key.id} · issued {key.created_at.slice(0, 10)}
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded-md border border-(--x-border) px-2 py-1"
+                      disabled={state.busy !== undefined}
+                      onClick={() => {
+                        void mutateServices(`revoke-key:${key.id}`, async () => {
+                          await revokeServiceAccountKey(account.id, key.id);
+                          return undefined;
+                        });
+                      }}
+                    >
+                      Revoke key
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

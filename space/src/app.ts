@@ -6,7 +6,8 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import { z } from "zod";
 
-import type { EnrichReceipt } from "@xtap-pool/shared";
+import { serviceAccountScopeSchema } from "@xtap-pool/shared";
+import type { EnrichReceipt, ServiceAccountScope } from "@xtap-pool/shared";
 
 import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
@@ -18,7 +19,14 @@ import type { IngestOutcome } from "./ingest.js";
 import type { PoolAccessGrant, PoolIdentity, PoolMembership, PoolSnapshot } from "./membership.js";
 import { authorizeUrl, exchangeCodeForIdentity } from "./oauth.js";
 import { mintPoolToken, verifyPoolToken } from "./pool-token.js";
+import type { ServiceAccountRegistry } from "./service-accounts.js";
 import type { TweetStore, TweetQuery } from "./store.js";
+import {
+  InvalidUnitCursorError,
+  StaleUnitRevisionError,
+  type UnitQuery,
+  type UnitStore,
+} from "./unit-store.js";
 
 const SESSION_COOKIE = "xtap_pool_session";
 const OAUTH_STATE_COOKIE = "xtap_pool_oauth";
@@ -52,15 +60,23 @@ export type AppReadiness = {
     state: "ready" | "disabled" | "invalid" | "unknown";
     error?: string;
   };
+  service_accounts?: {
+    state: "ready" | "invalid" | "unknown";
+    accounts: number;
+    error?: string;
+  };
 };
 
 export type AppDeps = {
   config: SpaceConfig;
   store: TweetStore;
   membership: PoolMembership;
+  serviceAccounts: ServiceAccountRegistry;
+  unitStore: UnitStore;
   enrich: EnrichDeps;
   ingest: (username: string, payload: unknown) => Promise<IngestOutcome>;
   repairMembership?: (actor: string) => Promise<PoolSnapshot>;
+  mutateServiceAccounts?: <T>(operation: () => Promise<T>) => Promise<T>;
   readiness?: () => AppReadiness;
   now?: () => Date;
   oauthFetch?: typeof fetch;
@@ -90,8 +106,15 @@ const tweetsQuerySchema = z.object({
 });
 
 const graphQuerySchema = z.object({
-  label: z.string().optional(),
+  labels: z.string().optional(),
+  label_mode: z.enum(["any", "all"]).default("any"),
   top: z.coerce.number().int().min(1).max(1000).default(300),
+  revision: z.string().min(1).optional(),
+});
+
+const serviceAccountCreateSchema = z.object({
+  name: z.string().min(1),
+  scopes: z.array(serviceAccountScopeSchema).min(1),
 });
 
 function parseFlag(value: "true" | "false" | undefined): boolean | undefined {
@@ -107,6 +130,14 @@ function parseCsv(value: string | undefined): string[] | undefined {
 }
 
 function toTweetQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
+  return toFilteredQuery(raw);
+}
+
+function toUnitQuery(raw: z.infer<typeof tweetsQuerySchema>): UnitQuery {
+  return toFilteredQuery(raw);
+}
+
+function toFilteredQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
   const labels = parseCsv(raw.labels);
   const candidate = {
     dedup: raw.dedup === "true",
@@ -129,10 +160,13 @@ function toTweetQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
 }
 
 export function createApp(deps: AppDeps): Hono {
-  const { config, store, membership } = deps;
+  const { config, store, membership, serviceAccounts, unitStore } = deps;
   const now = deps.now ?? ((): Date => new Date());
   const resolveOrg =
     deps.resolveOrg ?? createHuggingFaceOrgResolver(config.openidProviderUrl, deps.oauthFetch);
+  const mutateServiceAccounts =
+    deps.mutateServiceAccounts ??
+    (async <T>(operation: () => Promise<T>): Promise<T> => operation());
 
   const authorizeIdentity = (identity: PoolIdentity): AuthorizedIdentity | undefined => {
     const grant = membership.accessFor(identity);
@@ -160,6 +194,25 @@ export function createApp(deps: AppDeps): Hono {
     return verified.ok ? authorizeIdentity(verified) : undefined;
   };
 
+  const serviceIdentity = (
+    c: Context,
+    scope: ServiceAccountScope,
+  ): ReturnType<ServiceAccountRegistry["authorize"]> => {
+    const header = c.req.header("authorization");
+    if (header?.toLowerCase().startsWith("bearer ") !== true) return undefined;
+    const identity = serviceAccounts.authorize(header.slice(7).trim(), scope);
+    if (identity !== undefined) {
+      console.info(
+        `[xtap-pool] service account ${identity.name} (${identity.id}/${identity.keyId}) ` +
+          `${c.req.method} ${c.req.path}`,
+      );
+    }
+    return identity;
+  };
+
+  const readAuthorized = (c: Context, scope: ServiceAccountScope): boolean =>
+    sessionIdentity(c) !== undefined || serviceIdentity(c, scope) !== undefined;
+
   const adminUser = (c: Context): string | Response => {
     const identity = sessionIdentity(c);
     if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
@@ -172,9 +225,10 @@ export function createApp(deps: AppDeps): Hono {
 
   const requireReady = async (c: Context, next: Next) => {
     const readiness = deps.readiness?.();
-    const membershipRecovery =
-      membership.hasPermanentConfigError() && isMembershipRecoveryRequest(c);
-    if (readiness !== undefined && !readiness.ok && !membershipRecovery) {
+    const configRecovery =
+      (membership.hasPermanentConfigError() || serviceAccounts.hasPermanentConfigError()) &&
+      isConfigurationRecoveryRequest(c);
+    if (readiness !== undefined && !readiness.ok && !configRecovery) {
       return c.json({ error: "pool is not ready", readiness }, 503);
     }
     await next();
@@ -317,6 +371,21 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(page);
   });
 
+  app.get("/api/units", (c) => {
+    if (!readAuthorized(c, "units:read")) return c.json({ error: "unauthenticated" }, 401);
+    const parsed = tweetsQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
+    try {
+      return c.json(unitStore.query(toUnitQuery(parsed.data)));
+    } catch (error) {
+      if (error instanceof InvalidUnitCursorError) return c.json({ error: error.message }, 400);
+      if (error instanceof StaleUnitRevisionError) {
+        return c.json({ error: error.message, current_revision: error.current }, 409);
+      }
+      throw error;
+    }
+  });
+
   app.get("/api/contributors", (c) => {
     const identity = sessionIdentity(c);
     if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
@@ -324,31 +393,42 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/labels", (c) => {
-    const identity = sessionIdentity(c);
-    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
-    return c.json(deps.enrich.store.labelsSummary(deps.enrich.taxonomy.labels));
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
+    const revision = checkedRevision(c.req.query("revision"), unitStore);
+    if (revision instanceof Response) return revision;
+    return c.json({ revision, ...deps.enrich.store.labelsSummary(deps.enrich.taxonomy.labels) });
   });
 
   app.get("/api/concepts", (c) => {
-    const identity = sessionIdentity(c);
-    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
-    return c.json({ concepts: deps.enrich.store.concepts() });
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
+    const revision = checkedRevision(c.req.query("revision"), unitStore);
+    if (revision instanceof Response) return revision;
+    return c.json({ revision, concepts: deps.enrich.store.concepts() });
   });
 
   app.get("/api/concepts/:slug", (c) => {
-    const identity = sessionIdentity(c);
-    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
+    const revision = checkedRevision(c.req.query("revision"), unitStore);
+    if (revision instanceof Response) return revision;
     const concept = deps.enrich.store.concept(c.req.param("slug"));
     if (concept === undefined) return c.json({ error: "unknown concept" }, 404);
-    return c.json(concept);
+    return c.json({ revision, ...concept });
   });
 
   app.get("/api/graph", (c) => {
-    const identity = sessionIdentity(c);
-    if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = graphQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    return c.json(deps.enrich.store.graph({ label: parsed.data.label, top: parsed.data.top }));
+    const revision = checkedRevision(parsed.data.revision, unitStore);
+    if (revision instanceof Response) return revision;
+    return c.json({
+      revision,
+      ...deps.enrich.store.graph({
+        labels: parseCsv(parsed.data.labels),
+        labelMode: parsed.data.label_mode,
+        top: parsed.data.top,
+      }),
+    });
   });
 
   app.post("/api/enrich/run", async (c) => {
@@ -377,6 +457,81 @@ export function createApp(deps: AppDeps): Hono {
       const repair =
         deps.repairMembership ?? ((username: string) => membership.repairConfig(username));
       return c.json({ pool: await repair(actor) });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.get("/api/admin/service-accounts", (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    return c.json({ service_accounts: serviceAccounts.snapshot(), viewer: { username: actor } });
+  });
+
+  app.post("/api/admin/service-accounts", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    const body = await jsonBody(c);
+    if (!body.ok) return body.response;
+    const parsed = serviceAccountCreateSchema.safeParse(body.value);
+    if (!parsed.success) return c.json({ error: "invalid service account" }, 400);
+    try {
+      const credential = await mutateServiceAccounts(() =>
+        serviceAccounts.issue(actor, parsed.data.name, parsed.data.scopes),
+      );
+      c.header("cache-control", "no-store");
+      return c.json(credential, 201);
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post("/api/admin/service-accounts/:id/keys", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      const credential = await mutateServiceAccounts(() =>
+        serviceAccounts.rotate(actor, c.req.param("id")),
+      );
+      c.header("cache-control", "no-store");
+      return c.json(credential, 201);
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.delete("/api/admin/service-accounts/:id/keys/:keyId", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      const account = await mutateServiceAccounts(() =>
+        serviceAccounts.revokeKey(actor, c.req.param("id"), c.req.param("keyId")),
+      );
+      return c.json({ account });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.delete("/api/admin/service-accounts/:id", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      const account = await mutateServiceAccounts(() =>
+        serviceAccounts.revoke(actor, c.req.param("id")),
+      );
+      return c.json({ account });
+    } catch (error) {
+      return c.json({ error: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post("/api/admin/service-accounts/repair", async (c) => {
+    const actor = adminUser(c);
+    if (actor instanceof Response) return actor;
+    try {
+      const snapshot = await mutateServiceAccounts(() => serviceAccounts.repair(actor));
+      return c.json({ service_accounts: snapshot });
     } catch (error) {
       return c.json({ error: errorMessage(error) }, 400);
     }
@@ -447,11 +602,43 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
-function isMembershipRecoveryRequest(c: Context): boolean {
+function isConfigurationRecoveryRequest(c: Context): boolean {
   const path = c.req.path;
   if (path.startsWith("/oauth/")) return true;
-  if (c.req.method === "GET" && (path === "/api/me" || path === "/api/admin/pool")) return true;
-  return c.req.method === "POST" && path === "/api/admin/pool/repair";
+  if (
+    c.req.method === "GET" &&
+    (path === "/api/me" || path === "/api/admin/pool" || path === "/api/admin/service-accounts")
+  ) {
+    return true;
+  }
+  return (
+    c.req.method === "POST" &&
+    (path === "/api/admin/pool/repair" || path === "/api/admin/service-accounts/repair")
+  );
+}
+
+function checkedRevision(requested: string | undefined, unitStore: UnitStore): string | Response {
+  try {
+    return unitStore.assertRevision(requested);
+  } catch (error) {
+    if (error instanceof StaleUnitRevisionError) {
+      return Response.json(
+        { error: error.message, current_revision: error.current },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
+}
+
+async function jsonBody(
+  c: Context,
+): Promise<{ ok: true; value: unknown } | { ok: false; response: Response }> {
+  try {
+    return { ok: true, value: await c.req.json() };
+  } catch {
+    return { ok: false, response: c.json({ error: "body must be JSON" }, 400) };
+  }
 }
 
 function tokenTtlForGrant(grant: PoolAccessGrant, fallback: number): number {

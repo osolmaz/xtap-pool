@@ -15,7 +15,9 @@ import { EnrichStore } from "../src/enrich-store.js";
 import { Mutex, ingestBatch } from "../src/ingest.js";
 import { PoolMembership } from "../src/membership.js";
 import { mintPoolToken } from "../src/pool-token.js";
+import { ServiceAccountRegistry } from "../src/service-accounts.js";
 import { TweetStore } from "../src/store.js";
+import { UnitStore } from "../src/unit-store.js";
 import { FakeHub, makeTweet, testConfig } from "./helpers.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
@@ -36,6 +38,8 @@ let hub: FakeHub;
 let store: TweetStore;
 let app: Hono;
 let membership: PoolMembership;
+let serviceAccounts: ServiceAccountRegistry;
+let unitStore: UnitStore;
 let enrich: EnrichDeps;
 
 function sessionCookie(
@@ -64,16 +68,20 @@ beforeEach(async () => {
     bootstrapAdmins: testConfig.poolAdmins,
     now: () => NOW,
   });
+  serviceAccounts = await ServiceAccountRegistry.load({ mirror, now: () => NOW });
   const mutex = new Mutex();
   enrich = {
     store: new EnrichStore(store.database, 1, () => NOW),
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
     run: () => Promise.resolve(EMPTY_RECEIPT),
   };
+  unitStore = new UnitStore(store.database, 1);
   app = createApp({
     config: testConfig,
     store,
     membership,
+    serviceAccounts,
+    unitStore,
     enrich,
     now: () => NOW,
     ingest: (username, payload) =>
@@ -100,6 +108,8 @@ describe("health", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       readiness: () => ({
@@ -147,6 +157,8 @@ describe("health", () => {
       config: testConfig,
       store,
       membership: brokenMembership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
@@ -328,6 +340,55 @@ describe("enrichment endpoints", () => {
     await expect(ids("labels=ai&q=vllm")).resolves.toEqual(["1"]);
   });
 
+  it("serves whole enriched units to scoped machine credentials", async () => {
+    await seedEnrichedTweets();
+    const issued = await serviceAccounts.issue("osolmaz", "local-frontier", ["units:read"]);
+    const authorization = { authorization: `Bearer ${issued.token}` };
+
+    const response = await app.request("/api/units?labels=ai,local-models&label_mode=any", {
+      headers: authorization,
+    });
+    expect(response.status).toBe(200);
+    const page = (await response.json()) as {
+      revision: string;
+      units: { id: string; posts: { id: string }[]; preset_labels: string[] }[];
+    };
+    expect(page.units).toEqual([
+      expect.objectContaining({ id: "1:someone", posts: [expect.objectContaining({ id: "1" })] }),
+    ]);
+
+    expect((await app.request("/api/concepts", { headers: authorization })).status).toBe(401);
+    expect(
+      (
+        await app.request("/api/ingest", {
+          method: "POST",
+          headers: { ...authorization, "content-type": "application/json" },
+          body: JSON.stringify({ tweets: [makeTweet()] }),
+        })
+      ).status,
+    ).toBe(401);
+
+    const stale = await app.request(`/api/graph?revision=${encodeURIComponent("old")}`, {
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    expect(stale.status).toBe(409);
+    await expect(stale.json()).resolves.toMatchObject({ current_revision: page.revision });
+  });
+
+  it("serves taxonomy endpoints to taxonomy-scoped credentials", async () => {
+    await seedEnrichedTweets();
+    const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
+    const headers = { authorization: `Bearer ${issued.token}` };
+    const concepts = await app.request("/api/concepts", { headers });
+    expect(concepts.status).toBe(200);
+    const body = (await concepts.json()) as { revision: string };
+    expect(
+      (await app.request(`/api/graph?revision=${encodeURIComponent(body.revision)}`, { headers }))
+        .status,
+    ).toBe(200);
+    expect((await app.request("/api/units", { headers })).status).toBe(401);
+  });
+
   it("serves the labels summary with counts, queue depth and coverage", async () => {
     await seedEnrichedTweets();
     const summary = (await (await app.request("/api/labels", { headers })).json()) as {
@@ -382,7 +443,7 @@ describe("enrichment endpoints", () => {
     expect(bounded.nodes).toHaveLength(1);
     expect(bounded.links).toHaveLength(0);
 
-    const labeled = (await (await app.request("/api/graph?label=agents", { headers })).json()) as {
+    const labeled = (await (await app.request("/api/graph?labels=agents", { headers })).json()) as {
       nodes: unknown[];
     };
     expect(labeled.nodes).toHaveLength(0);
@@ -410,6 +471,8 @@ describe("enrichment endpoints", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich: { ...enrich, run: () => Promise.reject(new Error("router down")) },
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
@@ -450,6 +513,8 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
@@ -483,6 +548,8 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
@@ -515,6 +582,8 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: (username, payload) =>
@@ -571,6 +640,8 @@ describe("oauth + connect flow", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
@@ -625,6 +696,53 @@ describe("admin pool management", () => {
       (await app.request("/api/admin/pool", { headers: { cookie: sessionCookie("alice") } }))
         .status,
     ).toBe(403);
+  });
+
+  it("issues, rotates, and revokes service-account credentials", async () => {
+    const adminHeaders = {
+      cookie: sessionCookie("osolmaz"),
+      "content-type": "application/json",
+    };
+    const issued = await app.request("/api/admin/service-accounts", {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        name: "local-frontier",
+        scopes: ["units:read", "taxonomy:read"],
+      }),
+    });
+    expect(issued.status).toBe(201);
+    expect(issued.headers.get("cache-control")).toBe("no-store");
+    const credential = (await issued.json()) as {
+      token: string;
+      account: { id: string; keys: { id: string }[] };
+    };
+
+    const listed = await app.request("/api/admin/service-accounts", {
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    expect(await listed.text()).not.toContain(credential.token);
+
+    const rotated = await app.request(`/api/admin/service-accounts/${credential.account.id}/keys`, {
+      method: "POST",
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    expect(rotated.status).toBe(201);
+    const rotatedCredential = (await rotated.json()) as { token: string };
+    expect(rotatedCredential.token).not.toBe(credential.token);
+
+    const revoked = await app.request(`/api/admin/service-accounts/${credential.account.id}`, {
+      method: "DELETE",
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    expect(revoked.status).toBe(200);
+    expect(
+      (
+        await app.request("/api/units", {
+          headers: { authorization: `Bearer ${rotatedCredential.token}` },
+        })
+      ).status,
+    ).toBe(401);
   });
 
   it("adds and removes members without a Space restart", async () => {
@@ -690,6 +808,8 @@ describe("admin pool management", () => {
       config: testConfig,
       store,
       membership,
+      serviceAccounts,
+      unitStore,
       enrich,
       now: () => NOW,
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),

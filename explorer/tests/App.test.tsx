@@ -27,16 +27,25 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-function stubApi(responses: Record<string, () => Response>): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+function stubApi(
+  responses: Record<string, (init?: RequestInit) => Response | Promise<Response>>,
+): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const path = url.split("?")[0] ?? url;
     const responder = responses[path];
     if (responder === undefined) return Promise.resolve(new Response("missing", { status: 404 }));
-    return Promise.resolve(responder());
+    return Promise.resolve(responder(init));
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+function serviceAccountsResponse(accounts: readonly unknown[] = []): Response {
+  return Response.json({
+    service_accounts: { version: 1, accounts, source: "dataset" },
+    viewer: { username: "osolmaz" },
+  });
 }
 
 function poolResponse(members: readonly string[]): Response {
@@ -221,6 +230,7 @@ describe("App", () => {
       "/api/contributors": () => Response.json({ contributors: [] }),
       "/api/tweets": () => Response.json({ records: [] }),
       "/api/admin/pool": () => poolResponse(["osolmaz"]),
+      "/api/admin/service-accounts": () => serviceAccountsResponse(),
       "/api/admin/members/alice": (init) =>
         init?.method === "PUT"
           ? poolResponse(["alice", "osolmaz"])
@@ -261,6 +271,7 @@ describe("App", () => {
       "/api/contributors": () => Response.json({ contributors: [] }),
       "/api/tweets": () => Response.json({ records: [] }),
       "/api/admin/pool": () => Response.json(malformed),
+      "/api/admin/service-accounts": () => serviceAccountsResponse(),
       "/api/admin/pool/repair": (init) =>
         init?.method === "POST"
           ? poolResponse(["osolmaz"])
@@ -286,12 +297,117 @@ describe("App", () => {
     );
   });
 
+  it("shows a newly issued service credential exactly once", async () => {
+    const account = {
+      id: "account-1",
+      name: "local-frontier",
+      scopes: ["units:read", "taxonomy:read"],
+      status: "active",
+      created_at: "2026-07-27T00:00:00.000Z",
+      updated_at: "2026-07-27T00:00:00.000Z",
+      keys: [
+        {
+          id: "key-1",
+          created_at: "2026-07-27T00:00:00.000Z",
+          expires_at: "2027-07-27T00:00:00.000Z",
+        },
+      ],
+    };
+    let issued = false;
+    const routes: Record<string, (init?: RequestInit) => Response> = {
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+      "/api/admin/pool": () => poolResponse(["osolmaz"]),
+      "/api/admin/service-accounts": (init) => {
+        if (init?.method === "POST") {
+          issued = true;
+          return Response.json({ account, token: "xtap_sa_one_time" }, { status: 201 });
+        }
+        return serviceAccountsResponse(issued ? [account] : []);
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        const path = url.split("?")[0] ?? url;
+        return Promise.resolve(routes[path]?.(init) ?? new Response("missing", { status: 404 }));
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(await screen.findByText("Admin"));
+    fireEvent.change(await screen.findByLabelText("Service account name"), {
+      target: { value: "local-frontier" },
+    });
+    fireEvent.click(screen.getByText("Issue reader"));
+    const credential = await screen.findByLabelText("Issued service credential");
+    expect(credential instanceof HTMLTextAreaElement).toBe(true);
+    expect(credential instanceof HTMLTextAreaElement ? credential.value : "").toBe(
+      "xtap_sa_one_time",
+    );
+    expect(screen.getByText("local-frontier")).toBeDefined();
+    fireEvent.click(screen.getByText("Dismiss"));
+    expect(screen.queryByLabelText("Issued service credential")).toBeNull();
+  });
+
+  it("does not restore a dismissed credential after the account refresh completes", async () => {
+    const account = {
+      id: "account-1",
+      name: "local-frontier",
+      scopes: ["units:read", "taxonomy:read"],
+      status: "active",
+      created_at: "2026-07-27T00:00:00.000Z",
+      updated_at: "2026-07-27T00:00:00.000Z",
+      keys: [
+        {
+          id: "key-1",
+          created_at: "2026-07-27T00:00:00.000Z",
+          expires_at: "2027-07-27T00:00:00.000Z",
+        },
+      ],
+    };
+    let serviceReads = 0;
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    stubApi({
+      "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
+      "/api/contributors": () => Response.json({ contributors: [] }),
+      "/api/tweets": () => Response.json({ records: [] }),
+      "/api/admin/pool": () => poolResponse(["osolmaz"]),
+      "/api/admin/service-accounts": (init) => {
+        if (init?.method === "POST") {
+          return Response.json({ account, token: "xtap_sa_one_time" }, { status: 201 });
+        }
+        serviceReads += 1;
+        if (serviceReads === 1) return serviceAccountsResponse();
+        return new Promise<Response>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByText("Admin"));
+    fireEvent.change(await screen.findByLabelText("Service account name"), {
+      target: { value: "local-frontier" },
+    });
+    fireEvent.click(screen.getByText("Issue reader"));
+    await screen.findByLabelText("Issued service credential");
+    fireEvent.click(screen.getByText("Dismiss"));
+    resolveRefresh?.(serviceAccountsResponse([account]));
+    await screen.findByText("key key-1", { exact: false });
+    expect(screen.queryByLabelText("Issued service credential")).toBeNull();
+  });
+
   it("lets admins set the member organization", async () => {
     const routes: Record<string, (init?: RequestInit) => Response> = {
       "/api/me": () => Response.json({ username: "osolmaz", isAdmin: true }),
       "/api/contributors": () => Response.json({ contributors: [] }),
       "/api/tweets": () => Response.json({ records: [] }),
       "/api/admin/pool": () => poolResponse(["osolmaz"]),
+      "/api/admin/service-accounts": () => serviceAccountsResponse(),
       "/api/admin/member-orgs/huggingface": (init) =>
         init?.method === "PUT"
           ? Response.json({

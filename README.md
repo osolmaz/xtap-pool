@@ -12,7 +12,10 @@ xtap-pool is three pieces in one repo:
   verifies who sent them, stamps attribution, deduplicates, and commits
   everything to a private HF dataset repo (the durable system of record).
 - **`explorer/`** — a TypeScript + React + shadcn/ui web UI served by the
-  Space for browsing, filtering, and searching the pooled tweets.
+  Space for browsing, filtering, searching, and administering the pool.
+- **Consumer API** — revision-consistent enriched conversation-author units
+  for downstream applications that should not scan the private dataset or
+  repeat semantic extraction.
 
 See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
 design and delivery plan.
@@ -89,6 +92,13 @@ variables for first setup and break-glass access. If `config/pool.json` is malfo
 the Space stays unready but a bootstrap admin can still sign in and replace it
 from the **Admin** tab. The repair action is unavailable for transient Hub read
 failures, so cached bootstrap membership cannot overwrite a valid remote config.
+
+Admins also issue and rotate named read-only service accounts from the **Admin**
+tab. Service credentials are hashed in `config/service-accounts.json`, shown
+only once, expire after 365 days, and never authorize ingest or administration.
+Downstream applications consume complete enriched units through
+`GET /api/units`; see [Unit consumer API](docs/unit-consumer-api.md) for scopes,
+revision-consistent pagination, and atomic publication guidance.
 
 Only one organization grant is active. The `member_orgs` config key remains an
 array for backwards compatibility, but multiple organization grants are

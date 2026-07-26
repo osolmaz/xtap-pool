@@ -114,13 +114,15 @@ aliases[]}]}}}`. Units with no matching preset labels still get
    under $5 of router inference), then enable the worker and run the
    full backfill after its measured cost is approved
    (~26k units ≈ 1.3k GLM calls).
-4. Later, separately: local-frontier's pipeline becomes a consumer of
-   `/api/tweets?labels=ai,local-models`, and its own gate/extractor
-   are deleted.
+4. Downstream applications consume complete, revision-consistent units from
+   `/api/units?labels=ai,local-models&label_mode=any` with a scoped service
+   account. They use pool labels, concepts, and graph data directly instead of
+   retaining their own relevance gate or concept extractor. See
+   [`unit-consumer-api.md`](unit-consumer-api.md).
 
 ## Non-goals here
 
-- No changes to local-frontier (follow-up).
+- Downstream UI and publication details remain in each consumer.
 - No gardener/merge pass yet; vocabulary hygiene is manual until the
   vocabulary size warrants it.
 - No public exposure: enrichment stays behind the existing pool auth.

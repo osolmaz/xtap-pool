@@ -78,6 +78,7 @@ export type EnrichmentCoverage = { units_total: number; units_enriched: number }
 
 /** `GET /api/labels` payload. */
 export type LabelsSummary = {
+  revision: string;
   taxonomy_version: number;
   labels: LabelCount[];
   free_labels: FreeLabelCount[];
@@ -88,12 +89,13 @@ export type LabelsSummary = {
 export type ConceptCount = VocabularyEntry & { unit_count: number };
 
 /** `GET /api/concepts` payload. */
-export type ConceptsSummary = { concepts: ConceptCount[] };
+export type ConceptsSummary = { revision: string; concepts: ConceptCount[] };
 
 export type RelatedConcept = { slug: string; name: string; shared_units: number };
 
 /** `GET /api/concepts/:slug` payload. */
 export type ConceptSummary = ConceptCount & {
+  revision: string;
   tweet_count: number;
   related: RelatedConcept[];
 };
@@ -103,7 +105,7 @@ export type GraphNode = { slug: string; name: string; unit_count: number };
 export type GraphLink = { source: string; target: string; weight: number };
 
 /** `GET /api/graph` payload. */
-export type ConceptGraph = { nodes: GraphNode[]; links: GraphLink[] };
+export type ConceptGraph = { revision: string; nodes: GraphNode[]; links: GraphLink[] };
 
 /** One enrichment run receipt, appended to `enrichment/receipts/<date>.jsonl`. */
 export type EnrichReceipt = {
