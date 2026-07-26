@@ -517,17 +517,24 @@ export class EnrichStore {
   }
 
   /** `GET /api/labels` domain logic: taxonomy counts, free labels, queue, coverage. */
-  labelsSummary(taxonomy: readonly LabelConfig[]): LabelsSummary {
+  labelsSummary(taxonomy: readonly LabelConfig[]): Omit<LabelsSummary, "revision"> {
+    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
     const presetRows = this.db
-      .prepare("SELECT label, COUNT(*) AS n FROM tweet_labels WHERE kind = 'preset' GROUP BY label")
-      .all() as { label: string; n: number }[];
+      .prepare(
+        `SELECT tl.label, COUNT(*) AS n FROM tweet_labels tl
+         JOIN unit_members um ON um.tweet_id = tl.tweet_id
+         WHERE tl.kind = 'preset' AND um.unit_id IN (${eligible.sql}) GROUP BY tl.label`,
+      )
+      .all(...eligible.params) as { label: string; n: number }[];
     const presetCounts = new Map(presetRows.map((row) => [row.label, row.n]));
     const freeLabels = this.db
       .prepare(
-        `SELECT label AS name, COUNT(*) AS count FROM tweet_labels WHERE kind = 'free'
-         GROUP BY label ORDER BY count DESC, label LIMIT ?`,
+        `SELECT tl.label AS name, COUNT(*) AS count FROM tweet_labels tl
+         JOIN unit_members um ON um.tweet_id = tl.tweet_id
+         WHERE tl.kind = 'free' AND um.unit_id IN (${eligible.sql})
+         GROUP BY tl.label ORDER BY count DESC, tl.label LIMIT ?`,
       )
-      .all(FREE_LABEL_LIMIT) as FreeLabelCount[];
+      .all(...eligible.params, FREE_LABEL_LIMIT) as FreeLabelCount[];
     return {
       taxonomy_version: this.taxonomyVersion,
       labels: taxonomy.map((label) => ({ ...label, count: presetCounts.get(label.name) ?? 0 })),
@@ -554,44 +561,61 @@ export class EnrichStore {
       .prepare("SELECT COUNT(DISTINCT unit_id) AS n FROM unit_members")
       .get() as { n: number };
     const enriched = this.db
-      .prepare("SELECT COUNT(*) AS n FROM enrichment WHERE taxonomy_version = ?")
+      .prepare(
+        `SELECT COUNT(*) AS n FROM enrichment e
+         JOIN enrich_queue q ON q.unit_id = e.unit_id
+           AND q.taxonomy_version = e.taxonomy_version AND q.status = 'done'
+         WHERE e.taxonomy_version = ?`,
+      )
       .get(this.taxonomyVersion) as { n: number };
     return { units_total: total.n, units_enriched: enriched.n };
   }
 
-  /** `GET /api/concepts` domain logic: vocabulary sorted by usage. */
+  /** `GET /api/concepts` domain logic: vocabulary sorted by finalized-unit usage. */
   concepts(): ConceptCount[] {
+    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
     const rows = this.db
       .prepare(
-        `SELECT slug, name, aliases, unit_count FROM concept_vocabulary
-         ORDER BY unit_count DESC, name COLLATE NOCASE, slug`,
+        `SELECT v.slug, v.name, v.aliases, COUNT(DISTINCT ca.unit_id) AS unit_count
+         FROM concept_vocabulary v
+         LEFT JOIN concept_assignments ca ON ca.slug = v.slug
+           AND ca.unit_id IN (${eligible.sql})
+         GROUP BY v.slug ORDER BY unit_count DESC, v.name COLLATE NOCASE, v.slug`,
       )
-      .all() as VocabularyRow[];
+      .all(...eligible.params) as VocabularyRow[];
     return rows.map(toConceptCount);
   }
 
   /** `GET /api/concepts/:slug` domain logic; undefined for unknown slugs. */
-  concept(slug: string): ConceptSummary | undefined {
+  concept(slug: string): Omit<ConceptSummary, "revision"> | undefined {
+    const eligible = eligibleUnits([], "any", this.taxonomyVersion);
     const row = this.db
-      .prepare("SELECT slug, name, aliases, unit_count FROM concept_vocabulary WHERE slug = ?")
-      .get(slug) as VocabularyRow | undefined;
+      .prepare(
+        `SELECT v.slug, v.name, v.aliases, COUNT(DISTINCT ca.unit_id) AS unit_count
+         FROM concept_vocabulary v
+         LEFT JOIN concept_assignments ca ON ca.slug = v.slug
+           AND ca.unit_id IN (${eligible.sql})
+         WHERE v.slug = ? GROUP BY v.slug`,
+      )
+      .get(...eligible.params, slug) as VocabularyRow | undefined;
     if (row === undefined) return undefined;
     const related = this.db
       .prepare(
-        `SELECT CASE WHEN e.a = ? THEN e.b ELSE e.a END AS slug, v.name AS name,
-                e.weight AS shared_units
-         FROM concept_edges e
-         JOIN concept_vocabulary v ON v.slug = CASE WHEN e.a = ? THEN e.b ELSE e.a END
-         WHERE (e.a = ? OR e.b = ?) AND e.weight > 0
-         ORDER BY e.weight DESC, slug LIMIT ?`,
+        `SELECT b.slug, v.name, COUNT(DISTINCT a.unit_id) AS shared_units
+         FROM concept_assignments a
+         JOIN concept_assignments b ON b.unit_id = a.unit_id AND b.slug != a.slug
+         JOIN concept_vocabulary v ON v.slug = b.slug
+         WHERE a.slug = ? AND a.unit_id IN (${eligible.sql})
+         GROUP BY b.slug ORDER BY shared_units DESC, b.slug LIMIT ?`,
       )
-      .all(slug, slug, slug, slug, RELATED_LIMIT) as RelatedConcept[];
+      .all(slug, ...eligible.params, RELATED_LIMIT) as RelatedConcept[];
     const tweets = this.db
       .prepare(
         `SELECT COUNT(DISTINCT um.tweet_id) AS n FROM concept_assignments ca
-         JOIN unit_members um ON um.unit_id = ca.unit_id WHERE ca.slug = ?`,
+         JOIN unit_members um ON um.unit_id = ca.unit_id
+         WHERE ca.slug = ? AND ca.unit_id IN (${eligible.sql})`,
       )
-      .get(slug) as { n: number };
+      .get(slug, ...eligible.params) as { n: number };
     return { ...toConceptCount(row), tweet_count: tweets.n, related };
   }
 
@@ -600,57 +624,79 @@ export class EnrichStore {
    * restricted to units carrying a preset label), plus the strongest edges
    * between them.
    */
-  graph(options: { label?: string | undefined; top: number }): ConceptGraph {
-    const nodes =
-      options.label === undefined
-        ? this.topNodes(options.top)
-        : this.labelNodes(options.label, options.top);
-    if (nodes.length === 0) return { nodes: [], links: [] };
-    const slugList = nodes.map((node) => node.slug);
-    const placeholders = slugList.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT a, b, weight FROM concept_edges
-         WHERE weight > 0 AND a IN (${placeholders}) AND b IN (${placeholders})
-         ORDER BY weight DESC, a, b LIMIT ?`,
-      )
-      .all(...slugList, ...slugList, options.top * 4) as {
-      a: string;
-      b: string;
-      weight: number;
-    }[];
-    const links = rows.map((edge): GraphLink => ({
-      source: edge.a,
-      target: edge.b,
-      weight: edge.weight,
-    }));
-    return { nodes, links };
+  graph(options: {
+    labels?: readonly string[] | undefined;
+    labelMode?: "any" | "all" | undefined;
+    top: number;
+  }): Omit<ConceptGraph, "revision"> {
+    return this.finalizedGraph(options.labels ?? [], options.labelMode ?? "any", options.top);
   }
 
-  private topNodes(top: number): GraphNode[] {
-    return this.db
-      .prepare(
-        `SELECT slug, name, unit_count FROM concept_vocabulary WHERE unit_count > 0
-         ORDER BY unit_count DESC, slug LIMIT ?`,
-      )
-      .all(top) as GraphNode[];
-  }
-
-  private labelNodes(label: string, top: number): GraphNode[] {
-    return this.db
+  private finalizedGraph(
+    labels: readonly string[],
+    labelMode: "any" | "all",
+    top: number,
+  ): Omit<ConceptGraph, "revision"> {
+    const eligible = eligibleUnits(labels, labelMode, this.taxonomyVersion);
+    const nodes = this.db
       .prepare(
         `SELECT v.slug AS slug, v.name AS name, COUNT(DISTINCT ca.unit_id) AS unit_count
          FROM concept_vocabulary v
          JOIN concept_assignments ca ON ca.slug = v.slug
-         WHERE ca.unit_id IN (
-           SELECT DISTINCT um.unit_id FROM unit_members um
-           JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
-           WHERE tl.kind = 'preset' AND tl.label = ?
-         )
+         WHERE ca.unit_id IN (${eligible.sql})
          GROUP BY v.slug ORDER BY unit_count DESC, v.slug LIMIT ?`,
       )
-      .all(label, top) as GraphNode[];
+      .all(...eligible.params, top) as GraphNode[];
+    if (nodes.length === 0) return { nodes: [], links: [] };
+    const slugs = nodes.map((node) => node.slug);
+    const placeholders = slugs.map(() => "?").join(",");
+    const links = this.db
+      .prepare(
+        `SELECT a.slug AS source, b.slug AS target, COUNT(DISTINCT a.unit_id) AS weight
+         FROM concept_assignments a
+         JOIN concept_assignments b ON b.unit_id = a.unit_id AND a.slug < b.slug
+         WHERE a.unit_id IN (${eligible.sql})
+           AND a.slug IN (${placeholders}) AND b.slug IN (${placeholders})
+         GROUP BY a.slug, b.slug ORDER BY weight DESC, source, target LIMIT ?`,
+      )
+      .all(...eligible.params, ...slugs, ...slugs, top * 4) as GraphLink[];
+    return { nodes, links };
   }
+}
+
+function eligibleUnits(
+  labels: readonly string[],
+  labelMode: "any" | "all",
+  taxonomyVersion: number,
+): { sql: string; params: unknown[] } {
+  const placeholders = labels.map(() => "?").join(",");
+  const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ?
+            JOIN enrich_queue q ON q.unit_id = um.unit_id
+              AND q.taxonomy_version = ? AND q.status = 'done'`;
+  if (labels.length === 0) {
+    return {
+      sql: `SELECT DISTINCT um.unit_id FROM unit_members um
+            ${finalizedJoins}`,
+      params: [taxonomyVersion, taxonomyVersion],
+    };
+  }
+  if (labelMode === "any") {
+    return {
+      sql: `SELECT DISTINCT um.unit_id FROM unit_members um
+            ${finalizedJoins}
+            JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
+            WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})`,
+      params: [taxonomyVersion, taxonomyVersion, ...labels],
+    };
+  }
+  return {
+    sql: `SELECT um.unit_id FROM unit_members um
+          ${finalizedJoins}
+          JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
+          WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})
+          GROUP BY um.unit_id HAVING COUNT(DISTINCT tl.label) = ?`,
+    params: [taxonomyVersion, taxonomyVersion, ...labels, labels.length],
+  };
 }
 
 function toConceptCount(row: VocabularyRow): ConceptCount {

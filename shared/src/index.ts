@@ -40,3 +40,14 @@ export {
   type ConceptGraph,
   type EnrichReceipt,
 } from "./enrichment.js";
+export {
+  serviceAccountScopeSchema,
+  type ServiceAccountScope,
+  type UnitConcept,
+  type EnrichedUnit,
+  type UnitPage,
+  type ServiceAccountKeySummary,
+  type ServiceAccountSummary,
+  type ServiceAccountsSnapshot,
+  type IssuedServiceAccountCredential,
+} from "./unit.js";

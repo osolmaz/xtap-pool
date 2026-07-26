@@ -9,6 +9,7 @@ import {
   fetchConcepts,
   fetchContributors,
   fetchAdminPool,
+  fetchAdminServiceAccounts,
   fetchLabels,
   fetchMe,
   fetchTweets,
@@ -17,6 +18,11 @@ import {
   addPoolMemberOrg,
   removePoolMemberOrg,
   repairPoolConfig,
+  issueServiceAccount,
+  repairServiceAccounts,
+  revokeServiceAccount,
+  revokeServiceAccountKey,
+  rotateServiceAccount,
   tweetsQueryString,
 } from "../src/lib/api.js";
 
@@ -147,6 +153,44 @@ describe("api client", () => {
     await expect(fetchConcepts()).rejects.toThrow("session expired");
     await expect(fetchConcept("vllm")).rejects.toThrow("session expired");
     await expect(fetchConceptGraph(300)).rejects.toThrow("session expired");
+  });
+
+  it("manages service accounts through admin endpoints", async () => {
+    const account = {
+      id: "a1",
+      name: "local-frontier",
+      scopes: ["units:read", "taxonomy:read"] as const,
+      status: "active" as const,
+      created_at: "2026-07-27T00:00:00.000Z",
+      updated_at: "2026-07-27T00:00:00.000Z",
+      keys: [{ id: "k1", created_at: "2026-07-27T00:00:00.000Z" }],
+    };
+    const snapshot = { version: 1 as const, accounts: [account], source: "dataset" as const };
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(Response.json({ service_accounts: snapshot }))),
+    );
+    await expect(fetchAdminServiceAccounts()).resolves.toEqual(snapshot);
+    await expect(repairServiceAccounts()).resolves.toEqual(snapshot);
+
+    const credential = { account, token: "xtap_sa_once" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(Response.json(credential))),
+    );
+    await expect(
+      issueServiceAccount("local-frontier", ["units:read", "taxonomy:read"]),
+    ).resolves.toEqual(credential);
+    await expect(rotateServiceAccount("a1")).resolves.toEqual(credential);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(Response.json({ account }))),
+    );
+    await expect(revokeServiceAccount("a1")).resolves.toEqual(account);
+    await expect(revokeServiceAccountKey("a1", "k1")).resolves.toEqual(account);
   });
 
   it("manages pool membership through admin endpoints", async () => {

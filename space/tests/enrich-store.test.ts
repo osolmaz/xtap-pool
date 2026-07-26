@@ -292,10 +292,40 @@ describe("summaries", () => {
     expect(bounded.nodes).toHaveLength(1);
     expect(bounded.links).toEqual([]);
 
-    const labeled = enrich.graph({ label: "ai", top: 10 });
+    const labeled = enrich.graph({ labels: ["ai"], top: 10 });
     expect(labeled.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
-    const agentsOnly = enrich.graph({ label: "agents", top: 10 });
+    expect(labeled.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
+    const anyLabel = enrich.graph({ labels: ["ai", "agents"], labelMode: "any", top: 10 });
+    expect(anyLabel.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
+    const everyLabel = enrich.graph({ labels: ["ai", "agents"], labelMode: "all", top: 10 });
+    expect(everyLabel.nodes).toEqual([]);
+    const agentsOnly = enrich.graph({ labels: ["agents"], top: 10 });
     expect(agentsOnly.nodes).toEqual([]);
+  });
+
+  it("omits stale assignments from filtered graphs while a unit is queued", () => {
+    const joined = makePooled({
+      id: "4",
+      conversation_id: "1",
+      author: { username: "a" },
+    });
+    store.insert([joined]);
+    enrich.registerTweets([joined]);
+
+    const labels = enrich.labelsSummary([
+      { name: "ai", description: "d" },
+      { name: "agents", description: "d" },
+    ]);
+    expect(labels.labels).toEqual([
+      { name: "ai", description: "d", count: 1 },
+      { name: "agents", description: "d", count: 1 },
+    ]);
+    expect(labels.free_labels).toEqual([]);
+    expect(labels.coverage).toEqual({ units_total: 3, units_enriched: 1 });
+    expect(enrich.concepts().filter((concept) => concept.unit_count > 0)).toEqual([]);
+    expect(enrich.concept("vllm")).toMatchObject({ unit_count: 0, tweet_count: 0, related: [] });
+    expect(enrich.graph({ top: 10 })).toEqual({ nodes: [], links: [] });
+    expect(enrich.graph({ labels: ["ai"], top: 10 })).toEqual({ nodes: [], links: [] });
   });
 });
 

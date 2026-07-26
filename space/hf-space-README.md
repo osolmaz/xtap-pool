@@ -17,7 +17,8 @@ Private tweet pool for a group of friends running the
 
 - `POST /api/ingest` — extension submissions (Bearer pool token)
 - `GET /connect` — sign in with Hugging Face to connect the extension
-- `/` — tweet explorer
+- `GET /api/units` — revision-consistent enriched units for scoped service accounts
+- `/` — tweet explorer and pool administration
 - `GET /healthz` and `GET /readyz` — machine-readable runtime health
 
 Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
@@ -33,3 +34,9 @@ in the Space Admin tab. Durable membership is stored in the private dataset repo
 at `config/pool.json`; the Space variables are kept as bootstrap and recovery
 inputs. The `member_orgs` config key remains an array for backwards
 compatibility, but only one organization grant is active.
+
+Admins issue read-only machine credentials from the Admin tab. Only credential
+hashes are stored in `config/service-accounts.json`; raw credentials are shown
+once. `units:read` grants `GET /api/units`, while `taxonomy:read` grants the
+label, concept, and graph read endpoints. These credentials cannot ingest or
+administer the pool.

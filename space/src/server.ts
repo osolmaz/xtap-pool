@@ -18,11 +18,14 @@ import { ingestBatch, Mutex } from "./ingest.js";
 import { checkInferenceCredential, inferenceCredentialOk } from "./inference-token.js";
 import type { InferenceCredentialReadiness } from "./inference-token.js";
 import { PoolMembership } from "./membership.js";
+import { ServiceAccountRegistry } from "./service-accounts.js";
 import { TweetStore } from "./store.js";
+import { UnitStore } from "./unit-store.js";
 
 const config = loadConfig(process.env);
 const store = new TweetStore();
 const enrichStore = new EnrichStore(store.database, config.taxonomyVersion);
+const unitStore = new UnitStore(store.database, config.taxonomyVersion);
 const hub = createHubClient(config.datasetRepo, config.hfToken);
 const mirror = new DatasetMirror(hub, join(config.dataDir, "mirror"));
 const mutex = new Mutex();
@@ -55,12 +58,15 @@ let credentialRetryTimer: ReturnType<typeof setTimeout> | undefined;
   }),
 ]);
 
-const membership = await PoolMembership.load({
-  mirror,
-  bootstrapMembers: config.allowedUsers,
-  bootstrapAdmins: config.poolAdmins,
-  now: () => new Date(),
-});
+const [membership, serviceAccounts] = await Promise.all([
+  PoolMembership.load({
+    mirror,
+    bootstrapMembers: config.allowedUsers,
+    bootstrapAdmins: config.poolAdmins,
+    now: () => new Date(),
+  }),
+  ServiceAccountRegistry.load({ mirror, now: () => new Date() }),
+]);
 let taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
 readiness = buildReadiness();
 const drainOnce = createEnrichmentDrain();
@@ -69,6 +75,8 @@ const app = createApp({
   config,
   store,
   membership,
+  serviceAccounts,
+  unitStore,
   enrich: {
     store: enrichStore,
     get taxonomy() {
@@ -86,6 +94,13 @@ const app = createApp({
       readiness = buildReadiness();
       startEnrichWorkerIfReady();
       return pool;
+    }),
+  mutateServiceAccounts: (operation) =>
+    mutex.run(async () => {
+      const result = await operation();
+      readiness = buildReadiness();
+      startEnrichWorkerIfReady();
+      return result;
     }),
   readiness: () => readiness,
 });
@@ -129,7 +144,11 @@ function createEnrichmentDrain(): () => ReturnType<typeof runEnrichTick> {
     if (!inferenceCredentialOk(inferenceCredential)) {
       return Promise.reject(new Error("INFERENCE_TOKEN must be ready before enrichment can run."));
     }
-    if (datasetState.state !== "ready" || membership.hasConfigError()) {
+    if (
+      datasetState.state !== "ready" ||
+      membership.hasConfigError() ||
+      serviceAccounts.hasConfigError()
+    ) {
       return Promise.reject(new Error("The dataset must be ready before enrichment can run."));
     }
     if (!taxonomyReady()) {
@@ -177,15 +196,42 @@ async function rebuildDatasetIndexIfReady(): Promise<void> {
 
 function buildReadiness(): AppReadiness {
   return {
-    ok:
-      (rebuilt.tweets > 0 || rebuilt.files === 0) &&
-      datasetCredentialOk(datasetCredential) &&
-      datasetState.state === "ready" &&
-      !membership.hasConfigError() &&
-      inferenceCredentialOk(inferenceCredential) &&
-      (!config.enrichEnabled || taxonomyReady()),
+    ok: poolReady(),
     dataset: buildDatasetReadiness(),
     enrichment: buildEnrichmentReadiness(),
+    service_accounts: buildServiceAccountReadiness(),
+  };
+}
+
+function poolReady(): boolean {
+  const configReady = !membership.hasConfigError() && !serviceAccounts.hasConfigError();
+  const enrichmentReady = !config.enrichEnabled || taxonomyReady();
+  return (
+    datasetRuntimeReady() &&
+    configReady &&
+    inferenceCredentialOk(inferenceCredential) &&
+    enrichmentReady
+  );
+}
+
+function datasetRuntimeReady(): boolean {
+  const indexReady = rebuilt.tweets > 0 || rebuilt.files === 0;
+  return indexReady && datasetCredentialOk(datasetCredential) && datasetState.state === "ready";
+}
+
+function buildServiceAccountReadiness(): NonNullable<AppReadiness["service_accounts"]> {
+  const snapshot = serviceAccounts.snapshot();
+  const error = snapshot.config_error;
+  const state =
+    error === undefined
+      ? "ready"
+      : serviceAccounts.hasRetryableConfigError()
+        ? "unknown"
+        : "invalid";
+  return {
+    state,
+    accounts: snapshot.accounts.length,
+    ...(error === undefined ? {} : { error }),
   };
 }
 
@@ -235,23 +281,26 @@ function taxonomyReady(): boolean {
 
 async function reloadDatasetBackedConfig(force: boolean): Promise<void> {
   if (force || membership.hasRetryableConfigError()) await membership.reload();
+  if (force || serviceAccounts.hasRetryableConfigError()) await serviceAccounts.reload();
   if (config.enrichEnabled && (force || !taxonomyReady())) {
     taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
   }
 }
 
+function enrichmentRuntimeReady(): boolean {
+  return (
+    config.enrichEnabled &&
+    datasetCredentialOk(datasetCredential) &&
+    datasetState.state === "ready" &&
+    !membership.hasConfigError() &&
+    !serviceAccounts.hasConfigError() &&
+    inferenceCredentialOk(inferenceCredential) &&
+    taxonomyReady()
+  );
+}
+
 function startEnrichWorkerIfReady(): void {
-  if (
-    !config.enrichEnabled ||
-    !datasetCredentialOk(datasetCredential) ||
-    datasetState.state !== "ready" ||
-    membership.hasConfigError() ||
-    !inferenceCredentialOk(inferenceCredential) ||
-    !taxonomyReady() ||
-    enrichWorker !== undefined
-  ) {
-    return;
-  }
+  if (!enrichmentRuntimeReady() || enrichWorker !== undefined) return;
   enrichWorker = startEnrichWorker({ intervalMs: config.enrichIntervalMs, run: drainOnce });
   console.log(
     `[xtap-pool] enrich worker on: every ${String(config.enrichIntervalMs)}ms, ` +
@@ -283,6 +332,7 @@ function needsDatasetConfigRetry(): boolean {
   return (
     datasetCredentialOk(datasetCredential) &&
     (membership.hasRetryableConfigError() ||
+      serviceAccounts.hasRetryableConfigError() ||
       datasetState.state === "unknown" ||
       (config.enrichEnabled && !taxonomyReady()))
   );

@@ -4,6 +4,10 @@ import type {
   ConceptsSummary,
   LabelsSummary,
   PooledTweet,
+  ServiceAccountScope,
+  ServiceAccountsSnapshot,
+  ServiceAccountSummary,
+  IssuedServiceAccountCredential,
 } from "@xtap-pool/shared";
 
 import { communityGroups } from "./communities";
@@ -148,10 +152,18 @@ async function getJson<T>(path: string): Promise<T | undefined> {
   return (await response.json()) as T;
 }
 
-async function sendJson<T>(path: string, method: "POST" | "PUT" | "DELETE"): Promise<T> {
+async function sendJson<T>(
+  path: string,
+  method: "POST" | "PUT" | "DELETE",
+  body?: unknown,
+): Promise<T> {
   const response = await fetch(path, {
     method,
-    headers: { accept: "application/json" },
+    headers: {
+      accept: "application/json",
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw new Error(`request failed: ${String(response.status)} ${path}`);
   return (await response.json()) as T;
@@ -241,6 +253,63 @@ export async function fetchAdminPool(): Promise<AdminPoolResponse> {
 
 export async function repairPoolConfig(): Promise<PoolSnapshot> {
   return (await sendJson<{ pool: PoolSnapshot }>("/api/admin/pool/repair", "POST")).pool;
+}
+
+export async function fetchAdminServiceAccounts(): Promise<ServiceAccountsSnapshot> {
+  const body = await getJson<{ service_accounts: ServiceAccountsSnapshot }>(
+    "/api/admin/service-accounts",
+  );
+  if (body === undefined) throw new Error("session expired");
+  return body.service_accounts;
+}
+
+export async function issueServiceAccount(
+  name: string,
+  scopes: readonly ServiceAccountScope[],
+): Promise<IssuedServiceAccountCredential> {
+  return sendJson<IssuedServiceAccountCredential>("/api/admin/service-accounts", "POST", {
+    name,
+    scopes,
+  });
+}
+
+export async function rotateServiceAccount(
+  accountId: string,
+): Promise<IssuedServiceAccountCredential> {
+  return sendJson<IssuedServiceAccountCredential>(
+    `/api/admin/service-accounts/${encodeURIComponent(accountId)}/keys`,
+    "POST",
+  );
+}
+
+export async function revokeServiceAccount(accountId: string): Promise<ServiceAccountSummary> {
+  return (
+    await sendJson<{ account: ServiceAccountSummary }>(
+      `/api/admin/service-accounts/${encodeURIComponent(accountId)}`,
+      "DELETE",
+    )
+  ).account;
+}
+
+export async function revokeServiceAccountKey(
+  accountId: string,
+  keyId: string,
+): Promise<ServiceAccountSummary> {
+  return (
+    await sendJson<{ account: ServiceAccountSummary }>(
+      `/api/admin/service-accounts/${encodeURIComponent(accountId)}/keys/${encodeURIComponent(keyId)}`,
+      "DELETE",
+    )
+  ).account;
+}
+
+export async function repairServiceAccounts(): Promise<ServiceAccountsSnapshot> {
+  return (
+    await sendJson<{ service_accounts: ServiceAccountsSnapshot }>(
+      "/api/admin/service-accounts/repair",
+      "POST",
+    )
+  ).service_accounts;
 }
 
 export async function addPoolMember(username: string): Promise<PoolSnapshot> {
