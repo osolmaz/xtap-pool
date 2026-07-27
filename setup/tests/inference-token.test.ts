@@ -55,6 +55,36 @@ describe("inference token verification", () => {
     });
   });
 
+  it("accepts the Hugging Face inference permission pair on a user scope", async () => {
+    const fetchFn: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          name: "alice",
+          auth: {
+            accessToken: {
+              displayName: "providers",
+              role: "fineGrained",
+              fineGrained: {
+                global: [],
+                scoped: [
+                  {
+                    entity: { type: "user", name: "alice" },
+                    permissions: ["inference.serverless.write", "inference.endpoints.infer.write"],
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      );
+    await expect(verifyInferenceToken({ token: "hf_ok", fetchFn })).resolves.toEqual({
+      ok: true,
+      username: "alice",
+      tokenName: "providers",
+      permissions: ["inference.endpoints.infer.write", "inference.serverless.write"],
+    });
+  });
+
   it("rejects dataset-scoped tokens without Inference Providers permission", async () => {
     const fetchFn: typeof fetch = () =>
       Promise.resolve(
@@ -80,7 +110,7 @@ describe("inference token verification", () => {
     await expect(verifyInferenceToken({ token: "hf_dataset", fetchFn })).resolves.toEqual({
       ok: false,
       errors: [
-        "Unexpected scoped permission on inference token: repo.content.read,repo.content.write on dataset:alice/xtap-pool-data.",
+        "Unexpected scoped permission on inference token: repo.content.read, repo.content.write on dataset:alice/xtap-pool-data.",
         "Token must include inference.serverless.write.",
       ],
     });

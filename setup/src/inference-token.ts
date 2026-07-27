@@ -2,6 +2,11 @@ type JsonObject = Record<string, unknown>;
 
 const FINE_GRAINED_ROLE = "fineGrained";
 const INFERENCE_PROVIDERS_PERMISSION = "inference.serverless.write";
+const INFERENCE_ENDPOINTS_PERMISSION = "inference.endpoints.infer.write";
+const ALLOWED_INFERENCE_PERMISSIONS = new Set([
+  INFERENCE_PROVIDERS_PERMISSION,
+  INFERENCE_ENDPOINTS_PERMISSION,
+]);
 
 export type InferenceTokenReport =
   | { ok: true; username: string; tokenName: string; permissions: readonly string[] }
@@ -31,48 +36,63 @@ export function evaluateInferenceToken(payload: unknown): InferenceTokenReport {
   const accessToken = asRecord(asRecord(root["auth"])["accessToken"]);
   const fineGrained = asRecord(accessToken["fineGrained"]);
   const role = text(accessToken["role"]);
-  const globalPermissions = strings(fineGrained["global"]);
   const errors =
     role === FINE_GRAINED_ROLE
       ? []
       : [`Token role is '${role || "unknown"}', expected fine-grained.`];
+  const global = evaluateGlobalInferencePermissions(fineGrained, errors);
   const scoped = evaluateScopedInferencePermissions(fineGrained, errors);
-  if (!globalPermissions.includes(INFERENCE_PROVIDERS_PERMISSION) && !scoped.hasInference) {
+  const observedPermissions = new Set([...global.permissions, ...scoped.permissions]);
+  if (!global.hasInference && !scoped.hasInference) {
     errors.push(`Token must include ${INFERENCE_PROVIDERS_PERMISSION}.`);
-  }
-  for (const permission of globalPermissions) {
-    if (permission !== INFERENCE_PROVIDERS_PERMISSION) {
-      errors.push(`Unexpected global permission on inference token: ${permission}.`);
-    }
   }
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
     username: text(root["name"]),
     tokenName: text(accessToken["displayName"]),
-    permissions: [INFERENCE_PROVIDERS_PERMISSION],
+    permissions: [...observedPermissions].sort(),
   };
+}
+
+function evaluateGlobalInferencePermissions(
+  fineGrained: JsonObject,
+  errors: string[],
+): { hasInference: boolean; permissions: ReadonlySet<string> } {
+  let hasInference = false;
+  const observedPermissions = new Set<string>();
+  for (const permission of strings(fineGrained["global"])) {
+    if (ALLOWED_INFERENCE_PERMISSIONS.has(permission)) {
+      observedPermissions.add(permission);
+      if (permission === INFERENCE_PROVIDERS_PERMISSION) hasInference = true;
+    } else {
+      errors.push(`Unexpected global permission on inference token: ${permission}.`);
+    }
+  }
+  return { hasInference, permissions: observedPermissions };
 }
 
 function evaluateScopedInferencePermissions(
   fineGrained: JsonObject,
   errors: string[],
-): { hasInference: boolean } {
+): { hasInference: boolean; permissions: ReadonlySet<string> } {
   let hasInference = false;
+  const observedPermissions = new Set<string>();
   for (const scope of array(fineGrained["scoped"])) {
     const scoped = asRecord(scope);
     const permissions = strings(scoped["permissions"]);
     if (
       isUserScope(asRecord(scoped["entity"])) &&
-      permissions.length === 1 &&
-      permissions[0] === INFERENCE_PROVIDERS_PERMISSION
+      permissions.length > 0 &&
+      permissions.every((permission) => ALLOWED_INFERENCE_PERMISSIONS.has(permission))
     ) {
-      hasInference = true;
+      for (const permission of permissions) observedPermissions.add(permission);
+      if (permissions.includes(INFERENCE_PROVIDERS_PERMISSION)) hasInference = true;
     } else {
       errors.push(`Unexpected scoped permission on inference token: ${scopeLabel(scoped)}.`);
     }
   }
-  return { hasInference };
+  return { hasInference, permissions: observedPermissions };
 }
 
 function isUserScope(entity: JsonObject): boolean {
@@ -85,7 +105,7 @@ function scopeLabel(scope: JsonObject): string {
   const kind = text(entity["type"]) || "unknown";
   const name = text(entity["name"]) || text(entity["id"]) || "unknown";
   const permissions = strings(scope["permissions"]);
-  return `${permissions.join(",") || "unknown"} on ${kind}:${name}`;
+  return `${permissions.join(", ") || "unknown"} on ${kind}:${name}`;
 }
 
 function asRecord(value: unknown): JsonObject {

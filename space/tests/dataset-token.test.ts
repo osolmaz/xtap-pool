@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { checkDatasetCredential } from "../src/dataset-token.js";
 
@@ -27,6 +27,37 @@ describe("dataset credential readiness", () => {
     await expect(
       checkDatasetCredential({ token: "hf_dataset", datasetRepo: "alice/xtap-pool-data", fetchFn }),
     ).resolves.toEqual({ credential: "ok" });
+  });
+
+  it("rejects tokens whose metadata passes but private-dataset downloads fail", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          auth: {
+            accessToken: {
+              role: "fineGrained",
+              fineGrained: {
+                global: [],
+                scoped: [
+                  {
+                    entity: { type: "dataset", name: "alice/xtap-pool-data" },
+                    permissions: ["repo.content.read", "repo.content.write"],
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("unauthorized", { status: 401 }));
+
+    await expect(
+      checkDatasetCredential({ token: "hf_dataset", datasetRepo: "alice/xtap-pool-data", fetchFn }),
+    ).resolves.toEqual({
+      credential: "invalid",
+      error: "Hugging Face rejected a direct private-dataset download using HF_TOKEN (401).",
+    });
   });
 
   it("rejects dataset tokens without write permission", async () => {
