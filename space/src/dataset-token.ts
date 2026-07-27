@@ -29,9 +29,8 @@ export async function checkDatasetCredential(params: {
       return tokenStatusError("HF_TOKEN", response.status);
     }
     const errors = datasetTokenErrors(await response.json(), params.datasetRepo);
-    return errors.length === 0
-      ? { credential: "ok" }
-      : { credential: "invalid", error: errors.join(" ") };
+    if (errors.length > 0) return { credential: "invalid", error: errors.join(" ") };
+    return await checkDatasetDownload(params);
   } catch (error) {
     return { credential: "unknown", error: errorMessage(error) };
   }
@@ -39,6 +38,25 @@ export async function checkDatasetCredential(params: {
 
 export function datasetCredentialOk(status: DatasetCredentialReadiness): boolean {
   return status.credential === "ok";
+}
+
+async function checkDatasetDownload(params: {
+  token: string;
+  datasetRepo: string;
+  fetchFn?: typeof fetch;
+}): Promise<DatasetCredentialReadiness> {
+  const response = await (params.fetchFn ?? fetch)(datasetProbeUrl(params.datasetRepo), {
+    headers: { authorization: `Bearer ${params.token}` },
+  });
+  if (response.ok || response.status === 404) return { credential: "ok" };
+  const error = `Hugging Face rejected a direct private-dataset download using HF_TOKEN (${String(response.status)}).`;
+  return response.status === 401 || response.status === 403
+    ? { credential: "invalid", error }
+    : { credential: "unknown", error };
+}
+
+function datasetProbeUrl(datasetRepo: string): string {
+  return `https://huggingface.co/datasets/${datasetRepo}/resolve/main/config/pool.json`;
 }
 
 function datasetTokenErrors(payload: unknown, datasetRepo: string): string[] {

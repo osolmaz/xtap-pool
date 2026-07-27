@@ -332,6 +332,45 @@ describe("doctor", () => {
     expect(restarts).toEqual(["alice/xtap-pool"]);
   });
 
+  it("re-prompts invalid replacement tokens without discarding completed repair input", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const secretWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({ tweets: 0, secretWrites, omitSecrets: true });
+    const promptDatasetToken = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce("hf_bad_dataset")
+      .mockResolvedValueOnce("hf_good_dataset");
+    const promptInferenceToken = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce("hf_bad_inference")
+      .mockResolvedValueOnce("hf_good_inference");
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        promptDatasetToken,
+        promptInferenceToken,
+        validateDatasetToken: (token) =>
+          Promise.resolve(token === "hf_good_dataset" ? [] : ["dataset token rejected"]),
+        validateInferenceToken: (token) =>
+          Promise.resolve(token === "hf_good_inference" ? [] : ["inference token rejected"]),
+        restartAndWait: () => Promise.resolve(),
+      },
+    );
+
+    expect(promptDatasetToken).toHaveBeenCalledTimes(2);
+    expect(promptInferenceToken).toHaveBeenCalledTimes(2);
+    expect(secretWrites).toEqual([
+      { key: "HF_TOKEN", value: "hf_good_dataset" },
+      { key: "INFERENCE_TOKEN", value: "hf_good_inference" },
+    ]);
+  });
+
   it("repairs an existing dataset token reported invalid by the live Space", async () => {
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),

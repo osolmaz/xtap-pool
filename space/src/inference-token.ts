@@ -2,6 +2,11 @@ type JsonObject = Record<string, unknown>;
 
 const FINE_GRAINED_ROLE = "fineGrained";
 const INFERENCE_PROVIDERS_PERMISSION = "inference.serverless.write";
+const INFERENCE_ENDPOINTS_PERMISSION = "inference.endpoints.infer.write";
+const ALLOWED_INFERENCE_PERMISSIONS = new Set([
+  INFERENCE_PROVIDERS_PERMISSION,
+  INFERENCE_ENDPOINTS_PERMISSION,
+]);
 
 export type InferenceCredentialReadiness =
   | { credential: "ok" }
@@ -47,21 +52,28 @@ function inferenceTokenErrors(payload: unknown): string[] {
   const accessToken = asRecord(asRecord(root["auth"])["accessToken"]);
   const fineGrained = asRecord(accessToken["fineGrained"]);
   const role = text(accessToken["role"]);
-  const globalPermissions = strings(fineGrained["global"]);
   const errors =
     role === FINE_GRAINED_ROLE
       ? []
       : [`INFERENCE_TOKEN role is '${role || "unknown"}', expected fine-grained.`];
+  const globalHasInference = evaluateGlobalInferencePermissions(fineGrained, errors);
   const scoped = evaluateScopedInferencePermissions(fineGrained, errors);
-  if (!globalPermissions.includes(INFERENCE_PROVIDERS_PERMISSION) && !scoped.hasInference) {
+  if (!globalHasInference && !scoped.hasInference) {
     errors.push(`INFERENCE_TOKEN must include ${INFERENCE_PROVIDERS_PERMISSION}.`);
   }
-  for (const permission of globalPermissions) {
-    if (permission !== INFERENCE_PROVIDERS_PERMISSION) {
+  return errors;
+}
+
+function evaluateGlobalInferencePermissions(fineGrained: JsonObject, errors: string[]): boolean {
+  let hasInference = false;
+  for (const permission of strings(fineGrained["global"])) {
+    if (ALLOWED_INFERENCE_PERMISSIONS.has(permission)) {
+      if (permission === INFERENCE_PROVIDERS_PERMISSION) hasInference = true;
+    } else {
       errors.push(`Unexpected global permission on INFERENCE_TOKEN: ${permission}.`);
     }
   }
-  return errors;
+  return hasInference;
 }
 
 function evaluateScopedInferencePermissions(
@@ -74,10 +86,10 @@ function evaluateScopedInferencePermissions(
     const permissions = strings(scoped["permissions"]);
     if (
       isUserScope(asRecord(scoped["entity"])) &&
-      permissions.length === 1 &&
-      permissions[0] === INFERENCE_PROVIDERS_PERMISSION
+      permissions.length > 0 &&
+      permissions.every((permission) => ALLOWED_INFERENCE_PERMISSIONS.has(permission))
     ) {
-      hasInference = true;
+      if (permissions.includes(INFERENCE_PROVIDERS_PERMISSION)) hasInference = true;
     } else {
       errors.push(`Unexpected scoped permission on INFERENCE_TOKEN: ${scopeLabel(scoped)}.`);
     }
@@ -95,7 +107,7 @@ function scopeLabel(scope: JsonObject): string {
   const kind = text(entity["type"]) || "unknown";
   const name = text(entity["name"]) || text(entity["id"]) || "unknown";
   const permissions = strings(scope["permissions"]);
-  return `${permissions.join(",") || "unknown"} on ${kind}:${name}`;
+  return `${permissions.join(", ") || "unknown"} on ${kind}:${name}`;
 }
 
 function tokenStatusError(status: number): InferenceCredentialReadiness {

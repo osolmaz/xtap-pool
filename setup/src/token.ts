@@ -33,7 +33,35 @@ export async function verifyDatasetWriteToken(params: {
   if (!response.ok)
     return { ok: false, errors: [`Hugging Face rejected the token (${String(response.status)}).`] };
   const payload: unknown = await response.json();
-  return evaluateDatasetWriteToken(payload, params.datasetRepo);
+  const permissions = evaluateDatasetWriteToken(payload, params.datasetRepo);
+  if (!permissions.ok) return permissions;
+  const accessErrors = await datasetDownloadErrors(params);
+  return accessErrors.length === 0 ? permissions : { ok: false, errors: accessErrors };
+}
+
+async function datasetDownloadErrors(params: {
+  token: string;
+  datasetRepo: string;
+  fetchFn?: typeof fetch;
+}): Promise<readonly string[]> {
+  const access = await (params.fetchFn ?? fetch)(datasetProbeUrl(params.datasetRepo), {
+    headers: { authorization: `Bearer ${params.token}` },
+  });
+  if (access.status === 401 || access.status === 403) {
+    return [
+      `Token permissions claim access to ${params.datasetRepo}, but Hugging Face rejected a direct private-dataset download (${String(access.status)}).`,
+    ];
+  }
+  if (!access.ok && access.status !== 404) {
+    return [
+      `Could not verify a direct download from ${params.datasetRepo} (${String(access.status)}).`,
+    ];
+  }
+  return [];
+}
+
+function datasetProbeUrl(datasetRepo: string): string {
+  return `https://huggingface.co/datasets/${datasetRepo}/resolve/main/config/pool.json`;
 }
 
 export function evaluateDatasetWriteToken(

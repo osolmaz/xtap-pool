@@ -69,6 +69,8 @@ describe("App", () => {
     render(<App />);
     const link = await screen.findByText("Sign in with Hugging Face");
     expect(link.getAttribute("href")).toBe("/oauth/login?next=/");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer");
   });
 
   it("renders the feed and filters when signed in", async () => {

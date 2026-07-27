@@ -478,9 +478,11 @@ async function maybeRepairDatasetToken(
   ) {
     return false;
   }
-  const token = await deps.promptDatasetToken(datasetRepo);
-  const errors = await deps.validateDatasetToken(token, datasetRepo);
-  if (errors.length > 0) throw new Error(errors.join("\n"));
+  const token = await promptForValidToken(
+    "Dataset credential rejected",
+    () => deps.promptDatasetToken(datasetRepo),
+    (candidate) => deps.validateDatasetToken(candidate, datasetRepo),
+  );
   await setSpaceSecret(client, report.spaceRepo, "HF_TOKEN", token);
   return true;
 }
@@ -496,11 +498,26 @@ async function maybeRepairInferenceToken(
   deps: InferenceRepairDeps,
 ): Promise<boolean> {
   if (!needsInferenceToken(report)) return false;
-  const token = await deps.promptInferenceToken();
-  const errors = await deps.validateInferenceToken(token);
-  if (errors.length > 0) throw new Error(errors.join("\n"));
+  const token = await promptForValidToken(
+    "Inference credential rejected",
+    deps.promptInferenceToken,
+    deps.validateInferenceToken,
+  );
   await setSpaceSecret(client, report.spaceRepo, "INFERENCE_TOKEN", token);
   return true;
+}
+
+async function promptForValidToken(
+  title: string,
+  promptToken: () => Promise<string>,
+  validateToken: (token: string) => Promise<readonly string[]>,
+): Promise<string> {
+  for (;;) {
+    const token = await promptToken();
+    const errors = await validateToken(token);
+    if (errors.length === 0) return token;
+    note(errors.join("\n"), title);
+  }
 }
 
 function datasetTokenRepairKind(report: DoctorReport): "definite" | "indeterminate" | undefined {

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { evaluateDatasetWriteToken } from "../src/token.js";
+import { evaluateDatasetWriteToken, verifyDatasetWriteToken } from "../src/token.js";
 
 function whoami(scoped: readonly unknown[], role = "fineGrained"): unknown {
   return {
@@ -20,6 +20,79 @@ function scope(name: string, permissions: readonly string[], type = "dataset"): 
 }
 
 describe("dataset token verification", () => {
+  it("rejects permission metadata when the private-dataset download is unauthorized", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json(
+          whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
+        ),
+      )
+      .mockResolvedValueOnce(new Response("unauthorized", { status: 401 }));
+
+    await expect(
+      verifyDatasetWriteToken({
+        token: "hf_bad",
+        datasetRepo: "alice/xtap-pool-data",
+        fetchFn,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      errors: [
+        "Token permissions claim access to alice/xtap-pool-data, but Hugging Face rejected a direct private-dataset download (401).",
+      ],
+    });
+  });
+
+  it.each([200, 404])(
+    "accepts permission metadata when the private-dataset probe returns %s",
+    async (status) => {
+      const fetchFn = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          Response.json(
+            whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
+          ),
+        )
+        .mockResolvedValueOnce(new Response(status === 200 ? "{}" : "missing", { status }));
+
+      await expect(
+        verifyDatasetWriteToken({
+          token: "hf_good",
+          datasetRepo: "alice/xtap-pool-data",
+          fetchFn,
+        }),
+      ).resolves.toEqual({
+        ok: true,
+        username: "owner",
+        tokenName: "dataset-writer",
+        permissions: ["repo.content.read", "repo.content.write"],
+      });
+    },
+  );
+
+  it("rejects a token when the private-dataset probe is inconclusive", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json(
+          whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
+        ),
+      )
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+
+    await expect(
+      verifyDatasetWriteToken({
+        token: "hf_unknown",
+        datasetRepo: "alice/xtap-pool-data",
+        fetchFn,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      errors: ["Could not verify a direct download from alice/xtap-pool-data (503)."],
+    });
+  });
+
   it("accepts a fine-grained token scoped only to the dataset repo", () => {
     const report = evaluateDatasetWriteToken(
       whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),

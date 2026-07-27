@@ -47,6 +47,32 @@ describe("inference credential readiness", () => {
     ).resolves.toEqual({ credential: "ok" });
   });
 
+  it("accepts the Hugging Face inference permission pair on a user scope", async () => {
+    const fetchFn: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          auth: {
+            accessToken: {
+              role: "fineGrained",
+              fineGrained: {
+                global: [],
+                scoped: [
+                  {
+                    entity: { type: "user", name: "alice" },
+                    permissions: ["inference.serverless.write", "inference.endpoints.infer.write"],
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      );
+
+    await expect(
+      checkInferenceCredential({ enabled: true, token: "hf_ok", fetchFn }),
+    ).resolves.toEqual({ credential: "ok" });
+  });
+
   it("rejects tokens without Inference Providers permission", async () => {
     const fetchFn: typeof fetch = () =>
       Promise.resolve(
