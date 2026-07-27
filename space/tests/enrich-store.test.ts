@@ -177,11 +177,32 @@ describe("label and concept query filters", () => {
     expect(ids({ labels: ["ai"], q: "vllm" })).toEqual(["1"]);
   });
 
-  it("uses the same author-ID selection for concepts, details and graph data", () => {
+  it("uses the same fail-closed author-ID selection for concepts, details and graph data", () => {
+    insertAndRegister([
+      {
+        id: "4",
+        conversation_id: "mixed",
+        author: { id: "author-a", username: "shared" },
+      },
+      {
+        id: "5",
+        conversation_id: "mixed",
+        author: { id: "author-outside", username: "shared" },
+      },
+    ]);
+    enrich.applyEnrichment(
+      row({
+        unit_id: "mixed:shared",
+        tweet_ids: ["4", "5"],
+        concepts: [{ name: "Mixed Author Concept", aliases: [] }],
+      }),
+    );
+
     expect(enrich.concepts({ authorIds: ["author-a"] })).toEqual([
       expect.objectContaining({ slug: "vllm", unit_count: 1 }),
     ]);
     expect(enrich.concept("coding-agents", { authorIds: ["author-a"] })).toBeUndefined();
+    expect(enrich.concept("mixed-author-concept", { authorIds: ["author-a"] })).toBeUndefined();
     expect(enrich.graph({ authorIds: ["author-a"], top: 10 })).toEqual({
       nodes: [{ slug: "vllm", name: "vLLM", unit_count: 1 }],
       links: [],

@@ -303,8 +303,17 @@ function identityFilters(query: UnitQuery): Filter[] {
     filters.push({ sql: "tweets.author_username = ?", values: [query.author.toLowerCase()] });
   }
   if (query.authorIds !== undefined && query.authorIds.length > 0) {
+    const placeholders = query.authorIds.map(() => "?").join(",");
     filters.push({
-      sql: `json_extract(tweets.json, '$.author.id') IN (${query.authorIds.map(() => "?").join(",")})`,
+      sql: `NOT EXISTS (
+              SELECT 1 FROM unit_members author_um
+              JOIN tweets author_tweet ON author_tweet.id = author_um.tweet_id
+              WHERE author_um.unit_id = um.unit_id
+                AND (
+                  json_extract(author_tweet.json, '$.author.id') IS NULL
+                  OR json_extract(author_tweet.json, '$.author.id') NOT IN (${placeholders})
+                )
+            )`,
       values: query.authorIds,
     });
   }

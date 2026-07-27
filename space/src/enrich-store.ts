@@ -714,13 +714,15 @@ function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unk
 
 function authorWhere(authorIds: readonly string[] | undefined, unitIdSql: string): string {
   if (authorIds === undefined || authorIds.length === 0) return "";
-  return ` AND EXISTS (
+  const placeholders = authorIds.map(() => "?").join(",");
+  return ` AND NOT EXISTS (
              SELECT 1 FROM unit_members author_um
              JOIN tweets author_tweet ON author_tweet.id = author_um.tweet_id
              WHERE author_um.unit_id = ${unitIdSql}
-               AND json_extract(author_tweet.json, '$.author.id') IN (${authorIds
-                 .map(() => "?")
-                 .join(",")})
+               AND (
+                 json_extract(author_tweet.json, '$.author.id') IS NULL
+                 OR json_extract(author_tweet.json, '$.author.id') NOT IN (${placeholders})
+               )
            )`;
 }
 
