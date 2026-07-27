@@ -13,10 +13,10 @@ describe("parseRoute", () => {
     expect(parseRoute("/graph")).toEqual({ kind: "graph" });
     expect(parseRoute("/graph/")).toEqual({ kind: "graph" });
     expect(parseRoute("/graph/finite-element-method")).toEqual({
-      kind: "concept",
+      kind: "free-label",
       slug: "finite-element-method",
     });
-    expect(parseRoute("/graph/a%20b")).toEqual({ kind: "concept", slug: "a b" });
+    expect(parseRoute("/graph/a%20b")).toEqual({ kind: "free-label", slug: "a b" });
     expect(parseRoute("/anything-else")).toEqual({ kind: "home" });
   });
 });
@@ -29,7 +29,7 @@ describe("useRoute / navigate", () => {
     act(() => {
       navigate("/graph/vllm");
     });
-    expect(result.current).toEqual({ kind: "concept", slug: "vllm" });
+    expect(result.current).toEqual({ kind: "free-label", slug: "vllm" });
     expect(window.location.pathname).toBe("/graph/vllm");
 
     act(() => {

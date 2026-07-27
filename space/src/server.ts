@@ -13,7 +13,14 @@ import { checkDatasetCredential, datasetCredentialOk } from "./dataset-token.js"
 import type { DatasetCredentialReadiness } from "./dataset-token.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
 import { EnrichStore } from "./enrich-store.js";
-import { createRouterLlmClient, runEnrichTick, startEnrichWorker } from "./enrich-worker.js";
+import {
+  contractHashFor,
+  createExactHubVerifier,
+  createFreeLabelJudge,
+  createRouterLlmClient,
+  DEFAULT_LEASE_MS,
+  runEnrichTick,
+} from "./enrich-worker.js";
 import { ingestBatch, Mutex } from "./ingest.js";
 import { checkInferenceCredential, inferenceCredentialOk } from "./inference-token.js";
 import type { InferenceCredentialReadiness } from "./inference-token.js";
@@ -47,7 +54,6 @@ let inferenceCredential: InferenceCredentialReadiness = config.enrichEnabled
   ? { credential: "missing", error: "INFERENCE_TOKEN has not been checked yet." }
   : { credential: "not_required" };
 let readiness: AppReadiness;
-let enrichWorker: { stop: () => void } | undefined;
 let credentialRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 [datasetCredential, inferenceCredential] = await Promise.all([
@@ -68,8 +74,15 @@ const [membership, serviceAccounts] = await Promise.all([
   ServiceAccountRegistry.load({ mirror, now: () => new Date() }),
 ]);
 let taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
+enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
 readiness = buildReadiness();
-const drainOnce = createEnrichmentDrain();
+let lastReceipt: import("@xtap-pool/shared").EnrichReceipt | undefined;
+const drainRaw = createEnrichmentDrain();
+const drainOnce = async (): Promise<import("@xtap-pool/shared").EnrichReceipt> => {
+  const receipt = await drainRaw();
+  lastReceipt = receipt;
+  return receipt;
+};
 
 const app = createApp({
   config,
@@ -83,6 +96,7 @@ const app = createApp({
       return taxonomy;
     },
     run: drainOnce,
+    lastReceipt: () => lastReceipt,
   },
   ingest: (username, payload) =>
     mutex.run(() =>
@@ -92,14 +106,12 @@ const app = createApp({
     mutex.run(async () => {
       const pool = await membership.repairConfig(actor);
       readiness = buildReadiness();
-      startEnrichWorkerIfReady();
       return pool;
     }),
   mutateServiceAccounts: (operation) =>
     mutex.run(async () => {
       const result = await operation();
       readiness = buildReadiness();
-      startEnrichWorkerIfReady();
       return result;
     }),
   readiness: () => readiness,
@@ -120,10 +132,15 @@ console.log(
     `${String(pool.members.length)} pool members, ${String(pool.admins.length)} admins`,
 );
 
-startEnrichWorkerIfReady();
 if (config.enrichEnabled && !inferenceCredentialOk(inferenceCredential)) {
   console.error(
-    `[xtap-pool] enrich worker off: ${readiness.enrichment.error ?? "invalid credential"}`,
+    `[xtap-pool] enrich configuration warning: ${readiness.enrichment.error ?? "invalid credential"}`,
+  );
+}
+if (config.enrichEnabled) {
+  console.log(
+    "[xtap-pool] enrichment scheduling is external: run `npm run enrich --workspace space` " +
+      "to drain the queue.",
   );
 }
 startCredentialRetryIfNeeded();
@@ -136,7 +153,18 @@ function createEnrichmentDrain(): () => ReturnType<typeof runEnrichTick> {
   if (config.inferenceToken === undefined) {
     return () => Promise.reject(new Error("INFERENCE_TOKEN is required to run enrichment."));
   }
-  const llm = createRouterLlmClient({ hfToken: config.inferenceToken, model: config.llmModel });
+  const llm = createRouterLlmClient({
+    hfToken: config.inferenceToken,
+    model: config.llmModel,
+    ...(config.enrichInputTokenUsd === undefined || config.enrichOutputTokenUsd === undefined
+      ? {}
+      : {
+          pricing: {
+            inputTokenUsd: config.enrichInputTokenUsd,
+            outputTokenUsd: config.enrichOutputTokenUsd,
+          },
+        }),
+  });
   return () => {
     if (!datasetCredentialOk(datasetCredential)) {
       return Promise.reject(new Error("HF_TOKEN must be ready before enrichment can run."));
@@ -156,13 +184,26 @@ function createEnrichmentDrain(): () => ReturnType<typeof runEnrichTick> {
         new Error(`enrichment taxonomy is unavailable: ${taxonomy.error ?? "unknown error"}`),
       );
     }
+    enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
     return runEnrichTick({
       enrichStore,
       mirror,
       taxonomy,
       llm,
+      verifyHubLabel: createExactHubVerifier(),
+      judgeFreeLabel: createFreeLabelJudge(llm),
       model: config.llmModel,
       maxUnitsPerTick: config.enrichMaxUnitsPerTick,
+      ceilings: {
+        maxUnits: config.enrichMaxUnitsPerTick,
+        maxTokens: config.enrichMaxTokens,
+        maxElapsedMs: config.enrichMaxElapsedMs,
+        maxErrorRate: config.enrichMaxErrorRate,
+        maxCostUsd: config.enrichMaxCostUsd,
+        maxCostPerCallUsd: config.enrichMaxCostPerCallUsd,
+        maxDiscardedAssignments: config.enrichMaxDiscardedAssignments,
+      },
+      leaseMs: DEFAULT_LEASE_MS,
       now: (): Date => new Date(),
       lock: <T>(fn: () => Promise<T>): Promise<T> => mutex.run(fn),
     });
@@ -284,29 +325,13 @@ async function reloadDatasetBackedConfig(force: boolean): Promise<void> {
   if (force || serviceAccounts.hasRetryableConfigError()) await serviceAccounts.reload();
   if (config.enrichEnabled && (force || !taxonomyReady())) {
     taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
+    enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
   }
 }
 
-function enrichmentRuntimeReady(): boolean {
-  return (
-    config.enrichEnabled &&
-    datasetCredentialOk(datasetCredential) &&
-    datasetState.state === "ready" &&
-    !membership.hasConfigError() &&
-    !serviceAccounts.hasConfigError() &&
-    inferenceCredentialOk(inferenceCredential) &&
-    taxonomyReady()
-  );
-}
-
-function startEnrichWorkerIfReady(): void {
-  if (!enrichmentRuntimeReady() || enrichWorker !== undefined) return;
-  enrichWorker = startEnrichWorker({ intervalMs: config.enrichIntervalMs, run: drainOnce });
-  console.log(
-    `[xtap-pool] enrich worker on: every ${String(config.enrichIntervalMs)}ms, ` +
-      `up to ${String(config.enrichMaxUnitsPerTick)} units via ${config.llmModel}`,
-  );
-}
+// Manual `/api/enrich/run` inlines its readiness check in `drainOnce`. The
+// interval worker previously started here has moved to the standalone
+// `enrich` command.
 
 function startCredentialRetryIfNeeded(): void {
   if (credentialRetryTimer !== undefined || !needsCredentialRetry()) return;
@@ -362,7 +387,6 @@ async function retryUncertainCredentials(): Promise<void> {
     });
   }
   readiness = buildReadiness();
-  startEnrichWorkerIfReady();
 }
 
 function credentialRetryMs(): number {

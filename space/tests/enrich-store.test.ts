@@ -1,19 +1,30 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { EnrichmentRow } from "@xtap-pool/shared";
+import { computeContractHash, computeInputHash, PROCESSOR_VERSION } from "@xtap-pool/shared";
+import type { EnrichmentRow, LabelAssignment } from "@xtap-pool/shared";
 
-import { EnrichStore } from "../src/enrich-store.js";
+import { EnrichStore, MAX_ATTEMPTS } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 import { makePooled } from "./helpers.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
+const TAXONOMY = [{ name: "ai", description: "d" }];
+const CONTRACT_HASH = computeContractHash({
+  taxonomy_version: 1,
+  labels: TAXONOMY,
+  model: "test-model",
+  processor_version: PROCESSOR_VERSION,
+  prompt_template_id: "labels-and-free-labels-v1",
+  output_schema_id: "assignments-v1",
+  normalization_id: "free-label-registry-v1",
+});
 
 let store: TweetStore;
 let enrich: EnrichStore;
 
 beforeEach(() => {
   store = new TweetStore();
-  enrich = new EnrichStore(store.database, 1, () => NOW);
+  enrich = new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH);
 });
 
 afterEach(() => {
@@ -26,18 +37,51 @@ function insertAndRegister(overridesList: readonly Record<string, unknown>[]): s
   return enrich.registerTweets(tweets);
 }
 
-function row(overrides: Partial<EnrichmentRow> = {}): EnrichmentRow {
+function defaultAssignments(unitId: string): {
+  presetLabels: LabelAssignment[];
+  freeLabels: LabelAssignment[];
+  memberIds: string[];
+} {
+  const members = enrich.unitSemanticMembers(unitId);
+  const memberIds = members.map((member) => member.id);
+  const firstId = memberIds[0] ?? "100";
+  const firstText = enrich.unitTweetTexts(unitId).get(firstId) ?? "hello world";
   return {
-    unit_id: "100:someone",
-    tweet_ids: ["100"],
-    labels: ["ai"],
-    free_labels: ["dgx-spark"],
-    concepts: [{ name: "vLLM", aliases: ["VLLM"] }],
+    memberIds,
+    presetLabels: [
+      { name: "ai", evidence: [{ tweet_id: firstId, quote: firstText.slice(0, 10) }] },
+    ],
+    freeLabels: [
+      { name: "dgx-spark", evidence: [{ tweet_id: firstId, quote: firstText.slice(0, 5) }] },
+    ],
+  };
+}
+
+/** Build a valid evidence-bearing row for a unit's current members. */
+function row(overrides: Partial<EnrichmentRow> = {}): EnrichmentRow {
+  const unitId = overrides.unit_id ?? "100:someone";
+  const defaults = defaultAssignments(unitId);
+  const members = enrich.unitSemanticMembers(unitId);
+  const inputHash =
+    overrides.input_hash ?? (members.length > 0 ? computeInputHash(unitId, members) : "no-members");
+  return {
+    unit_id: unitId,
+    tweet_ids: overrides.tweet_ids ? [...overrides.tweet_ids] : defaults.memberIds,
+    input_hash: inputHash,
+    contract_hash: CONTRACT_HASH,
+    preset_labels: overrides.preset_labels ?? defaults.presetLabels,
+    free_labels: overrides.free_labels ?? defaults.freeLabels,
     model: "test-model",
     taxonomy_version: 1,
     enriched_at: NOW.toISOString(),
     ...overrides,
   };
+}
+
+function recordCandidate(name: string): void {
+  const candidate = enrich.candidateEventIfNew(name).event;
+  if (candidate === undefined) throw new Error("expected a new candidate event");
+  enrich.applyRegistryEvent(candidate);
 }
 
 describe("unit derivation and enqueue", () => {
@@ -50,14 +94,16 @@ describe("unit derivation and enqueue", () => {
     ]);
     expect(enqueued).toEqual(["1:karpathy", "1:swyx", "4:someone"]);
     expect(enrich.unitMemberIds("1:karpathy")).toEqual(["1", "2"]);
-    expect(enrich.unitMemberIds("1:swyx")).toEqual(["3"]);
     const claimed = enrich.claimQueued(10);
     expect(claimed.map((item) => item.unitId).sort()).toEqual([
       "1:karpathy",
       "1:swyx",
       "4:someone",
     ]);
-    expect(claimed.find((item) => item.unitId === "1:karpathy")?.tweetIds).toEqual(["1", "2"]);
+    const karpathy = claimed.find((item) => item.unitId === "1:karpathy");
+    expect(karpathy?.tweetIds).toEqual(["1", "2"]);
+    expect(karpathy?.inputHash.length).toBeGreaterThan(10);
+    expect(karpathy?.contractHash).toBe(CONTRACT_HASH);
   });
 
   it("does not re-enqueue an enriched unit on duplicate re-capture", () => {
@@ -73,192 +119,253 @@ describe("unit derivation and enqueue", () => {
     enrich.applyEnrichment(row());
     insertAndRegister([{ id: "101", conversation_id: "100" }]);
     const entry = enrich.queueEntry("100:someone");
-    expect(entry).toMatchObject({ status: "queued", attempts: 0 });
-    expect(enrich.claimQueued(10)[0]?.tweetIds).toEqual(["100", "101"]);
+    expect(entry?.status).toBe("pending");
+    expect(entry?.attempts).toBe(0);
   });
 
   it("re-enqueues stale units after a taxonomy bump", () => {
     insertAndRegister([{ id: "100" }]);
     enrich.applyEnrichment(row());
-    const bumped = new EnrichStore(store.database, 2, () => NOW);
+    const bumpedContract = computeContractHash({
+      taxonomy_version: 2,
+      labels: TAXONOMY,
+      model: "test-model",
+      processor_version: PROCESSOR_VERSION,
+      prompt_template_id: "labels-and-free-labels-v1",
+      output_schema_id: "assignments-v1",
+      normalization_id: "free-label-registry-v1",
+    });
+    const bumped = new EnrichStore(store.database, 2, () => NOW, bumpedContract);
     bumped.registerTweets([makePooled({ id: "100" })]);
-    expect(bumped.queueEntry("100:someone")?.status).toBe("queued");
+    expect(bumped.queueEntry("100:someone")?.status).toBe("pending");
   });
 
-  it("leaves an unenriched queued unit alone on duplicate re-capture", () => {
+  it("resets retry state when the contract hash changes", () => {
     insertAndRegister([{ id: "100" }]);
-    enrich.markFailed("100:someone", "boom");
+    enrich.markTransientFailure("100:someone", "boom", "other", NOW);
+    expect(enrich.queueEntry("100:someone")?.attempts).toBe(1);
+    enrich.setContractHash("different-contract");
     insertAndRegister([{ id: "100" }]);
-    expect(enrich.queueEntry("100:someone")).toMatchObject({
-      status: "queued",
-      attempts: 1,
-      lastError: "boom",
-    });
+    const after = enrich.queueEntry("100:someone");
+    expect(after?.status).toBe("pending");
+    expect(after?.attempts).toBe(0);
+    expect(after?.contractHash).toBe("different-contract");
   });
 });
 
 describe("queue state machine", () => {
-  it("requeues failures up to three attempts, then marks the unit failed", () => {
+  it("requeues transient failures up to MAX_ATTEMPTS-1 then marks blocked", () => {
     insertAndRegister([{ id: "100" }]);
-    enrich.markFailed("100:someone", "first");
-    expect(enrich.queueEntry("100:someone")).toMatchObject({ status: "queued", attempts: 1 });
-    enrich.markFailed("100:someone", "second");
-    expect(enrich.claimQueued(10)).toHaveLength(1);
-    enrich.markFailed("100:someone", "third");
-    expect(enrich.queueEntry("100:someone")).toMatchObject({
-      status: "failed",
-      attempts: 3,
-      lastError: "third",
-    });
-    expect(enrich.claimQueued(10)).toHaveLength(0);
+    for (let attempt = 1; attempt < MAX_ATTEMPTS; attempt += 1) {
+      enrich.markTransientFailure("100:someone", "boom", "timeout", NOW);
+      expect(enrich.queueEntry("100:someone")?.status).toBe("retrying");
+    }
+    enrich.markTransientFailure("100:someone", "final", "timeout", NOW);
+    const final = enrich.queueEntry("100:someone");
+    expect(final?.status).toBe("blocked");
+    expect(final?.attempts).toBe(MAX_ATTEMPTS);
+    expect(final?.lastError).toBe("final");
   });
 
-  it("keeps a unit queued when the enrichment misses current members", () => {
-    insertAndRegister([
-      { id: "100", conversation_id: "100" },
-      { id: "101", conversation_id: "100" },
-    ]);
-    enrich.applyEnrichment(row({ tweet_ids: ["100"] }));
-    expect(enrich.queueEntry("100:someone")?.status).toBe("queued");
-    enrich.applyEnrichment(row({ tweet_ids: ["100", "101"] }));
-    expect(enrich.queueEntry("100:someone")?.status).toBe("done");
+  it("skips claim until next_retry_at has passed", () => {
+    insertAndRegister([{ id: "100" }]);
+    const future = new Date(NOW.getTime() + 60_000);
+    enrich.markTransientFailure("100:someone", "boom", "timeout", future);
+    expect(enrich.claimQueued(10)).toHaveLength(0);
   });
 
   it("does not settle the queue for rows from another taxonomy version", () => {
     insertAndRegister([{ id: "100" }]);
     enrich.applyEnrichment(row({ taxonomy_version: 2 }));
-    expect(enrich.queueEntry("100:someone")?.status).toBe("queued");
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
   });
-});
 
-describe("label and concept query filters", () => {
-  beforeEach(() => {
+  it("does not settle the queue for rows tagged with a stale contract", () => {
+    insertAndRegister([{ id: "100" }]);
+    enrich.applyEnrichment(row({ contract_hash: "stale-hash" }));
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+  });
+
+  it("does not project labels from rows that do not exactly cover unit membership", () => {
     insertAndRegister([
-      { id: "1", text: "vllm ships fp8", author: { id: "author-a", username: "a" } },
-      { id: "2", text: "agents everywhere", author: { id: "author-b", username: "b" } },
-      { id: "3", text: "unrelated", author: { id: "author-c", username: "c" } },
+      { id: "100", conversation_id: "100", text: "first model update" },
+      { id: "101", conversation_id: "100", text: "second model update" },
     ]);
-    enrich.applyEnrichment(
-      row({
-        unit_id: "1:a",
-        tweet_ids: ["1"],
-        labels: ["ai", "inference-performance"],
-        free_labels: ["fp8"],
-        concepts: [{ name: "vLLM", aliases: [] }],
-      }),
-    );
-    enrich.applyEnrichment(
-      row({
-        unit_id: "2:b",
-        tweet_ids: ["2"],
-        labels: ["ai", "agents"],
-        free_labels: [],
-        concepts: [{ name: "Coding Agents", aliases: [] }],
-      }),
-    );
+    enrich.applyEnrichment(row({ tweet_ids: ["100", "101", "unexpected"] }));
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+    expect(enrich.registryStatus("dgx-spark")).toBeUndefined();
   });
 
-  it("filters tweets by preset labels with any/all modes", () => {
-    const ids = (q: Parameters<TweetStore["query"]>[0]): string[] =>
-      store.query(q).records.map((record) => record.tweet.id);
-    expect(ids({ labels: ["ai"] }).sort()).toEqual(["1", "2"]);
-    expect(ids({ labels: ["agents", "inference-performance"] }).sort()).toEqual(["1", "2"]);
-    expect(ids({ labels: ["ai", "agents"], labelMode: "all" })).toEqual(["2"]);
-    expect(ids({ labels: ["quantization"] })).toEqual([]);
-  });
-
-  it("filters by free label, concept, author ID and unlabeled", () => {
-    const ids = (q: Parameters<TweetStore["query"]>[0]): string[] =>
-      store.query(q).records.map((record) => record.tweet.id);
-    expect(ids({ freeLabel: "fp8" })).toEqual(["1"]);
-    expect(ids({ concept: "coding-agents" })).toEqual(["2"]);
-    expect(ids({ authorIds: ["author-a", "author-c"] }).sort()).toEqual(["1", "3"]);
-    expect(ids({ unlabeled: true })).toEqual(["3"]);
-    expect(ids({ labels: ["ai"], q: "vllm" })).toEqual(["1"]);
-  });
-
-  it("uses the same fail-closed author-ID selection for concepts, details and graph data", () => {
+  it("keeps a unit pending when the enrichment misses current members", () => {
     insertAndRegister([
-      {
-        id: "4",
-        conversation_id: "mixed",
-        author: { id: "author-a", username: "shared" },
-      },
-      {
-        id: "5",
-        conversation_id: "mixed",
-        author: { id: "author-outside", username: "shared" },
-      },
+      { id: "100", conversation_id: "100" },
+      { id: "101", conversation_id: "100" },
     ]);
-    enrich.applyEnrichment(
-      row({
-        unit_id: "mixed:shared",
-        tweet_ids: ["4", "5"],
-        concepts: [{ name: "Mixed Author Concept", aliases: [] }],
-      }),
-    );
+    enrich.applyEnrichment(row({ tweet_ids: ["100"] }));
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+    enrich.applyEnrichment(row({ tweet_ids: ["100", "101"] }));
+    expect(enrich.queueEntry("100:someone")?.status).toBe("done");
+  });
 
-    expect(enrich.concepts({ authorIds: ["author-a"] })).toEqual([
-      expect.objectContaining({ slug: "vllm", unit_count: 1 }),
-    ]);
-    expect(enrich.concept("coding-agents", { authorIds: ["author-a"] })).toBeUndefined();
-    expect(enrich.concept("mixed-author-concept", { authorIds: ["author-a"] })).toBeUndefined();
-    expect(enrich.graph({ authorIds: ["author-a"], top: 10 })).toEqual({
-      nodes: [{ slug: "vllm", name: "vLLM", unit_count: 1 }],
-      links: [],
+  it("never lets invalid evidence overwrite a current projection", () => {
+    insertAndRegister([{ id: "100", text: "grounded source text" }]);
+    const current = row({
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "grounded" }] }],
+      free_labels: [],
+      enriched_at: "2026-07-06T00:00:00.000Z",
     });
+    enrich.applyEnrichment(current);
+    enrich.applyEnrichment({
+      ...current,
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "not-a-member", quote: "grounded" }] }],
+      enriched_at: "2026-07-07T00:00:00.000Z",
+    });
+    expect(enrich.visibleAssignments(["100:someone"]).get("100:someone")?.preset_labels).toEqual(
+      current.preset_labels,
+    );
+    expect(enrich.queueEntry("100:someone")?.status).toBe("done");
+  });
+
+  it("recovers expired leases on the next tick", () => {
+    insertAndRegister([{ id: "100" }]);
+    const claimed = enrich.claimBatch({ limit: 10, workerId: "w1", leaseMs: 1_000 });
+    expect(claimed).toHaveLength(1);
+    store.database
+      .prepare("UPDATE enrich_queue SET lease_expires_at = ?")
+      .run(new Date(NOW.getTime() - 1).toISOString());
+    expect(enrich.recoverExpiredLeases()).toBe(1);
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+    expect(enrich.claimBatch({ limit: 10, workerId: "w1", leaseMs: 1_000 })).toHaveLength(1);
+  });
+
+  it("claims with equal newest/oldest capacity when both sides have work", () => {
+    const tweets = [
+      makePooled({ id: "a", captured_at: "2026-07-01T00:00:00.000Z" }),
+      makePooled({ id: "b", captured_at: "2026-07-02T00:00:00.000Z", author: { username: "b" } }),
+      makePooled({ id: "c", captured_at: "2026-07-03T00:00:00.000Z", author: { username: "c" } }),
+    ];
+    store.insert(tweets);
+    enrich.registerTweets(tweets);
+    const claimed = enrich.claimBatch({ limit: 2, workerId: "w1", leaseMs: 60_000 });
+    const ids = claimed.map((c) => c.unitId).sort();
+    expect(ids).toEqual(["a:someone", "c:c"]);
   });
 });
 
-describe("vocabulary merge and edges", () => {
-  it("unions aliases case-insensitively under one slug", () => {
+describe("recent error surface", () => {
+  it("records error classes and returns a bounded breakdown", () => {
+    insertAndRegister([{ id: "100" }]);
+    enrich.markTransientFailure("100:someone", "boom", "timeout", NOW);
+    enrich.markTransientFailure("100:someone", "boom", "rate_limit", NOW);
+    enrich.markTransientFailure("100:someone", "boom", "timeout", NOW);
+    const errors = enrich.recentErrorClasses();
+    expect(errors).toEqual(
+      expect.arrayContaining([
+        { error_class: "timeout", count: 2 },
+        { error_class: "rate_limit", count: 1 },
+      ]),
+    );
+  });
+});
+
+describe("status counts", () => {
+  it("counts by author selection, and complete_through never crosses pending work", () => {
+    const tweets = [
+      makePooled({
+        id: "1",
+        conversation_id: "one",
+        captured_at: "2026-07-01T00:00:00.000Z",
+        author: { id: "author-a", username: "a" },
+      }),
+      makePooled({
+        id: "2",
+        conversation_id: "two",
+        captured_at: "2026-07-02T00:00:00.000Z",
+        author: { id: "author-a", username: "a" },
+      }),
+      makePooled({
+        id: "3",
+        conversation_id: "three",
+        captured_at: "2026-07-03T00:00:00.000Z",
+        author: { id: "author-b", username: "b" },
+      }),
+    ];
+    store.insert(tweets);
+    enrich.registerTweets(tweets);
+    enrich.applyEnrichment(row({ unit_id: "one:a", tweet_ids: ["1"] }));
+
+    const allAuthors = enrich.statusCounts();
+    expect(allAuthors.totals.total).toBe(3);
+    expect(allAuthors.totals.completed).toBe(1);
+    expect(allAuthors.totals.pending).toBe(2);
+
+    const only = enrich.statusCounts({ authorIds: ["author-a"] });
+    expect(only.totals.total).toBe(2);
+    expect(only.totals.pending).toBe(1);
+    expect(only.totals.completed).toBe(1);
+    expect(only.completeThrough).toBe("2026-07-01T00:00:00.000Z");
+  });
+});
+
+describe("status counts across all queue states", () => {
+  it("reports running, retrying and blocked totals", () => {
     insertAndRegister([
-      { id: "1", author: { username: "a" } },
-      { id: "2", author: { username: "b" } },
+      { id: "a", conversation_id: "a" },
+      { id: "b", conversation_id: "b" },
+      { id: "c", conversation_id: "c" },
     ]);
+    // Move `a` to running via a claim; move `b` to retrying; block `c`.
+    enrich.claimBatch({ limit: 1, workerId: "w1", leaseMs: 60_000 });
+    enrich.markTransientFailure("b:someone", "boom", "timeout", NOW);
+    for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
+      enrich.markTransientFailure("c:someone", "boom", "timeout", NOW);
+    }
+    const counts = enrich.statusCounts();
+    expect(counts.totals.running).toBeGreaterThanOrEqual(1);
+    expect(counts.totals.retrying).toBeGreaterThanOrEqual(1);
+    expect(counts.totals.blocked).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("assignments and evidence", () => {
+  it("stores evidence with each assignment and exposes only approved free labels", () => {
+    insertAndRegister([{ id: "100", text: "vLLM ships fp8 kernels" }]);
     enrich.applyEnrichment(
       row({
-        unit_id: "1:a",
-        tweet_ids: ["1"],
-        concepts: [{ name: "DGX Spark", aliases: ["Spark"] }],
+        preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "vLLM ships fp8" }] }],
+        free_labels: [
+          { name: "fp8", evidence: [{ tweet_id: "100", quote: "fp8" }] },
+          { name: "vllm", evidence: [{ tweet_id: "100", quote: "vLLM" }] },
+        ],
       }),
     );
-    enrich.applyEnrichment(
-      row({
-        unit_id: "2:b",
-        tweet_ids: ["2"],
-        concepts: [{ name: "dgx spark", aliases: ["SPARK", "GB10"] }],
-      }),
-    );
-    const entry = enrich.concepts().find((concept) => concept.slug === "dgx-spark");
-    expect(entry).toMatchObject({ name: "DGX Spark", aliases: ["Spark", "GB10"], unit_count: 2 });
+    recordCandidate("fp8");
+    recordCandidate("vllm");
+    // Free labels start as candidates; approvedFreeLabels omits them.
+    expect(enrich.approvedFreeLabels()).toEqual([]);
+    // After promoting one, the approved list contains it.
+    enrich.promoteName("fp8", "test");
+    expect(enrich.approvedFreeLabels()).toEqual([{ name: "fp8", count: 1 }]);
+
+    // Public visibility filters out candidate free labels.
+    const visible = enrich.visibleAssignments(["100:someone"]).get("100:someone");
+    expect(visible?.preset_labels.map((a) => a.name)).toEqual(["ai"]);
+    expect(visible?.free_labels.map((a) => a.name)).toEqual(["fp8"]);
+    expect(visible?.free_labels[0]?.evidence).toEqual([{ tweet_id: "100", quote: "fp8" }]);
   });
 
-  it("increments edges per unit pair and rewrites them on re-enrichment", () => {
-    insertAndRegister([
-      { id: "1", author: { username: "a" } },
-      { id: "2", author: { username: "b" } },
-    ]);
-    const concepts = (names: string[]): { name: string; aliases: string[] }[] =>
-      names.map((name) => ({ name, aliases: [] }));
+  it("rejected free labels are hidden from public reads", () => {
+    insertAndRegister([{ id: "100", text: "vLLM ships fp8" }]);
     enrich.applyEnrichment(
-      row({ unit_id: "1:a", tweet_ids: ["1"], concepts: concepts(["x", "y", "z"]) }),
+      row({
+        free_labels: [{ name: "fp8", evidence: [{ tweet_id: "100", quote: "fp8" }] }],
+      }),
     );
-    enrich.applyEnrichment(
-      row({ unit_id: "2:b", tweet_ids: ["2"], concepts: concepts(["x", "y"]) }),
-    );
-
-    let graph = enrich.graph({ top: 10 });
-    expect(graph.links).toContainEqual({ source: "x", target: "y", weight: 2 });
-    expect(graph.links).toContainEqual({ source: "x", target: "z", weight: 1 });
-    expect(graph.links).toHaveLength(3);
-
-    // Re-enrich unit 1 with fewer concepts: old pairs decrement, dead edges go away.
-    enrich.applyEnrichment(row({ unit_id: "1:a", tweet_ids: ["1"], concepts: concepts(["x"]) }));
-    graph = enrich.graph({ top: 10 });
-    expect(graph.links).toEqual([{ source: "x", target: "y", weight: 1 }]);
-    expect(enrich.concepts().find((c) => c.slug === "z")?.unit_count).toBe(0);
-    expect(enrich.concept("y")?.unit_count).toBe(1);
+    recordCandidate("fp8");
+    enrich.rejectName("fp8", "test-rejection");
+    expect(enrich.approvedFreeLabels()).toEqual([]);
+    const visible = enrich.visibleAssignments(["100:someone"]).get("100:someone");
+    expect(visible?.free_labels).toEqual([]);
   });
 });
 
@@ -273,26 +380,26 @@ describe("summaries", () => {
       row({
         unit_id: "1:a",
         tweet_ids: ["1"],
-        labels: ["ai"],
-        free_labels: ["fp8"],
-        concepts: [
-          { name: "vLLM", aliases: [] },
-          { name: "FP8", aliases: [] },
-        ],
+        preset_labels: [{ name: "ai", evidence: [{ tweet_id: "1", quote: "hello" }] }],
+        free_labels: [{ name: "fp8", evidence: [{ tweet_id: "1", quote: "hello" }] }],
       }),
     );
+    recordCandidate("fp8");
     enrich.applyEnrichment(
       row({
         unit_id: "2:b",
         tweet_ids: ["2"],
-        labels: ["ai", "agents"],
+        preset_labels: [
+          { name: "ai", evidence: [{ tweet_id: "2", quote: "hello" }] },
+          { name: "agents", evidence: [{ tweet_id: "2", quote: "hello" }] },
+        ],
         free_labels: [],
-        concepts: [],
       }),
     );
-    enrich.markFailed("3:c", "boom");
-    enrich.markFailed("3:c", "boom");
-    enrich.markFailed("3:c", "boom");
+    enrich.promoteName("fp8", "test-approved");
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+      enrich.markTransientFailure("3:c", "boom", "other", NOW);
+    }
   });
 
   it("summarizes label counts, free labels, queue depth and coverage", () => {
@@ -308,132 +415,14 @@ describe("summaries", () => {
       { name: "quantization", description: "d", count: 0 },
     ]);
     expect(summary.free_labels).toEqual([{ name: "fp8", count: 1 }]);
-    expect(summary.queue).toEqual({ queued: 0, failed: 1, done: 2 });
+    expect(summary.queue).toEqual({
+      pending: 0,
+      running: 0,
+      retrying: 0,
+      blocked: 1,
+      done: 2,
+    });
     expect(summary.coverage).toEqual({ units_total: 3, units_enriched: 2 });
-  });
-
-  it("lists concepts by usage and details one concept with relations", () => {
-    expect(enrich.concepts().map((concept) => concept.slug)).toEqual(["fp8", "vllm"]);
-    const detail = enrich.concept("vllm");
-    expect(detail).toMatchObject({ slug: "vllm", name: "vLLM", unit_count: 1, tweet_count: 1 });
-    expect(detail?.related).toEqual([{ slug: "fp8", name: "FP8", shared_units: 1 }]);
-    expect(enrich.concept("nope")).toBeUndefined();
-  });
-
-  it("bounds the graph by top and filters nodes by label", () => {
-    const bounded = enrich.graph({ top: 1 });
-    expect(bounded.nodes).toHaveLength(1);
-    expect(bounded.links).toEqual([]);
-
-    const labeled = enrich.graph({ labels: ["ai"], top: 10 });
-    expect(labeled.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
-    expect(labeled.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
-    const anyLabel = enrich.graph({ labels: ["ai", "agents"], labelMode: "any", top: 10 });
-    expect(anyLabel.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
-    const everyLabel = enrich.graph({ labels: ["ai", "agents"], labelMode: "all", top: 10 });
-    expect(everyLabel.nodes).toEqual([]);
-    const agentsOnly = enrich.graph({ labels: ["agents"], top: 10 });
-    expect(agentsOnly.nodes).toEqual([]);
-  });
-
-  it("filters publication taxonomy to public units without rebuilding graph data downstream", () => {
-    insertAndRegister([
-      { id: "4", author: { username: "d" }, is_subscriber_only: true },
-      { id: "5", author: { username: "e" }, is_retweet: true },
-    ]);
-    enrich.applyEnrichment(
-      row({
-        unit_id: "4:d",
-        tweet_ids: ["4"],
-        concepts: [{ name: "Private Concept", aliases: [] }],
-      }),
-    );
-    enrich.applyEnrichment(
-      row({
-        unit_id: "5:e",
-        tweet_ids: ["5"],
-        concepts: [{ name: "Retweet Concept", aliases: [] }],
-      }),
-    );
-
-    expect(enrich.concepts().map((concept) => concept.slug)).toContain("private-concept");
-    const selection = { publication: "public-original" as const };
-    expect(
-      enrich
-        .concepts(selection)
-        .map((concept) => concept.slug)
-        .sort(),
-    ).toEqual(["fp8", "vllm"]);
-    expect(enrich.concept("private-concept", selection)).toBeUndefined();
-    expect(enrich.graph({ ...selection, top: 10 })).toEqual({
-      nodes: [
-        { slug: "fp8", name: "FP8", unit_count: 1 },
-        { slug: "vllm", name: "vLLM", unit_count: 1 },
-      ],
-      links: [{ source: "fp8", target: "vllm", weight: 1 }],
-    });
-  });
-
-  it("omits stale assignments from filtered graphs while a unit is queued", () => {
-    const joined = makePooled({
-      id: "4",
-      conversation_id: "1",
-      author: { username: "a" },
-    });
-    store.insert([joined]);
-    enrich.registerTweets([joined]);
-
-    const labels = enrich.labelsSummary([
-      { name: "ai", description: "d" },
-      { name: "agents", description: "d" },
-    ]);
-    expect(labels.labels).toEqual([
-      { name: "ai", description: "d", count: 1 },
-      { name: "agents", description: "d", count: 1 },
-    ]);
-    expect(labels.free_labels).toEqual([]);
-    expect(labels.coverage).toEqual({ units_total: 3, units_enriched: 1 });
-    expect(enrich.concepts().filter((concept) => concept.unit_count > 0)).toEqual([]);
-    expect(enrich.concept("vllm")).toMatchObject({ unit_count: 0, tweet_count: 0, related: [] });
-    expect(enrich.graph({ top: 10 })).toEqual({ nodes: [], links: [] });
-    expect(enrich.graph({ labels: ["ai"], top: 10 })).toEqual({ nodes: [], links: [] });
-  });
-});
-
-describe("taxonomy version and duplicate copies", () => {
-  it("replaying a stale-taxonomy row keeps concepts but not preset labels", () => {
-    insertAndRegister([{ id: "100" }]);
-    enrich.applyEnrichment(row({ taxonomy_version: 0 }));
-    const labels = store.database
-      .prepare("SELECT label, kind FROM tweet_labels WHERE tweet_id = '100' ORDER BY label")
-      .all() as { label: string; kind: string }[];
-    expect(labels).toEqual([{ label: "dgx-spark", kind: "free" }]);
-    const vocab = store.database.prepare("SELECT slug FROM concept_vocabulary").all() as {
-      slug: string;
-    }[];
-    expect(vocab).toEqual([{ slug: "vllm" }]);
-    const queue = store.database
-      .prepare("SELECT status FROM enrich_queue WHERE unit_id = '100:someone'")
-      .get() as { status: string };
-    expect(queue.status).toBe("queued");
-  });
-
-  it("prompts with the freshest contributor copy of a tweet", () => {
-    const stale = makePooled({
-      id: "100",
-      text: "old text",
-      captured_at: "2026-07-01T00:00:00.000Z",
-      contributed_by: "alice",
-    });
-    const fresh = makePooled({
-      id: "100",
-      text: "edited text",
-      captured_at: "2026-07-05T00:00:00.000Z",
-      contributed_by: "bob",
-    });
-    store.insert([stale, fresh]);
-    enrich.registerTweets([stale, fresh]);
-    expect(enrich.unitText("100:someone", 1000)).toBe("edited text");
   });
 });
 
@@ -445,6 +434,53 @@ describe("claiming", () => {
     expect(enrich.claimQueued(10)).toEqual([]);
     enrich.releaseClaims();
     expect(enrich.claimQueued(10).length).toBe(2);
+  });
+});
+
+describe("free-label registry", () => {
+  it("accepts only the next event for the active contract during replay", () => {
+    const candidate = enrich.candidateEventIfNew("vllm").event;
+    if (candidate === undefined) throw new Error("expected candidate");
+    enrich.applyRegistryEvent({ ...candidate, registry_revision: candidate.registry_revision + 1 });
+    expect(enrich.registryEntry("vllm")).toBeUndefined();
+    enrich.applyRegistryEvent(candidate);
+    expect(enrich.registryStatus("vllm")).toBe("candidate");
+    enrich.applyRegistryEvent({
+      ...candidate,
+      name: "fp8",
+      registry_revision: candidate.registry_revision + 1,
+      contract_hash: "old-contract",
+    });
+    expect(enrich.registryEntry("fp8")).toBeUndefined();
+  });
+
+  it("records a candidate on first observation and does not surface it publicly", () => {
+    insertAndRegister([{ id: "100", text: "hello vllm" }]);
+    enrich.applyEnrichment(
+      row({
+        free_labels: [{ name: "vllm", evidence: [{ tweet_id: "100", quote: "vllm" }] }],
+      }),
+    );
+    recordCandidate("vllm");
+    const entry = enrich.registryEntry("vllm");
+    expect(entry?.status).toBe("candidate");
+    expect(enrich.approvedFreeLabels()).toEqual([]);
+  });
+
+  it("promotes and rejects free labels durably", () => {
+    insertAndRegister([{ id: "100" }]);
+    enrich.applyEnrichment(
+      row({
+        free_labels: [{ name: "fp8", evidence: [{ tweet_id: "100", quote: "hello" }] }],
+      }),
+    );
+    recordCandidate("fp8");
+    const promoted = enrich.promoteName("fp8", "hub-verified");
+    expect(promoted?.status).toBe("approved");
+    expect(enrich.approvedFreeLabels().map((entry) => entry.name)).toEqual(["fp8"]);
+    const rejected = enrich.rejectName("fp8", "operator-decision");
+    expect(rejected?.status).toBe("rejected");
+    expect(enrich.registryEntry("fp8")?.status).toBe("rejected");
   });
 });
 
@@ -467,32 +503,9 @@ describe("capture freshness and empty units", () => {
     expect(enrich.unitMemberIds("300:someone")).toEqual([]);
   });
 
-  it("emptying a unit within one batch removes its queue entry", () => {
-    const before = [
-      makePooled({ id: "400", conversation_id: null, captured_at: "2026-07-01T00:00:00.000Z" }),
-      makePooled({ id: "401", conversation_id: null, captured_at: "2026-07-01T00:00:00.000Z" }),
-    ];
-    store.insert(before);
-    enrich.registerTweets(before);
-    // both re-captures now carry the conversation, leaving 400:someone and
-    // 401:someone empty
-    const after = [
-      makePooled({ id: "400", conversation_id: "399", captured_at: "2026-07-02T00:00:00.000Z" }),
-      makePooled({ id: "401", conversation_id: "399", captured_at: "2026-07-02T00:00:00.000Z" }),
-    ];
-    store.insert(after);
-    const enqueued = enrich.registerTweets(after);
-    expect(enqueued).toEqual(["399:someone"]);
-    const empties = store.database
-      .prepare("SELECT unit_id FROM enrich_queue WHERE unit_id IN ('400:someone', '401:someone')")
-      .all();
-    expect(empties).toEqual([]);
-  });
-
-  it("replaying enrichment for a memberless unit does not resurrect concepts", () => {
+  it("replaying enrichment for a memberless unit does not resurrect assignments", () => {
     insertAndRegister([{ id: "500" }]);
     enrich.applyEnrichment(row({ unit_id: "500:someone", tweet_ids: ["500"] }));
-    // the tweet moves away; the old unit is cleared
     const moved = makePooled({
       id: "500",
       conversation_id: "499",
@@ -500,11 +513,10 @@ describe("capture freshness and empty units", () => {
     });
     store.insert([moved]);
     enrich.registerTweets([moved]);
-    // boot-style replay of the old append-only row
     enrich.applyEnrichment(row({ unit_id: "500:someone", tweet_ids: ["500"] }));
-    const vocab = store.database
-      .prepare("SELECT slug, unit_count FROM concept_vocabulary WHERE unit_count > 0")
-      .all();
-    expect(vocab).toEqual([]);
+    const rows = store.database
+      .prepare("SELECT unit_id FROM label_assignments WHERE unit_id = ?")
+      .all("500:someone");
+    expect(rows).toEqual([]);
   });
 });

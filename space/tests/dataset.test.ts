@@ -96,18 +96,10 @@ describe("DatasetMirror.rebuild", () => {
 });
 
 describe("DatasetMirror enrichment rebuild", () => {
-  it("registers units during rebuild and replays enrichment shards", async () => {
+  it("replays enrichment shards without seeding label output from legacy rows", async () => {
     hub.files.set(
       "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
       `${JSON.stringify(makePooled({ id: "1" }))}\n${JSON.stringify(makePooled({ id: "2", author: { username: "other" } }))}\n`,
-    );
-    hub.files.set(
-      "enrichment/vocabulary.json",
-      JSON.stringify({
-        version: 1,
-        updated_at: "2026-07-06T00:00:00.000Z",
-        concepts: [{ slug: "vllm", name: "vLLM", aliases: ["PagedAttention"] }],
-      }),
     );
     hub.files.set(
       "enrichment/2026/07/enrichment-2026-07-06.jsonl",
@@ -116,7 +108,7 @@ describe("DatasetMirror enrichment rebuild", () => {
           unit_id: "1:someone",
           tweet_ids: ["1"],
           labels: ["ai"],
-          free_labels: [],
+          free_labels: ["gguf"],
           concepts: [{ name: "vLLM", aliases: [] }],
           model: "m",
           taxonomy_version: 1,
@@ -126,23 +118,62 @@ describe("DatasetMirror enrichment rebuild", () => {
         JSON.stringify({ unit_id: "broken" }),
       ].join("\n"),
     );
-    // Receipts must be restored to the mirror without being replayed as enrichment rows.
     const receiptPath = "enrichment/receipts/2026-07-06.jsonl";
     hub.files.set(receiptPath, '{"units":1}\n');
 
     const enrich = new EnrichStore(store.database, 1);
     await mirror.rebuild(store, enrich);
     const result = await mirror.rebuildEnrichment(enrich);
-    expect(result).toEqual({ files: 1, rows: 1 });
+    expect(result).toEqual({ files: 1, rows: 0, attempts: 0, registryEvents: 0 });
     expect(readFileSync(join(dir, receiptPath), "utf8")).toBe('{"units":1}\n');
-    await mirror.commitBatch([{ path: receiptPath, lines: ['{"units":2}'] }], [], "receipt");
-    expect(hub.files.get(receiptPath)).toBe('{"units":1}\n{"units":2}\n');
-    expect(enrich.queueEntry("1:someone")?.status).toBe("done");
-    expect(enrich.queueEntry("2:other")?.status).toBe("queued");
-    expect(enrich.concepts()).toEqual([
-      { slug: "vllm", name: "vLLM", aliases: ["PagedAttention"], unit_count: 1 },
-    ]);
-    expect(store.query({ labels: ["ai"] }).records.map((r) => r.tweet.id)).toEqual(["1"]);
+    // Legacy rows do not settle the queue — both units remain pending under
+    // the current contract.
+    expect(enrich.queueEntry("1:someone")?.status).toBe("pending");
+    expect(enrich.queueEntry("2:other")?.status).toBe("pending");
+    // No free-label registry entries seeded from legacy rows.
+    expect(enrich.registrySnapshot()).toEqual([]);
+    // No preset assignments materialize either.
+    expect(enrich.approvedFreeLabels()).toEqual([]);
+  });
+});
+
+describe("DatasetMirror attempt-event replay", () => {
+  it("restores retrying/blocked state from committed attempt events", async () => {
+    hub.files.set(
+      "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
+      `${JSON.stringify(makePooled({ id: "1" }))}\n`,
+    );
+    // No enrichment shard for this unit -> queue is pending on boot.
+    // A prior worker recorded a transient failure. Replay must restore the
+    // retrying status + attempt count + last_error class.
+    const enrich = new EnrichStore(store.database, 1);
+    await mirror.rebuild(store, enrich);
+    // Update contract to match — replay only applies attempts to the current
+    // contract. Grab the input hash the store computed.
+    const claimed = enrich.claimQueued(10);
+    enrich.releaseClaims();
+    const item = claimed[0];
+    if (item === undefined) throw new Error("expected a pending unit");
+    hub.files.set(
+      "enrichment/attempts/2026/07/attempts-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: item.unitId,
+        input_hash: item.inputHash,
+        contract_hash: item.contractHash,
+        attempt: 2,
+        outcome: "transient_failure",
+        error_class: "timeout",
+        error_message: "router timed out",
+        at: "2026-07-06T00:00:00.000Z",
+        next_retry_at: "2026-07-06T00:05:00.000Z",
+      })}\n`,
+    );
+    await mirror.rebuildEnrichment(enrich);
+    const entry = enrich.queueEntry(item.unitId);
+    expect(entry?.status).toBe("retrying");
+    expect(entry?.attempts).toBe(2);
+    expect(entry?.lastErrorClass).toBe("timeout");
+    expect(entry?.nextRetryAt).toBe("2026-07-06T00:05:00.000Z");
   });
 });
 

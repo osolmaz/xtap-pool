@@ -17,8 +17,7 @@ xtap-pool is three pieces in one repo:
   for downstream applications that should not scan the private dataset or
   repeat semantic extraction.
 
-See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-design and delivery plan.
+See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the original design, [`docs/labels-and-free-labels-implementation-plan.md`](docs/labels-and-free-labels-implementation-plan.md) for the target two-output classification contract, and [`docs/durable-enrichment-implementation-plan.md`](docs/durable-enrichment-implementation-plan.md) for the durable worker and completion contract.
 
 ## Set up a pool (once, by the pool owner)
 

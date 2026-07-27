@@ -39,6 +39,8 @@ export type EnrichDeps = {
   taxonomy: EnrichTaxonomy;
   /** Drain one enrichment tick synchronously (manual runs). */
   run: () => Promise<EnrichReceipt>;
+  /** Most recent worker receipt, when known. Backs the admin worker signal. */
+  lastReceipt?: () => EnrichReceipt | undefined;
 };
 
 export type AppReadiness = {
@@ -99,9 +101,9 @@ const tweetsQuerySchema = z.object({
   labels: z.string().optional(),
   label_mode: z.enum(["any", "all"]).default("any"),
   free_label: z.string().optional(),
-  concept: z.string().optional(),
   unlabeled: z.enum(["true", "false"]).optional(),
   publication: z.enum(["public-original"]).optional(),
+  cutoff: z.string().min(1).optional(),
   dedup: z.enum(["true", "false"]).default("true"),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   cursor: z.string().optional(),
@@ -113,10 +115,17 @@ const taxonomyQuerySchema = z.object({
   label_mode: z.enum(["any", "all"]).default("any"),
   publication: z.enum(["public-original"]).optional(),
   revision: z.string().min(1).optional(),
+  cutoff: z.string().min(1).optional(),
 });
 
 const graphQuerySchema = taxonomyQuerySchema.extend({
   top: z.coerce.number().int().min(1).max(1000).default(300),
+});
+
+const statusQuerySchema = z.object({
+  author_ids: z.string().optional(),
+  publication: z.enum(["public-original"]).optional(),
+  revision: z.string().min(1).optional(),
 });
 
 const serviceAccountCreateSchema = z.object({
@@ -134,6 +143,22 @@ function parseCsv(value: string | undefined): string[] | undefined {
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
   return parts === undefined || parts.length === 0 ? undefined : parts;
+}
+
+function taxonomySelection(raw: z.infer<typeof taxonomyQuerySchema>): {
+  authorIds: string[] | undefined;
+  labels: string[] | undefined;
+  labelMode: "any" | "all";
+  publication: "public-original" | undefined;
+  cutoff: string | undefined;
+} {
+  return {
+    authorIds: parseCsv(raw.author_ids),
+    labels: parseCsv(raw.labels),
+    labelMode: raw.label_mode,
+    publication: raw.publication,
+    cutoff: raw.cutoff,
+  };
 }
 
 function toTweetQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
@@ -160,9 +185,9 @@ function toFilteredQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
     labels,
     labelMode: labels === undefined ? undefined : raw.label_mode,
     freeLabel: raw.free_label,
-    concept: raw.concept,
     unlabeled: raw.unlabeled === "true" ? true : undefined,
     publication: raw.publication,
+    cutoff: raw.cutoff,
     cursor: raw.cursor,
   };
   return Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== undefined));
@@ -231,6 +256,16 @@ export function createApp(deps: AppDeps): Hono {
   };
 
   const app = new Hono();
+
+  const taxonomyRequest = (
+    c: Context,
+  ): { revision: string; query: z.infer<typeof taxonomyQuerySchema> } | Response => {
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
+    const parsed = taxonomyQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
+    const revision = checkedRevision(parsed.data.revision, unitStore);
+    return revision instanceof Response ? revision : { revision, query: parsed.data };
+  };
 
   const requireReady = async (c: Context, next: Next) => {
     const readiness = deps.readiness?.();
@@ -402,43 +437,50 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/labels", (c) => {
-    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
-    const revision = checkedRevision(c.req.query("revision"), unitStore);
-    if (revision instanceof Response) return revision;
-    return c.json({ revision, ...deps.enrich.store.labelsSummary(deps.enrich.taxonomy.labels) });
-  });
-
-  app.get("/api/concepts", (c) => {
-    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
-    const parsed = taxonomyQuerySchema.safeParse(c.req.query());
-    if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    const revision = checkedRevision(parsed.data.revision, unitStore);
-    if (revision instanceof Response) return revision;
+    const request = taxonomyRequest(c);
+    if (request instanceof Response) return request;
     return c.json({
-      revision,
-      concepts: deps.enrich.store.concepts({
-        authorIds: parseCsv(parsed.data.author_ids),
-        labels: parseCsv(parsed.data.labels),
-        labelMode: parsed.data.label_mode,
-        publication: parsed.data.publication,
-      }),
+      revision: request.revision,
+      ...taxonomyMetadata(deps),
+      ...(request.query.cutoff === undefined ? {} : { cutoff: request.query.cutoff }),
+      ...deps.enrich.store.labelsSummary(
+        deps.enrich.taxonomy.labels,
+        taxonomySelection(request.query),
+      ),
     });
   });
 
-  app.get("/api/concepts/:slug", (c) => {
+  app.get("/api/free-labels", (c) => {
+    const request = taxonomyRequest(c);
+    if (request instanceof Response) return request;
+    return c.json({
+      revision: request.revision,
+      ...taxonomyMetadata(deps),
+      ...(request.query.cutoff === undefined ? {} : { cutoff: request.query.cutoff }),
+      free_labels: deps.enrich.store.approvedFreeLabels(taxonomySelection(request.query)),
+    });
+  });
+
+  app.get("/api/free-labels/:name", (c) => {
     if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = taxonomyQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
     const revision = checkedRevision(parsed.data.revision, unitStore);
     if (revision instanceof Response) return revision;
-    const concept = deps.enrich.store.concept(c.req.param("slug"), {
+    const detail = deps.enrich.store.freeLabelDetail(c.req.param("name"), {
       authorIds: parseCsv(parsed.data.author_ids),
       labels: parseCsv(parsed.data.labels),
       labelMode: parsed.data.label_mode,
       publication: parsed.data.publication,
+      cutoff: parsed.data.cutoff,
     });
-    if (concept === undefined) return c.json({ error: "unknown concept" }, 404);
-    return c.json({ revision, ...concept });
+    if (detail === undefined) return c.json({ error: "unknown free label" }, 404);
+    return c.json({
+      revision,
+      ...taxonomyMetadata(deps),
+      ...(parsed.data.cutoff === undefined ? {} : { cutoff: parsed.data.cutoff }),
+      ...detail,
+    });
   });
 
   app.get("/api/graph", (c) => {
@@ -449,12 +491,33 @@ export function createApp(deps: AppDeps): Hono {
     if (revision instanceof Response) return revision;
     return c.json({
       revision,
+      ...taxonomyMetadata(deps),
+      ...(parsed.data.cutoff === undefined ? {} : { cutoff: parsed.data.cutoff }),
       ...deps.enrich.store.graph({
         authorIds: parseCsv(parsed.data.author_ids),
         labels: parseCsv(parsed.data.labels),
         labelMode: parsed.data.label_mode,
         publication: parsed.data.publication,
+        cutoff: parsed.data.cutoff,
         top: parsed.data.top,
+      }),
+    });
+  });
+
+  app.get("/api/enrichment/status", (c) => {
+    if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
+    const parsed = statusQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
+    const revision = checkedRevision(parsed.data.revision, unitStore);
+    if (revision instanceof Response) return revision;
+    const authorIds = parseCsv(parsed.data.author_ids);
+    return c.json({
+      revision,
+      author_ids: [...new Set(authorIds ?? [])].sort(),
+      free_label_registry_revision: deps.enrich.store.registryRevision(),
+      ...buildEnrichmentSurface(deps, now, {
+        authorIds,
+        publication: parsed.data.publication,
       }),
     });
   });
@@ -476,6 +539,39 @@ export function createApp(deps: AppDeps): Hono {
     const username = adminUser(c);
     if (username instanceof Response) return username;
     return c.json({ pool: membership.snapshot(), viewer: { username } });
+  });
+
+  app.get("/api/admin/enrichment", (c) => {
+    const username = adminUser(c);
+    if (username instanceof Response) return username;
+    return c.json({
+      viewer: { username },
+      ...buildEnrichmentSurface(deps, now, {}, true),
+    });
+  });
+
+  app.get("/api/admin/free-labels", (c) => {
+    const username = adminUser(c);
+    if (username instanceof Response) return username;
+    const labels = deps.enrich.store.registrySnapshot();
+    return c.json({
+      viewer: { username },
+      registry_revision: deps.enrich.store.registryRevision(),
+      labels,
+      candidates: labels.flatMap((label) => {
+        if (label.status !== "candidate") return [];
+        const detail = deps.enrich.store.candidateDetail(label.name);
+        return detail === undefined ? [] : [detail];
+      }),
+    });
+  });
+
+  app.get("/api/admin/free-labels/:name", (c) => {
+    const username = adminUser(c);
+    if (username instanceof Response) return username;
+    const detail = deps.enrich.store.candidateDetail(c.req.param("name"));
+    if (detail === undefined) return c.json({ error: "unknown free label" }, 404);
+    return c.json({ viewer: { username }, label: detail });
   });
 
   app.post("/api/admin/pool/repair", async (c) => {
@@ -643,6 +739,61 @@ function isConfigurationRecoveryRequest(c: Context): boolean {
     c.req.method === "POST" &&
     (path === "/api/admin/pool/repair" || path === "/api/admin/service-accounts/repair")
   );
+}
+
+type EnrichmentSurfaceOptions = {
+  authorIds?: readonly string[] | undefined;
+  publication?: "public-original" | undefined;
+};
+
+/**
+ * Shared body for /api/enrichment/status and /api/admin/enrichment: pulls
+ * counts, freshness lag, contract hash and recent errors from the enrichment
+ * store, optionally including the last worker receipt.
+ */
+function buildEnrichmentSurface(
+  deps: AppDeps,
+  now: () => Date,
+  selection: EnrichmentSurfaceOptions,
+  includeReceipt = false,
+): Record<string, unknown> {
+  const counts = deps.enrich.store.statusCounts(selection);
+  const recent = deps.enrich.store.recentErrorClasses();
+  const workerReceipt = deps.enrich.lastReceipt?.();
+  const workerActive =
+    workerReceipt !== undefined && Date.now() - Date.parse(workerReceipt.finished_at) < 15 * 60_000;
+  const freshnessLagSeconds = freshnessLag(now(), counts.newestCompletedAt);
+  return {
+    contract_hash: deps.enrich.store.currentContractHash(),
+    taxonomy_version: deps.enrich.taxonomy.version,
+    totals: counts.totals,
+    ...maybe("oldest_pending_at", counts.oldestPendingAt),
+    ...maybe("newest_completed_at", counts.newestCompletedAt),
+    ...maybe("complete_through", counts.completeThrough),
+    worker_active: workerActive,
+    ...(includeReceipt && workerReceipt !== undefined ? { last_receipt: workerReceipt } : {}),
+    ...maybe("freshness_lag_seconds", freshnessLagSeconds),
+    recent_errors: recent,
+  };
+}
+
+function taxonomyMetadata(deps: AppDeps): {
+  contract_hash: string;
+  free_label_registry_revision: number;
+} {
+  return {
+    contract_hash: deps.enrich.store.currentContractHash(),
+    free_label_registry_revision: deps.enrich.store.registryRevision(),
+  };
+}
+
+function maybe<K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> {
+  return value === undefined ? {} : ({ [key]: value } as Partial<Record<K, V>>);
+}
+
+function freshnessLag(now: Date, newestCompletedAt: string | undefined): number | undefined {
+  if (newestCompletedAt === undefined) return undefined;
+  return Math.max(0, Math.floor((now.getTime() - Date.parse(newestCompletedAt)) / 1000));
 }
 
 function checkedRevision(requested: string | undefined, unitStore: UnitStore): string | Response {

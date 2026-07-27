@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  attemptEventPathFor,
+  attemptEventSchema,
   enrichmentPathFor,
   enrichmentRowSchema,
+  isCurrentEnrichmentRow,
   labelConfigSchema,
-  mergeConceptEntry,
-  parseVocabularyJson,
+  parseEnrichmentRow,
   receiptPathFor,
-  slugifyConcept,
+  registryEventPathFor,
+  slugifyFreeLabel,
   unitIdFor,
 } from "../src/index.js";
 
@@ -29,33 +32,55 @@ function tweet(overrides: Record<string, unknown> = {}): {
 }
 
 describe("enrichmentRowSchema", () => {
-  it("accepts a full row and defaults concept aliases", () => {
+  it("accepts a full evidence-bearing row", () => {
     const parsed = enrichmentRowSchema.parse({
       unit_id: "100:someone",
       tweet_ids: ["100"],
-      labels: ["ai"],
-      free_labels: ["dgx-spark"],
-      concepts: [{ name: "DGX Spark" }],
+      input_hash: "a".repeat(64),
+      contract_hash: "b".repeat(64),
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "frontier AI" }] }],
+      free_labels: [
+        { name: "open-weight-model", evidence: [{ tweet_id: "100", quote: "open-weight" }] },
+      ],
       model: "zai-org/GLM-5.2",
       taxonomy_version: 1,
       enriched_at: "2026-07-06T00:00:00.000Z",
     });
-    expect(parsed.concepts[0]?.aliases).toEqual([]);
+    expect(parsed.preset_labels[0]?.evidence[0]?.quote).toBe("frontier AI");
+    expect(isCurrentEnrichmentRow(parsed)).toBe(true);
   });
 
-  it("rejects rows without tweets or with a bad taxonomy version", () => {
+  it("ignores legacy rows with a previous output contract", () => {
+    const parsed = parseEnrichmentRow({
+      unit_id: "100:someone",
+      tweet_ids: ["100"],
+      labels: ["ai"],
+      free_labels: ["dgx-spark"],
+      concepts: [{ name: "vLLM", aliases: ["VLLM"] }],
+      model: "m",
+      taxonomy_version: 1,
+      enriched_at: "2026-07-06T00:00:00.000Z",
+    });
+    expect(parsed).toBeUndefined();
+  });
+
+  it("rejects incomplete, legacy-shaped, and extra-key rows", () => {
     const base = {
       unit_id: "u",
       tweet_ids: ["1"],
-      labels: [],
+      input_hash: "input",
+      contract_hash: "contract",
+      preset_labels: [],
       free_labels: [],
-      concepts: [],
       model: "m",
       taxonomy_version: 1,
       enriched_at: "t",
     };
     expect(enrichmentRowSchema.safeParse({ ...base, tweet_ids: [] }).success).toBe(false);
     expect(enrichmentRowSchema.safeParse({ ...base, taxonomy_version: 0 }).success).toBe(false);
+    expect(enrichmentRowSchema.safeParse({ ...base, tweet_ids: ["1", "1"] }).success).toBe(false);
+    expect(enrichmentRowSchema.safeParse({ ...base, concepts: [] }).success).toBe(false);
+    expect(enrichmentRowSchema.safeParse({ ...base, free_labels: undefined }).success).toBe(false);
     expect(labelConfigSchema.safeParse({ name: "", description: "x" }).success).toBe(false);
   });
 });
@@ -70,61 +95,56 @@ describe("unitIdFor", () => {
   });
 });
 
-describe("slugifyConcept", () => {
+describe("slugifyFreeLabel", () => {
   it("slugifies names case-insensitively with diacritics stripped", () => {
-    expect(slugifyConcept("DGX Spark")).toBe("dgx-spark");
-    expect(slugifyConcept("  Mixture-of-Experts (MoE)! ")).toBe("mixture-of-experts-moe");
-    expect(slugifyConcept("Café Étude")).toBe("cafe-etude");
-    expect(slugifyConcept("???")).toBe("");
-  });
-});
-
-describe("mergeConceptEntry", () => {
-  it("keeps the existing canonical name and unions aliases case-insensitively", () => {
-    const merged = mergeConceptEntry(
-      { name: "DGX Spark", aliases: ["Spark"] },
-      { name: "dgx spark", aliases: ["SPARK", "GB10 box"] },
-    );
-    expect(merged.name).toBe("DGX Spark");
-    expect(merged.aliases).toEqual(["Spark", "GB10 box"]);
-  });
-
-  it("keeps a differently-written incoming name as an alias", () => {
-    const merged = mergeConceptEntry(
-      { name: "KV Cache", aliases: [] },
-      { name: "KV-cache", aliases: [] },
-    );
-    expect(merged).toEqual({ name: "KV Cache", aliases: ["KV-cache"] });
-  });
-
-  it("never lists the canonical name among its own aliases", () => {
-    const merged = mergeConceptEntry(undefined, {
-      name: "vLLM",
-      aliases: ["VLLM", "vllm", " vLLM "],
-    });
-    expect(merged.name).toBe("vLLM");
-    expect(merged.aliases).toEqual([]);
+    expect(slugifyFreeLabel("DGX Spark")).toBe("dgx-spark");
+    expect(slugifyFreeLabel("  Mixture-of-Experts (MoE)! ")).toBe("mixture-of-experts-moe");
+    expect(slugifyFreeLabel("Café Étude")).toBe("cafe-etude");
+    expect(slugifyFreeLabel("???")).toBe("");
   });
 });
 
 describe("dataset paths", () => {
-  it("derives enrichment shard and receipt paths from timestamps", () => {
+  it("derives enrichment, attempt, registry and receipt paths from timestamps", () => {
     expect(enrichmentPathFor("2026-07-06T12:34:56.000Z")).toBe(
       "enrichment/2026/07/enrichment-2026-07-06.jsonl",
     );
     expect(receiptPathFor("2026-07-06T12:34:56.000Z")).toBe("enrichment/receipts/2026-07-06.jsonl");
+    expect(attemptEventPathFor("2026-07-06T12:34:56.000Z")).toBe(
+      "enrichment/attempts/2026/07/attempts-2026-07-06.jsonl",
+    );
+    expect(registryEventPathFor("2026-07-06T12:34:56.000Z")).toBe(
+      "enrichment/registry/2026/07/registry-2026-07-06.jsonl",
+    );
   });
 });
 
-describe("parseVocabularyJson", () => {
-  it("parses valid vocabulary files and tolerates garbage", () => {
-    const valid = JSON.stringify({
-      version: 1,
-      updated_at: "2026-07-06T00:00:00.000Z",
-      concepts: [{ slug: "vllm", name: "vLLM", aliases: ["VLLM"] }],
+describe("attemptEventSchema", () => {
+  it("accepts a valid attempt event", () => {
+    const parsed = attemptEventSchema.parse({
+      unit_id: "100:someone",
+      input_hash: "a".repeat(64),
+      contract_hash: "b".repeat(64),
+      attempt: 3,
+      outcome: "transient_failure",
+      error_class: "timeout",
+      error_message: "router timed out",
+      at: "2026-07-06T00:00:00.000Z",
+      next_retry_at: "2026-07-06T00:05:00.000Z",
     });
-    expect(parseVocabularyJson(valid)).toEqual([{ slug: "vllm", name: "vLLM", aliases: ["VLLM"] }]);
-    expect(parseVocabularyJson("not json")).toEqual([]);
-    expect(parseVocabularyJson('{"version": 2}')).toEqual([]);
+    expect(parsed.outcome).toBe("transient_failure");
+  });
+
+  it("rejects invalid outcomes and error classes", () => {
+    expect(
+      attemptEventSchema.safeParse({
+        unit_id: "u",
+        input_hash: "h",
+        contract_hash: "c",
+        attempt: 1,
+        outcome: "not-real",
+        at: "2026-07-06T00:00:00.000Z",
+      }).success,
+    ).toBe(false);
   });
 });

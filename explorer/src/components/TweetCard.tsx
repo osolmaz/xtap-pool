@@ -1,8 +1,5 @@
-import { useMemo } from "react";
-
 import type { PooledTweet } from "@xtap-pool/shared";
 
-import { linkConcepts } from "../lib/concept-links.js";
 import {
   avatarColor,
   displayName,
@@ -15,8 +12,6 @@ import {
   tweetMetrics,
   tweetTextHtml,
 } from "../lib/format.js";
-import { isPlainLeftClick, navigate } from "../lib/router.js";
-import { useVocabulary } from "../lib/vocabulary.js";
 
 export type TweetCardProps = {
   tweet: PooledTweet;
@@ -24,35 +19,12 @@ export type TweetCardProps = {
   now: Date;
 };
 
-/** Href of the concept link under a plain left click, if any. */
-function conceptLinkHref(event: React.MouseEvent<HTMLDivElement>): string | undefined {
-  if (!isPlainLeftClick(event)) return undefined;
-  const target = event.target;
-  if (!(target instanceof Element)) return undefined;
-  return target.closest("a.concept-link")?.getAttribute("href") ?? undefined;
-}
-
 /**
- * Tweet text rendered to escaped HTML (URLs/mentions/hashtags linkified),
- * then run through the first-mention concept linker. With an empty
- * vocabulary (still loading, fetch failed, or no enrichment yet) the text
- * renders exactly as before, without concept links.
+ * Tweet text rendered to escaped HTML (URLs/mentions/hashtags linkified).
  */
 function TweetText({ text }: { text: string }): React.JSX.Element {
-  const vocabulary = useVocabulary();
-  const html = useMemo(() => linkConcepts(tweetTextHtml(text), vocabulary), [text, vocabulary]);
-  const onClick = (event: React.MouseEvent<HTMLDivElement>): void => {
-    const href = conceptLinkHref(event);
-    if (href === undefined) return;
-    event.preventDefault();
-    navigate(href);
-  };
   return (
-    <div
-      className="x-tweet-card__text"
-      onClick={onClick}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <div className="x-tweet-card__text" dangerouslySetInnerHTML={{ __html: tweetTextHtml(text) }} />
   );
 }
 

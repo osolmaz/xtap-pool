@@ -23,6 +23,10 @@ export default defineConfig({
         "setup/src/main.ts",
         "setup/src/wizard.ts",
         "space/src/server.ts",
+        // Standalone worker process wiring requires a real Hub; its durable
+        // work is exercised through runEnrichTick integration tests.
+        "space/src/enrich-command.ts",
+        "space/src/enrich-command-main.ts",
       ],
       thresholds: {
         lines: 85,

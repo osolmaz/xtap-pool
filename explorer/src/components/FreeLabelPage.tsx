@@ -1,39 +1,34 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { ConceptDetail, Filters } from "../lib/api.js";
-import { defaultFilters, fetchConcept } from "../lib/api.js";
+import type { FreeLabelDetail, Filters } from "../lib/api.js";
+import { defaultFilters, fetchFreeLabel } from "../lib/api.js";
 import { formatCount } from "../lib/format.js";
 import { AppLink } from "./AppLink.js";
 import { Feed } from "./Feed.js";
 
-export type ConceptPageProps = {
+export type FreeLabelPageProps = {
   slug: string;
 };
 
-type ConceptPageState =
+type FreeLabelPageState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; concept: ConceptDetail };
+  | { status: "ready"; label: FreeLabelDetail };
 
-function ConceptHeader({ concept }: { concept: ConceptDetail }): React.JSX.Element {
+function FreeLabelHeader({ label }: { label: FreeLabelDetail }): React.JSX.Element {
   return (
     <header className="flex flex-col gap-2 border-b border-(--x-border) p-4">
       <AppLink href="/graph" className="text-sm text-(--x-muted)">
-        ← Concept graph
+        ← Label graph
       </AppLink>
-      <h2 className="text-lg font-bold">{concept.name}</h2>
-      <p className="text-sm text-(--x-muted)">{formatCount(concept.post_count)} posts</p>
-      {concept.aliases.length > 0 ? (
-        <p className="text-sm text-(--x-muted)">
-          Also referred to as: {concept.aliases.join(", ")}
-        </p>
-      ) : null}
-      {concept.related.length > 0 ? (
+      <h2 className="text-lg font-bold">{label.name}</h2>
+      <p className="text-sm text-(--x-muted)">{formatCount(label.post_count)} posts</p>
+      {label.related.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
-          {concept.related.map((related) => (
+          {label.related.map((related) => (
             <AppLink
-              key={related.slug}
-              href={`/graph/${related.slug}`}
+              key={related.name}
+              href={`/graph/${related.name}`}
               className="x-chip"
               title={`${String(related.shared)} shared posts`}
             >
@@ -46,17 +41,17 @@ function ConceptHeader({ concept }: { concept: ConceptDetail }): React.JSX.Eleme
   );
 }
 
-/** /graph/<slug>: one concept — name, aliases, related chips, and its posts. */
-export function ConceptPage({ slug }: ConceptPageProps): React.JSX.Element {
-  const [state, setState] = useState<ConceptPageState>({ status: "loading" });
-  const feedFilters = useMemo<Filters>(() => ({ ...defaultFilters, concept: slug }), [slug]);
+/** /graph/<slug>: one approved free label and its posts. */
+export function FreeLabelPage({ slug }: FreeLabelPageProps): React.JSX.Element {
+  const [state, setState] = useState<FreeLabelPageState>({ status: "loading" });
+  const feedFilters = useMemo<Filters>(() => ({ ...defaultFilters, freeLabel: slug }), [slug]);
 
   useEffect(() => {
     let cancelled = false;
     setState({ status: "loading" });
-    void fetchConcept(slug).then(
-      (concept) => {
-        if (!cancelled) setState({ status: "ready", concept });
+    void fetchFreeLabel(slug).then(
+      (label) => {
+        if (!cancelled) setState({ status: "ready", label });
       },
       (error: unknown) => {
         const message = error instanceof Error ? error.message : "failed to load";
@@ -76,7 +71,7 @@ export function ConceptPage({ slug }: ConceptPageProps): React.JSX.Element {
   }
   return (
     <section>
-      <ConceptHeader concept={state.concept} />
+      <FreeLabelHeader label={state.label} />
       <Feed filters={feedFilters} />
     </section>
   );

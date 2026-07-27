@@ -85,12 +85,12 @@ const freeTop = db
   )
   .all();
 console.log("top free labels:", JSON.stringify(freeTop));
-const vocab = db
+const approvedFreeLabels = db
   .prepare(
-    "SELECT slug, name, unit_count FROM concept_vocabulary ORDER BY unit_count DESC LIMIT 12",
+    "SELECT name, status FROM free_label_registry WHERE status = 'approved' ORDER BY name LIMIT 12",
   )
   .all();
-console.log("top concepts:", JSON.stringify(vocab, null, 1));
+console.log("approved free labels:", JSON.stringify(approvedFreeLabels, null, 1));
 
 const queueSample = db
   .prepare(

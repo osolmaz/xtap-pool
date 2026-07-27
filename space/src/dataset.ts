@@ -4,13 +4,13 @@ import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 import { commit, downloadFile, listFiles } from "@huggingface/hub";
 
 import {
+  attemptEventSchema,
+  freeLabelEventSchema,
+  parseEnrichmentRow,
   datasetPathFor,
-  enrichmentRowSchema,
-  parseVocabularyJson,
   validateTweet,
-  VOCABULARY_PATH,
 } from "@xtap-pool/shared";
-import type { PooledTweet } from "@xtap-pool/shared";
+import type { AttemptEvent, FreeLabelEvent, PooledTweet } from "@xtap-pool/shared";
 
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
@@ -155,25 +155,63 @@ export class DatasetMirror {
   /**
    * Rebuild the enrichment tables from the dataset: seed the vocabulary from
    * `enrichment/vocabulary.json`, restore receipt files to the local mirror,
-   * then replay enrichment JSONL shards in chronological order. Run after
+   * then replay enrichment JSONL shards in chronological order, followed by
+   * the attempt-event log which reconstructs retry/blocked state. Run after
    * `rebuild` so unit membership exists.
    */
-  async rebuildEnrichment(enrich: EnrichStore): Promise<{ files: number; rows: number }> {
-    const vocabularyRaw = await this.readText(VOCABULARY_PATH);
-    if (vocabularyRaw !== undefined) enrich.seedVocabulary(parseVocabularyJson(vocabularyRaw));
-    const paths = (await this.hub.listJsonlFiles("enrichment")).sort();
+  async rebuildEnrichment(
+    enrich: EnrichStore,
+  ): Promise<{ files: number; rows: number; attempts: number; registryEvents: number }> {
+    const allPaths = (await this.hub.listJsonlFiles("enrichment")).sort();
+    const attemptPaths: string[] = [];
+    const registryPaths: string[] = [];
     let files = 0;
     let rows = 0;
-    for (const path of paths) {
-      const content = await this.hub.downloadFile(path);
-      const local = this.localPath(path);
-      mkdirSync(dirname(local), { recursive: true });
-      writeFileSync(local, content);
-      if (path.startsWith("enrichment/receipts/")) continue;
+    for (const path of allPaths) {
+      const content = await this.downloadAndMirror(path);
+      const kind = classifyEnrichmentPath(path);
+      if (kind === "receipt") continue;
+      if (kind === "attempt") {
+        attemptPaths.push(path);
+        continue;
+      }
+      if (kind === "registry") {
+        registryPaths.push(path);
+        continue;
+      }
       rows += applyEnrichmentLines(enrich, content);
       files += 1;
     }
-    return { files, rows };
+    const registryEvents = await this.replayShards(registryPaths, (content) =>
+      replayRegistryLines(enrich, content),
+    );
+    const attempts = await this.replayShards(attemptPaths, (content) =>
+      replayAttemptLines(enrich, content),
+    );
+    return { files, rows, attempts, registryEvents };
+  }
+
+  private async downloadAndMirror(path: string): Promise<string> {
+    const content = await this.hub.downloadFile(path);
+    const local = this.localPath(path);
+    mkdirSync(dirname(local), { recursive: true });
+    writeFileSync(local, content);
+    return content;
+  }
+
+  private async replayShards(
+    paths: readonly string[],
+    apply: (content: string) => number,
+  ): Promise<number> {
+    let count = 0;
+    for (const path of paths) {
+      const local = this.localPath(path);
+      const content = existsSync(local)
+        ? readFileSync(local, "utf8")
+        : await this.hub.downloadFile(path);
+      count += apply(content);
+    }
+    return count;
   }
 
   /** Read a dataset file through the Hub, returning undefined when it is absent. */
@@ -242,6 +280,18 @@ export class DatasetMirror {
   }
 }
 
+/**
+ * Replay one enrichment JSONL file. Rows in the current evidence-bearing
+ * schema flow through `applyEnrichment` as normal. Previous output-contract
+ * rows are ignored, so the queue stays pending until durable reprocessing.
+ */
+function classifyEnrichmentPath(path: string): "receipt" | "attempt" | "registry" | "row" {
+  if (path.startsWith("enrichment/receipts/")) return "receipt";
+  if (path.startsWith("enrichment/attempts/")) return "attempt";
+  if (path.startsWith("enrichment/registry/")) return "registry";
+  return "row";
+}
+
 function applyEnrichmentLines(enrich: EnrichStore, content: string): number {
   let rows = 0;
   for (const line of content.split("\n")) {
@@ -252,12 +302,50 @@ function applyEnrichmentLines(enrich: EnrichStore, content: string): number {
     } catch {
       continue;
     }
-    const parsed = enrichmentRowSchema.safeParse(candidate);
-    if (!parsed.success) continue;
-    enrich.applyEnrichment(parsed.data);
+    const row = parseEnrichmentRow(candidate);
+    if (row === undefined) continue;
+    enrich.applyEnrichment(row);
     rows += 1;
   }
   return rows;
+}
+
+function replayRegistryLines(enrich: EnrichStore, content: string): number {
+  let count = 0;
+  for (const line of content.split("\n")) {
+    if (line.trim() === "") continue;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = freeLabelEventSchema.safeParse(candidate);
+    if (!parsed.success) continue;
+    const event: FreeLabelEvent = parsed.data;
+    enrich.applyRegistryEvent(event);
+    count += 1;
+  }
+  return count;
+}
+
+function replayAttemptLines(enrich: EnrichStore, content: string): number {
+  let count = 0;
+  for (const line of content.split("\n")) {
+    if (line.trim() === "") continue;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const parsed = attemptEventSchema.safeParse(candidate);
+    if (!parsed.success) continue;
+    const event: AttemptEvent = parsed.data;
+    enrich.replayAttemptEvent(event);
+    count += 1;
+  }
+  return count;
 }
 
 /**

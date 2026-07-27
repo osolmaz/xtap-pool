@@ -11,60 +11,117 @@ export const labelConfigSchema = z.object({
 
 export type LabelConfig = z.infer<typeof labelConfigSchema>;
 
-/** A blog-style concept: a short noun phrase plus surface-form aliases. */
-export const conceptSchema = z.object({
-  name: z.string().min(1),
-  aliases: z.array(z.string()).default([]),
-});
+/**
+ * One piece of textual grounding for a label: the tweet the label was drawn
+ * from, plus the exact quote copied out of that tweet's text. The worker
+ * rejects any assignment whose quote is not a verbatim substring of the
+ * named tweet.
+ */
+export const evidenceSchema = z
+  .object({
+    tweet_id: z.string().min(1),
+    quote: z.string().min(1),
+  })
+  .strict();
 
-export type Concept = z.infer<typeof conceptSchema>;
+export type Evidence = z.infer<typeof evidenceSchema>;
+
+/** One label assignment with at least one evidence record. */
+export const labelAssignmentSchema = z
+  .object({
+    name: z.string().min(1),
+    evidence: z.array(evidenceSchema).min(1),
+  })
+  .strict();
+
+export type LabelAssignment = z.infer<typeof labelAssignmentSchema>;
 
 /**
  * One enrichment result for a conversation-author unit, as appended to
  * `enrichment/YYYY/MM/enrichment-YYYY-MM-DD.jsonl` in the pool dataset.
+ *
+ * A current row has exactly the two evidence-bearing output arrays. Historical
+ * output contracts are not parsed into this type and never enter projections.
  */
-export const enrichmentRowSchema = z.object({
-  unit_id: z.string().min(1),
-  tweet_ids: z.array(z.string().min(1)).min(1),
-  labels: z.array(z.string()),
-  free_labels: z.array(z.string()),
-  concepts: z.array(conceptSchema),
-  model: z.string().min(1),
-  taxonomy_version: z.number().int().min(1),
-  enriched_at: z.string().min(1),
-});
+export const enrichmentRowSchema = z
+  .object({
+    unit_id: z.string().min(1),
+    tweet_ids: z
+      .array(z.string().min(1))
+      .min(1)
+      .refine((tweetIds) => new Set(tweetIds).size === tweetIds.length, {
+        message: "tweet_ids must be unique",
+      }),
+    input_hash: z.string().min(1),
+    contract_hash: z.string().min(1),
+    preset_labels: z.array(labelAssignmentSchema),
+    free_labels: z.array(labelAssignmentSchema).max(5),
+    model: z.string().min(1),
+    taxonomy_version: z.number().int().min(1),
+    enriched_at: z.string().min(1),
+  })
+  .strict();
 
 export type EnrichmentRow = z.infer<typeof enrichmentRowSchema>;
 
-/** One concept in the global vocabulary, keyed by its slugified name. */
-export const vocabularyEntrySchema = z.object({
-  slug: z.string().min(1),
-  name: z.string().min(1),
-  aliases: z.array(z.string()).default([]),
-});
-
-export type VocabularyEntry = z.infer<typeof vocabularyEntrySchema>;
-
-/** Shape of `enrichment/vocabulary.json` in the pool dataset. */
-export const vocabularyFileSchema = z.object({
-  version: z.literal(1),
-  updated_at: z.string(),
-  concepts: z.array(vocabularyEntrySchema).default([]),
-});
-
-export type VocabularyFile = z.infer<typeof vocabularyFileSchema>;
-
-/** Parse `enrichment/vocabulary.json` content; invalid input yields an empty list. */
-export function parseVocabularyJson(raw: string): VocabularyEntry[] {
-  let candidate: unknown;
-  try {
-    candidate = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  const parsed = vocabularyFileSchema.safeParse(candidate);
-  return parsed.success ? parsed.data.concepts : [];
+/**
+ * Parse one current enrichment JSONL line. Legacy rows are intentionally
+ * ignored instead of being coerced into the current schema.
+ */
+export function parseEnrichmentRow(candidate: unknown): EnrichmentRow | undefined {
+  const parsed = enrichmentRowSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : undefined;
 }
+
+/**
+ * True when the row was produced under the current evidence-bearing
+ * classification contract. Legacy rows without evidence-bearing arrays
+ * remain history but do not contribute to active reads.
+ */
+export function isCurrentEnrichmentRow(row: EnrichmentRow): boolean {
+  return enrichmentRowSchema.safeParse(row).success;
+}
+
+/**
+ * Compact per-attempt event committed alongside enrichment rows so retry and
+ * blocked state survive across restarts. Written to
+ * `enrichment/attempts/YYYY/MM/attempts-YYYY-MM-DD.jsonl`.
+ */
+export const attemptOutcomeSchema = z.enum([
+  "success",
+  "transient_failure",
+  "invalid_output",
+  "commit_failed",
+  "blocked",
+]);
+
+export type AttemptOutcome = z.infer<typeof attemptOutcomeSchema>;
+
+export const errorClassSchema = z.enum([
+  "timeout",
+  "rate_limit",
+  "provider_5xx",
+  "provider_4xx",
+  "invalid_output",
+  "commit_failed",
+  "other",
+]);
+
+export type ErrorClass = z.infer<typeof errorClassSchema>;
+
+export const attemptEventSchema = z.object({
+  unit_id: z.string().min(1),
+  input_hash: z.string().min(1),
+  contract_hash: z.string().min(1),
+  attempt: z.number().int().min(1),
+  outcome: attemptOutcomeSchema,
+  error_class: errorClassSchema.optional(),
+  error_message: z.string().optional(),
+  at: z.string().min(1),
+  next_retry_at: z.string().min(1).optional(),
+});
+
+export type AttemptEvent = z.infer<typeof attemptEventSchema>;
 
 // --- API response payloads ---
 
@@ -72,7 +129,13 @@ export type LabelCount = LabelConfig & { count: number };
 
 export type FreeLabelCount = { name: string; count: number };
 
-export type QueueDepth = { queued: number; failed: number; done: number };
+export type QueueDepth = {
+  pending: number;
+  running: number;
+  retrying: number;
+  blocked: number;
+  done: number;
+};
 
 export type EnrichmentCoverage = { units_total: number; units_enriched: number };
 
@@ -86,26 +149,51 @@ export type LabelsSummary = {
   coverage: EnrichmentCoverage;
 };
 
-export type ConceptCount = VocabularyEntry & { unit_count: number };
+export type RelatedFreeLabel = { name: string; shared_units: number };
 
-/** `GET /api/concepts` payload. */
-export type ConceptsSummary = { revision: string; concepts: ConceptCount[] };
-
-export type RelatedConcept = { slug: string; name: string; shared_units: number };
-
-/** `GET /api/concepts/:slug` payload. */
-export type ConceptSummary = ConceptCount & {
+/** `GET /api/free-labels/:name` payload. */
+export type FreeLabelDetail = {
   revision: string;
+  name: string;
+  unit_count: number;
   tweet_count: number;
-  related: RelatedConcept[];
+  related: RelatedFreeLabel[];
 };
 
-export type GraphNode = { slug: string; name: string; unit_count: number };
+export type GraphNode = { name: string; unit_count: number };
 
 export type GraphLink = { source: string; target: string; weight: number };
 
-/** `GET /api/graph` payload. */
-export type ConceptGraph = { revision: string; nodes: GraphNode[]; links: GraphLink[] };
+/** `GET /api/graph` payload, computed from approved free-label co-occurrence. */
+export type FreeLabelGraph = { revision: string; nodes: GraphNode[]; links: GraphLink[] };
+
+/** One recent error observed by the worker, for the admin surface. */
+export type ErrorClassBreakdown = { error_class: ErrorClass; count: number };
+
+/**
+ * `GET /api/enrichment/status` payload. Counts describe the selected unit
+ * set (usually author-filtered). `complete_through` is the highest activity
+ * timestamp for which every selected unit has a current result.
+ */
+export type EnrichmentStatus = {
+  revision: string;
+  contract_hash: string;
+  taxonomy_version: number;
+  totals: {
+    total: number;
+    pending: number;
+    running: number;
+    retrying: number;
+    blocked: number;
+    completed: number;
+  };
+  oldest_pending_at?: string;
+  newest_completed_at?: string;
+  complete_through?: string;
+  worker_active: boolean;
+  freshness_lag_seconds?: number;
+  recent_errors: readonly ErrorClassBreakdown[];
+};
 
 /** One enrichment run receipt, appended to `enrichment/receipts/<date>.jsonl`. */
 export type EnrichReceipt = {
@@ -115,16 +203,23 @@ export type EnrichReceipt = {
   calls: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cost_usd?: number | undefined;
   failures: number;
+  retries: number;
+  blocked: number;
+  contract_hash: string;
+  worker_id: string;
+  discarded_assignments: number;
+  new_candidates: number;
+  new_approvals: number;
+  new_rejections: number;
+  stopped_by?: string;
 };
 
 // --- Derivations shared by ingest, worker and explorer ---
 
-/** Dataset path of the concept vocabulary file. */
-export const VOCABULARY_PATH = "enrichment/vocabulary.json";
-
-/** Slug identity of a concept name: lowercase, diacritics stripped, dash-joined. */
-export function slugifyConcept(name: string): string {
+/** Slug identity of a free-label name: lowercase, diacritics stripped, dash-joined. */
+export function slugifyFreeLabel(name: string): string {
   return name
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -155,30 +250,21 @@ export function enrichmentPathFor(enrichedAt: string): string {
   return `enrichment/${year}/${month}/enrichment-${day}.jsonl`;
 }
 
+/** Dataset path of the daily attempt-event JSONL shard for a given timestamp. */
+export function attemptEventPathFor(at: string): string {
+  const day = dayKey(at);
+  const [year, month] = [day.slice(0, 4), day.slice(5, 7)];
+  return `enrichment/attempts/${year}/${month}/attempts-${day}.jsonl`;
+}
+
+/** Dataset path of the daily free-label registry event JSONL shard. */
+export function registryEventPathFor(at: string): string {
+  const day = dayKey(at);
+  const [year, month] = [day.slice(0, 4), day.slice(5, 7)];
+  return `enrichment/registry/${year}/${month}/registry-${day}.jsonl`;
+}
+
 /** Dataset path of the daily enrichment run receipt file. */
 export function receiptPathFor(at: string): string {
   return `enrichment/receipts/${dayKey(at)}.jsonl`;
-}
-
-/**
- * Merge an incoming concept into an existing vocabulary entry (same slug).
- * The existing canonical name wins; aliases are unioned case-insensitively
- * and the canonical name never appears among its own aliases.
- */
-export function mergeConceptEntry(
-  existing: { name: string; aliases: readonly string[] } | undefined,
-  incoming: Concept,
-): { name: string; aliases: string[] } {
-  const name = existing?.name ?? incoming.name.trim();
-  const candidates = [...(existing?.aliases ?? []), ...incoming.aliases, incoming.name];
-  const seen = new Set([name.toLowerCase()]);
-  const aliases: string[] = [];
-  for (const raw of candidates) {
-    const alias = raw.trim();
-    const key = alias.toLowerCase();
-    if (alias.length === 0 || seen.has(key)) continue;
-    seen.add(key);
-    aliases.push(alias);
-  }
-  return { name, aliases };
 }

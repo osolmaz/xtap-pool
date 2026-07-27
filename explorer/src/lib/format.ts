@@ -41,8 +41,8 @@ export function escapeHtml(text: string): string {
 
 /**
  * Tweet text as escaped HTML with URLs, @mentions and #hashtags linkified.
- * Same output as the old React-element rendering, but as a string so the
- * inline concept linker can run over it afterwards.
+ * Same output as the old React-element rendering, represented as a string
+ * for safe direct rendering in a tweet card.
  */
 export function tweetTextHtml(text: string): string {
   return tokenizeTweetText(text)
