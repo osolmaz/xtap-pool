@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
@@ -34,7 +35,7 @@ import {
 } from "./free-label-rules.js";
 
 const ROUTER_URL = "https://router.huggingface.co/v1/chat/completions";
-const UNIT_TEXT_MAX_CHARS = 4000;
+const PROMPT_TOKEN_OVERHEAD = 256;
 const DEFAULT_UNITS_PER_CALL = 6;
 const MAX_FREE_LABELS_PER_UNIT = 5;
 
@@ -53,8 +54,12 @@ const BLOCKED_RETRY_MS = 24 * 60 * 60_000;
 export type LlmMessage = { role: "system" | "user"; content: string };
 export type LlmUsage = { prompt_tokens: number; completion_tokens: number; cost_usd?: number };
 export type LlmResult = { content: string; usage: LlmUsage };
+export type LlmCallOptions = { maxCompletionTokens?: number };
 
-export type LlmClient = (messages: readonly LlmMessage[]) => Promise<LlmResult>;
+export type LlmClient = (
+  messages: readonly LlmMessage[],
+  options?: LlmCallOptions,
+) => Promise<LlmResult>;
 export type LlmPricing = { inputTokenUsd: number; outputTokenUsd: number };
 
 const routerResponseSchema = z.looseObject({
@@ -77,8 +82,11 @@ export function createRouterLlmClient(options: {
 }): LlmClient {
   const fetchFn = options.fetchFn ?? fetch;
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  return async (messages: readonly LlmMessage[]): Promise<LlmResult> => {
-    const response = await fetchWithTimeout(fetchFn, options, messages, timeoutMs);
+  return async (
+    messages: readonly LlmMessage[],
+    callOptions?: LlmCallOptions,
+  ): Promise<LlmResult> => {
+    const response = await fetchWithTimeout(fetchFn, options, messages, timeoutMs, callOptions);
     return handleRouterResponse(response, options.pricing);
   };
 }
@@ -88,6 +96,7 @@ async function fetchWithTimeout(
   options: { hfToken: string; model: string },
   messages: readonly LlmMessage[],
   timeoutMs: number,
+  callOptions?: LlmCallOptions,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => {
@@ -105,6 +114,9 @@ async function fetchWithTimeout(
         messages,
         temperature: 0,
         response_format: { type: "json_object" },
+        ...(callOptions?.maxCompletionTokens === undefined
+          ? {}
+          : { max_tokens: callOptions.maxCompletionTokens }),
       }),
       signal: controller.signal,
     });
@@ -224,19 +236,31 @@ function normalizeHubReference(reference: string): string {
 
 /** A strict, bounded operational review; it cannot create or rename labels. */
 export function createFreeLabelJudge(llm: LlmClient): FreeLabelJudge {
-  return async (name, evidence) => {
+  return async (name, evidence, maxTokens) => {
     const bounded = evidence.slice(0, 12).map((item) => ({
       tweet_id: item.tweet_id,
       quote: item.quote.slice(0, 300),
     }));
-    const result = await llm([
+    const messages: LlmMessage[] = [
       {
         role: "system",
         content:
           'Review one existing free-label candidate. Decide only whether this exact name is a specific, useful AI or local-model subject supported by the supplied quotes. Do not propose, rename, or classify labels. Return strict JSON only: {"decision":"approve"|"reject"|"abstain"}.',
       },
       { role: "user", content: JSON.stringify({ name, evidence: bounded }) },
-    ]);
+    ];
+    const maxCompletionTokens = completionTokensForRemaining(messages, maxTokens);
+    if (maxCompletionTokens === 0) {
+      return {
+        verdict: undefined,
+        usage: { prompt_tokens: 0, completion_tokens: 0 },
+        stopped_by: "max_tokens" as const,
+      };
+    }
+    const result = await llm(
+      messages,
+      maxCompletionTokens === undefined ? undefined : { maxCompletionTokens },
+    );
     let payload: unknown;
     try {
       payload = JSON.parse(result.content);
@@ -270,11 +294,18 @@ export type HubVerifier = (name: string, evidence: readonly LabelAssignment[]) =
 
 /** A constrained reviewer may decide only approval of the supplied name. */
 export type FreeLabelJudgeResult =
-  boolean | undefined | { verdict: boolean | undefined; usage: LlmUsage };
+  | boolean
+  | undefined
+  | {
+      verdict: boolean | undefined;
+      usage: LlmUsage;
+      stopped_by?: "max_tokens";
+    };
 
 export type FreeLabelJudge = (
   name: string,
   evidence: readonly { tweet_id: string; quote: string }[],
+  maxTokens?: number,
 ) => Promise<FreeLabelJudgeResult>;
 
 export type EnrichWorkerDeps = {
@@ -416,7 +447,8 @@ async function drainClaimed(
         : Math.min(size, ceilings.maxUnits - unitsProcessed(receipt));
     if (remainingUnits <= 0) return "max_units";
     const batch = claimed.slice(start, start + remainingUnits);
-    await processBatch(deps, batch, receipt, contractHash);
+    const batchStopped = await processBatch(deps, batch, receipt, contractHash);
+    if (batchStopped !== undefined) return batchStopped;
     start += batch.length;
   }
   return undefined;
@@ -439,30 +471,47 @@ function unitsProcessed(receipt: EnrichReceipt): number {
 }
 
 function promptPosts(deps: EnrichWorkerDeps, unitId: string): PromptPost[] {
-  const members = deps.enrichStore.unitSemanticMembers(unitId);
-  let remaining = UNIT_TEXT_MAX_CHARS;
-  const posts: PromptPost[] = [];
-  for (const member of members) {
-    const clipped = member.text.slice(0, Math.max(0, remaining));
-    posts.push({
-      tweet_id: member.id,
-      text: clipped,
-      conversation_id: member.conversation_id,
-      author_id: member.author_id,
-      author_username: member.author_username,
-      reply_to: member.reply_to,
-      quoted_status_id: member.quoted_status_id,
-      expanded_urls: member.expanded_urls,
-      is_subscriber_only: member.is_subscriber_only,
-      is_retweet: member.is_retweet,
-    });
-    remaining -= clipped.length;
-  }
-  return posts;
+  return deps.enrichStore.unitSemanticMembers(unitId).map((member) => ({
+    tweet_id: member.id,
+    text: member.text,
+    conversation_id: member.conversation_id,
+    author_id: member.author_id,
+    author_username: member.author_username,
+    reply_to: member.reply_to,
+    quoted_status_id: member.quoted_status_id,
+    expanded_urls: member.expanded_urls,
+    is_subscriber_only: member.is_subscriber_only,
+    is_retweet: member.is_retweet,
+  }));
 }
 
 function tokensUsed(receipt: EnrichReceipt): number {
   return receipt.prompt_tokens + receipt.completion_tokens;
+}
+
+function completionTokensForRemaining(
+  messages: readonly LlmMessage[],
+  remainingTokens: number | undefined,
+): number | undefined {
+  if (remainingTokens === undefined) return undefined;
+  const promptUpperBound =
+    PROMPT_TOKEN_OVERHEAD +
+    messages.reduce(
+      (total, message) =>
+        total + Buffer.byteLength(message.role) + Buffer.byteLength(message.content),
+      0,
+    );
+  return Math.max(0, Math.floor(remainingTokens - promptUpperBound));
+}
+
+function completionTokenLimit(
+  messages: readonly LlmMessage[],
+  receipt: EnrichReceipt,
+  ceilings: WorkerCeilings | undefined,
+): number | undefined {
+  const remaining =
+    ceilings?.maxTokens === undefined ? undefined : ceilings.maxTokens - tokensUsed(receipt);
+  return completionTokensForRemaining(messages, remaining);
 }
 
 function errorRate(receipt: EnrichReceipt): number {
@@ -506,15 +555,16 @@ async function processBatch(
   batch: readonly QueueItem[],
   receipt: EnrichReceipt,
   contractHash: string,
-): Promise<void> {
+): Promise<string | undefined> {
   const units: PromptUnit[] = batch.map((item) => ({
     unitId: item.unitId,
     posts: promptPosts(deps, item.unitId),
   }));
   const outcome = await callLlm(deps, units, receipt);
   if (!outcome.ok) {
+    if ("stopped" in outcome) return outcome.stopped;
     await failBatch(deps, batch, receipt, outcome.error, outcome.errorClass, contractHash);
-    return;
+    return undefined;
   }
   const parsed = parseBatchResponse(outcome.content);
   const expectedUnitIds = new Set(batch.map((item) => item.unitId));
@@ -527,25 +577,35 @@ async function processBatch(
       "invalid_output",
       contractHash,
     );
-    return;
+    return undefined;
   }
   await settleBatch(deps, batch, units, parsed, receipt, contractHash);
+  return undefined;
 }
 
 type LlmOutcome =
-  { ok: true; content: string } | { ok: false; error: string; errorClass: ErrorClass };
+  | { ok: true; content: string }
+  | { ok: false; error: string; errorClass: ErrorClass }
+  | { ok: false; stopped: "max_tokens" };
 
+// eslint-disable-next-line complexity -- One boundary accounts for token preflight, provider errors, usage, and fail-closed cost state.
 async function callLlm(
   deps: EnrichWorkerDeps,
   units: readonly PromptUnit[],
   receipt: EnrichReceipt,
 ): Promise<LlmOutcome> {
+  const rejected = [...new Set([...HARD_REJECTED_NAMES, ...deps.enrichStore.rejectedNames()])].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  const messages = buildMessages(deps.taxonomy.labels, rejected, units);
+  const maxCompletionTokens = completionTokenLimit(messages, receipt, deps.ceilings);
+  if (maxCompletionTokens === 0) return { ok: false, stopped: "max_tokens" };
   receipt.calls += 1;
   try {
-    const rejected = [
-      ...new Set([...HARD_REJECTED_NAMES, ...deps.enrichStore.rejectedNames()]),
-    ].sort((left, right) => left.localeCompare(right));
-    const result = await deps.llm(buildMessages(deps.taxonomy.labels, rejected, units));
+    const result = await deps.llm(
+      messages,
+      maxCompletionTokens === undefined ? undefined : { maxCompletionTokens },
+    );
     receipt.prompt_tokens += result.usage.prompt_tokens;
     receipt.completion_tokens += result.usage.completion_tokens;
     if (result.usage.cost_usd === undefined && deps.ceilings?.maxCostUsd !== undefined) {
@@ -1029,10 +1089,18 @@ async function settleRegistryDecisions(
     ) {
       const costStopped = costCallPreflight(receipt, deps.ceilings ?? {});
       if (costStopped !== undefined) return costStopped;
+      const remainingTokens =
+        deps.ceilings?.maxTokens === undefined
+          ? undefined
+          : deps.ceilings.maxTokens - tokensUsed(receipt);
       const reviewed = await deps.judgeFreeLabel(
         name,
         assignments.flatMap((assignment) => assignment.evidence).slice(0, 20),
+        remainingTokens,
       );
+      if (typeof reviewed === "object" && reviewed.stopped_by !== undefined) {
+        return reviewed.stopped_by;
+      }
       const verdict = recordReviewUsage(receipt, reviewed, deps.ceilings);
       if (deps.ceilings?.maxCostUsd !== undefined && receipt.cost_usd === undefined) {
         return "cost_unmeasured";

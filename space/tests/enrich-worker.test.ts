@@ -304,7 +304,7 @@ describe("runEnrichTick", () => {
 
   // The fixture deliberately exercises every semantic input field.
   // eslint-disable-next-line complexity
-  it("keeps every member in a clipped semantic prompt and persists exact queue membership", async () => {
+  it("sends every semantic field without diverging from the full input hash", async () => {
     const root = makePooled({
       id: "100",
       conversation_id: "100",
@@ -339,8 +339,9 @@ describe("runEnrichTick", () => {
     };
     const posts = payload.units[0]?.posts ?? [];
     expect(posts.map((post) => post.tweet_id)).toEqual(["100", "101"]);
+    expect(posts[0]?.text).toHaveLength(4_100);
     expect(posts[1]).toMatchObject({
-      text: "",
+      text: "reply evidence",
       reply_to: "100",
       quoted_status_id: "99",
       is_retweet: true,
@@ -401,6 +402,16 @@ describe("runEnrichTick", () => {
       calls: 0,
     });
     expect(model).not.toHaveBeenCalled();
+  });
+
+  it("stops before a positive token ceiling too small for the full prompt", async () => {
+    const unitId = seedUnit("100", "x".repeat(2_000));
+    const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
+    await expect(
+      runEnrichTick(deps(model, { ceilings: { maxTokens: 100 } })),
+    ).resolves.toMatchObject({ stopped_by: "max_tokens", calls: 0 });
+    expect(model).not.toHaveBeenCalled();
+    expect(enrichStore.queueEntry(unitId)?.status).toBe("pending");
   });
 
   it("rejects any model unit that has a third output key", async () => {
@@ -690,7 +701,7 @@ describe("createRouterLlmClient", () => {
       model: "zai-org/GLM-5.2",
       fetchFn,
     });
-    const result = await client([{ role: "user", content: "hi" }]);
+    const result = await client([{ role: "user", content: "hi" }], { maxCompletionTokens: 42 });
     expect(result).toEqual({
       content: '{"units":{}}',
       usage: { prompt_tokens: 5, completion_tokens: 3 },
@@ -703,6 +714,7 @@ describe("createRouterLlmClient", () => {
       model: "zai-org/GLM-5.2",
       temperature: 0,
       response_format: { type: "json_object" },
+      max_tokens: 42,
     });
   });
 
@@ -858,5 +870,11 @@ describe("registry verifiers", () => {
     await expect(
       createFreeLabelJudge(abstains)("vllm", [{ tweet_id: "1", quote: "vLLM is fast" }]),
     ).resolves.toMatchObject({ verdict: undefined });
+
+    const capped = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
+    await expect(
+      createFreeLabelJudge(capped)("vllm", [{ tweet_id: "1", quote: "vLLM is fast" }], 1),
+    ).resolves.toMatchObject({ verdict: undefined, stopped_by: "max_tokens" });
+    expect(capped).not.toHaveBeenCalled();
   });
 });
