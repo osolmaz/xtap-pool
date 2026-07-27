@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      DATA_DIR: ${{ runner.temp }}/xtap-pool-enrichment
+      DATA_DIR: /tmp/xtap-pool-enrichment
       DATASET_REPO: ${{ vars.XTAP_DATASET_REPO }}
       HF_TOKEN: ${{ secrets.XTAP_DATASET_WRITER_TOKEN }}
       INFERENCE_TOKEN: ${{ secrets.XTAP_INFERENCE_TOKEN }}
