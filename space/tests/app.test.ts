@@ -542,7 +542,7 @@ describe("enrichment endpoints", () => {
         retrying: number;
         running: number;
       };
-      worker_active: boolean;
+      worker_recently_completed: boolean;
       recent_errors: unknown[];
     };
     expect(body.author_ids).toEqual(["author-allowed"]);
@@ -552,7 +552,7 @@ describe("enrichment endpoints", () => {
     expect(body.complete_through).toBeDefined();
     expect(body.totals.total).toBe(1);
     expect(body.totals.completed).toBe(1);
-    expect(body.worker_active).toBe(false);
+    expect(body.worker_recently_completed).toBe(false);
     expect(Array.isArray(body.recent_errors)).toBe(true);
     // No selection filter given → the endpoint sees the whole pool
     const wide = await app.request("/api/enrichment/status", { headers });
@@ -566,14 +566,14 @@ describe("enrichment endpoints", () => {
     expect(stale.status).toBe(409);
   });
 
-  it("uses the newest durable receipt for the worker activity signal", async () => {
+  it("uses the newest durable receipt for the recent-completion signal", async () => {
     enrich.lastReceipt = () => EMPTY_RECEIPT;
     const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
     const response = await app.request("/api/enrichment/status", {
       headers: { authorization: `Bearer ${issued.token}` },
     });
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ worker_active: true });
+    await expect(response.json()).resolves.toMatchObject({ worker_recently_completed: true });
   });
 
   it("applies a cutoff to /api/free-labels", async () => {
@@ -600,12 +600,12 @@ describe("enrichment endpoints", () => {
       viewer: { username: string };
       contract_hash: string;
       totals: { total: number };
-      worker_active: boolean;
+      worker_recently_completed: boolean;
     };
     expect(body.viewer.username).toBe("osolmaz");
     expect(body.contract_hash.length).toBeGreaterThan(10);
     expect(body.totals.total).toBeGreaterThan(0);
-    expect(body.worker_active).toBe(false);
+    expect(body.worker_recently_completed).toBe(false);
     // Non-admins are rejected
     const nonAdmin = await app.request("/api/admin/enrichment", {
       headers: { cookie: sessionCookie("alice") },

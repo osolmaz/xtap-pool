@@ -155,7 +155,7 @@ describe("explorer API", () => {
           return Response.json({
             contract_hash: "hash",
             totals: { pending: 0, running: 0, retrying: 0, blocked: 0, completed: 0 },
-            worker_active: false,
+            worker_recently_completed: false,
             recent_errors: [],
           });
         if (path === "/api/admin/free-labels")

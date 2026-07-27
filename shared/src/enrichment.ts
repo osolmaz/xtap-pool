@@ -191,7 +191,7 @@ export type EnrichmentStatus = {
   oldest_pending_at?: string;
   newest_completed_at?: string;
   complete_through?: string;
-  worker_active: boolean;
+  worker_recently_completed: boolean;
   freshness_lag_seconds?: number;
   recent_errors: readonly ErrorClassBreakdown[];
 };

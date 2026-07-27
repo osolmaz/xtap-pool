@@ -745,7 +745,7 @@ function buildEnrichmentSurface(
   const counts = deps.enrich.store.statusCounts(selection);
   const recent = deps.enrich.store.recentErrorClasses();
   const workerReceipt = deps.enrich.lastReceipt?.();
-  const workerActive =
+  const workerRecentlyCompleted =
     workerReceipt !== undefined &&
     now().getTime() - Date.parse(workerReceipt.finished_at) < 15 * 60_000;
   const freshnessLagSeconds = freshnessLag(now(), counts.newestCompletedAt);
@@ -756,7 +756,7 @@ function buildEnrichmentSurface(
     ...maybe("oldest_pending_at", counts.oldestPendingAt),
     ...maybe("newest_completed_at", counts.newestCompletedAt),
     ...maybe("complete_through", counts.completeThrough),
-    worker_active: workerActive,
+    worker_recently_completed: workerRecentlyCompleted,
     ...(includeReceipt && workerReceipt !== undefined ? { last_receipt: workerReceipt } : {}),
     ...maybe("freshness_lag_seconds", freshnessLagSeconds),
     recent_errors: recent,

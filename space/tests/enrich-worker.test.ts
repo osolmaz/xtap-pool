@@ -718,7 +718,7 @@ describe("createRouterLlmClient", () => {
     });
   });
 
-  it("throws on router errors and tolerates missing usage", async () => {
+  it("throws on router errors and incomplete usage", async () => {
     const failingFetch: typeof fetch = () => Promise.resolve(new Response("nope", { status: 500 }));
     const failing = createRouterLlmClient({ hfToken: "t", model: "m", fetchFn: failingFetch });
     await expect(failing([{ role: "user", content: "hi" }])).rejects.toThrow(
@@ -728,10 +728,16 @@ describe("createRouterLlmClient", () => {
     const noUsageFetch: typeof fetch = () =>
       Promise.resolve(Response.json({ choices: [{ message: { content: "{}" } }] }));
     const noUsage = createRouterLlmClient({ hfToken: "t", model: "m", fetchFn: noUsageFetch });
-    await expect(noUsage([{ role: "user", content: "hi" }])).resolves.toEqual({
-      content: "{}",
-      usage: { prompt_tokens: 0, completion_tokens: 0 },
+    await expect(noUsage([{ role: "user", content: "hi" }])).rejects.toThrow();
+
+    const incompleteUsageFetch: typeof fetch = () =>
+      Promise.resolve(Response.json({ choices: [{ message: { content: "{}" } }], usage: {} }));
+    const incompleteUsage = createRouterLlmClient({
+      hfToken: "t",
+      model: "m",
+      fetchFn: incompleteUsageFetch,
     });
+    await expect(incompleteUsage([{ role: "user", content: "hi" }])).rejects.toThrow();
   });
 
   it("classifies rate-limit, provider and timeout failures", async () => {
@@ -772,7 +778,13 @@ describe("createRouterLlmClient", () => {
 
   it("uses provider-reported direct and usage costs before configured pricing", async () => {
     const direct: typeof fetch = () =>
-      Promise.resolve(Response.json({ cost: 0.3, choices: [{ message: { content: "{}" } }] }));
+      Promise.resolve(
+        Response.json({
+          cost: 0.3,
+          choices: [{ message: { content: "{}" } }],
+          usage: { prompt_tokens: 0, completion_tokens: 0 },
+        }),
+      );
     const usage: typeof fetch = () =>
       Promise.resolve(
         Response.json({

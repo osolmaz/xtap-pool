@@ -43,7 +43,7 @@ function stubApi(): ReturnType<typeof vi.fn> {
       return Response.json({
         contract_hash: "hash",
         totals: { pending: 2, running: 0, retrying: 1, blocked: 0, completed: 9 },
-        worker_active: true,
+        worker_recently_completed: true,
         recent_errors: [],
       });
     if (path === "/api/admin/free-labels")
@@ -83,7 +83,7 @@ describe("AdminPanel", () => {
   it("shows worker and candidate status and performs membership, organization, and account actions", async () => {
     const fetchMock = stubApi();
     render(<AdminPanel />);
-    await screen.findByText(/Worker active/);
+    await screen.findByText(/Worker recently completed/);
     expect(screen.getByText(/Free labels: 1 candidate/)).toBeDefined();
     expect(screen.getByText("t: vllm")).toBeDefined();
     fireEvent.change(await screen.findByLabelText("Service account name"), {
@@ -124,7 +124,7 @@ describe("AdminPanel", () => {
           return Response.json({
             contract_hash: "hash",
             totals: { pending: 0, running: 0, retrying: 0, blocked: 0, completed: 0 },
-            worker_active: false,
+            worker_recently_completed: false,
             recent_errors: [],
           });
         if (path === "/api/admin/free-labels")
@@ -148,7 +148,7 @@ describe("AdminPanel", () => {
     );
     render(<AdminPanel />);
     await screen.findByText("invalid pool config");
-    expect(screen.getByText(/Worker idle/)).toBeDefined();
+    expect(screen.getByText(/No recent run/)).toBeDefined();
     await screen.findByText("invalid service accounts");
     fireEvent.click(screen.getByText("Replace with bootstrap membership"));
     fireEvent.click(screen.getByText("Replace with empty registry"));

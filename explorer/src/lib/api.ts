@@ -64,7 +64,7 @@ export type AdminEnrichment = {
     blocked: number;
     completed: number;
   };
-  worker_active: boolean;
+  worker_recently_completed: boolean;
   freshness_lag_seconds?: number;
   recent_errors: readonly { error_class: string; count: number }[];
 };

@@ -66,11 +66,10 @@ const routerResponseSchema = z.looseObject({
   choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1),
   usage: z
     .object({
-      prompt_tokens: z.number().default(0),
-      completion_tokens: z.number().default(0),
+      prompt_tokens: z.number().int().nonnegative(),
+      completion_tokens: z.number().int().nonnegative(),
     })
-    .loose()
-    .optional(),
+    .loose(),
 });
 
 export function createRouterLlmClient(options: {
@@ -136,7 +135,6 @@ function routerErrorClass(status: number): ErrorClass {
   return "provider_4xx";
 }
 
-// eslint-disable-next-line complexity -- Response validation keeps provider errors, schema checks, usage, and pricing fail-closed in one boundary.
 async function handleRouterResponse(response: Response, pricing?: LlmPricing): Promise<LlmResult> {
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
@@ -150,8 +148,8 @@ async function handleRouterResponse(response: Response, pricing?: LlmPricing): P
   return {
     content: parsed.choices[0]?.message.content ?? "",
     usage: {
-      prompt_tokens: parsed.usage?.prompt_tokens ?? 0,
-      completion_tokens: parsed.usage?.completion_tokens ?? 0,
+      prompt_tokens: parsed.usage.prompt_tokens,
+      completion_tokens: parsed.usage.completion_tokens,
       ...(cost === undefined ? {} : { cost_usd: cost }),
     },
   };

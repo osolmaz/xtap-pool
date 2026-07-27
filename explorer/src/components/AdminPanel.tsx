@@ -116,8 +116,8 @@ export function AdminPanel(): React.JSX.Element {
           <p className="text-sm text-(--x-muted)">Loading worker status…</p>
         ) : (
           <p className="text-sm text-(--x-muted)">
-            {enrichment.worker_active ? "Worker active" : "Worker idle"} · pending{" "}
-            {enrichment.totals.pending} · retrying {enrichment.totals.retrying} · blocked{" "}
+            {enrichment.worker_recently_completed ? "Worker recently completed" : "No recent run"} ·
+            pending {enrichment.totals.pending} · retrying {enrichment.totals.retrying} · blocked{" "}
             {enrichment.totals.blocked} · complete {enrichment.totals.completed}
           </p>
         )}
