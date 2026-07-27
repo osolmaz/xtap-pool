@@ -517,6 +517,24 @@ function errorRate(receipt: EnrichReceipt): number {
   return processed === 0 ? 0 : receipt.failures / processed;
 }
 
+function qualityCeilingHit(receipt: EnrichReceipt, ceilings: WorkerCeilings): string | undefined {
+  if (
+    ceilings.maxErrorRate !== undefined &&
+    receipt.failures > 0 &&
+    errorRate(receipt) >= ceilings.maxErrorRate
+  ) {
+    return "max_error_rate";
+  }
+  if (
+    ceilings.maxDiscardedAssignments !== undefined &&
+    receipt.discarded_assignments > 0 &&
+    receipt.discarded_assignments >= ceilings.maxDiscardedAssignments
+  ) {
+    return "max_discarded_assignments";
+  }
+  return undefined;
+}
+
 function ceilingHit(
   receipt: EnrichReceipt,
   ceilings: WorkerCeilings,
@@ -524,13 +542,13 @@ function ceilingHit(
   startedAt: number,
 ): string | undefined {
   if (ceilings.maxCostUsd !== undefined && receipt.cost_usd === undefined) return "cost_unmeasured";
+  const qualityStopped = qualityCeilingHit(receipt, ceilings);
+  if (qualityStopped !== undefined) return qualityStopped;
   const checks: [number | undefined, number, string][] = [
     [ceilings.maxUnits, unitsProcessed(receipt), "max_units"],
     [ceilings.maxTokens, tokensUsed(receipt), "max_tokens"],
     [ceilings.maxElapsedMs, now().getTime() - startedAt, "max_elapsed"],
-    [ceilings.maxErrorRate, errorRate(receipt), "max_error_rate"],
     [ceilings.maxCostUsd, receipt.cost_usd ?? 0, "max_cost_usd"],
-    [ceilings.maxDiscardedAssignments, receipt.discarded_assignments, "max_discarded_assignments"],
   ];
   for (const [limit, current, name] of checks) {
     if (limit !== undefined && current >= limit) return name;
@@ -560,7 +578,9 @@ async function processBatch(
   }));
   const outcome = await callLlm(deps, units, receipt);
   if (!outcome.ok) {
-    if ("stopped" in outcome) return outcome.stopped;
+    if ("stopped" in outcome) {
+      return handlePromptTokenStop(deps, batch, units, receipt, contractHash);
+    }
     await failBatch(deps, batch, receipt, outcome.error, outcome.errorClass, contractHash);
     return undefined;
   }
@@ -586,16 +606,53 @@ type LlmOutcome =
   | { ok: false; error: string; errorClass: ErrorClass }
   | { ok: false; stopped: "max_tokens" };
 
+async function handlePromptTokenStop(
+  deps: EnrichWorkerDeps,
+  batch: readonly QueueItem[],
+  units: readonly PromptUnit[],
+  receipt: EnrichReceipt,
+  contractHash: string,
+): Promise<string | undefined> {
+  if (batch.length > 1) {
+    const middle = Math.ceil(batch.length / 2);
+    const firstStopped = await processBatch(deps, batch.slice(0, middle), receipt, contractHash);
+    if (firstStopped !== undefined) return firstStopped;
+    return processBatch(deps, batch.slice(middle), receipt, contractHash);
+  }
+  const item = batch[0];
+  if (item !== undefined && unitPromptExceedsRunCeiling(deps, units)) {
+    await blockOversizedUnit(deps, item, receipt, contractHash);
+    return undefined;
+  }
+  return "max_tokens";
+}
+
+function messagesForUnits(deps: EnrichWorkerDeps, units: readonly PromptUnit[]): LlmMessage[] {
+  const rejected = [...new Set([...HARD_REJECTED_NAMES, ...deps.enrichStore.rejectedNames()])].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  return buildMessages(deps.taxonomy.labels, rejected, units);
+}
+
+function unitPromptExceedsRunCeiling(
+  deps: EnrichWorkerDeps,
+  units: readonly PromptUnit[],
+): boolean {
+  const maxTokens = deps.ceilings?.maxTokens;
+  return (
+    maxTokens !== undefined &&
+    maxTokens > 0 &&
+    completionTokensForRemaining(messagesForUnits(deps, units), maxTokens) === 0
+  );
+}
+
 // eslint-disable-next-line complexity -- One boundary accounts for token preflight, provider errors, usage, and fail-closed cost state.
 async function callLlm(
   deps: EnrichWorkerDeps,
   units: readonly PromptUnit[],
   receipt: EnrichReceipt,
 ): Promise<LlmOutcome> {
-  const rejected = [...new Set([...HARD_REJECTED_NAMES, ...deps.enrichStore.rejectedNames()])].sort(
-    (left, right) => left.localeCompare(right),
-  );
-  const messages = buildMessages(deps.taxonomy.labels, rejected, units);
+  const messages = messagesForUnits(deps, units);
   const maxCompletionTokens = completionTokenLimit(messages, receipt, deps.ceilings);
   if (maxCompletionTokens === 0) return { ok: false, stopped: "max_tokens" };
   receipt.calls += 1;
@@ -889,6 +946,30 @@ function stampRegistryEvents(
 ): FreeLabelEvent[] {
   const base = deps.enrichStore.registryRevision();
   return events.map((event, index) => ({ ...event, registry_revision: base + index + 1 }));
+}
+
+async function blockOversizedUnit(
+  deps: EnrichWorkerDeps,
+  item: QueueItem,
+  receipt: EnrichReceipt,
+  contractHash: string,
+): Promise<void> {
+  const at = deps.now();
+  await persistAttemptAndApply(deps, {
+    unit_id: item.unitId,
+    input_hash: item.inputHash,
+    contract_hash: contractHash,
+    attempt: item.attempts + 1,
+    outcome: "blocked",
+    error_class: "other",
+    error_message: "unit prompt exceeds the configured full-run token ceiling",
+    at: at.toISOString(),
+    first_queued_at: item.firstQueuedAt,
+    next_retry_at: new Date(at.getTime() + BLOCKED_RETRY_MS).toISOString(),
+  });
+  receipt.failures += 1;
+  receipt.retries += 1;
+  receipt.blocked += 1;
 }
 
 async function failBatch(

@@ -404,14 +404,64 @@ describe("runEnrichTick", () => {
     expect(model).not.toHaveBeenCalled();
   });
 
-  it("stops before a positive token ceiling too small for the full prompt", async () => {
+  it("durably blocks a unit whose full prompt cannot fit the run token ceiling", async () => {
     const unitId = seedUnit("100", "x".repeat(2_000));
     const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
     await expect(
       runEnrichTick(deps(model, { ceilings: { maxTokens: 100 } })),
-    ).resolves.toMatchObject({ stopped_by: "max_tokens", calls: 0 });
+    ).resolves.toMatchObject({ calls: 0, failures: 1, retries: 1, blocked: 1 });
     expect(model).not.toHaveBeenCalled();
-    expect(enrichStore.queueEntry(unitId)?.status).toBe("pending");
+    expect(enrichStore.queueEntry(unitId)).toMatchObject({
+      status: "blocked",
+      attempts: 1,
+      lastError: "unit prompt exceeds the configured full-run token ceiling",
+    });
+    expect(hubJson("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl")).toMatchObject({
+      unit_id: unitId,
+      outcome: "blocked",
+    });
+  });
+
+  it("isolates an oversized unit and continues with other claimed work", async () => {
+    const oversized = seedUnit("100", "x".repeat(20_000));
+    const normal = seedUnit("101", "vllm ships fp8 kernels");
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxUnitsPerTick: 2,
+        unitsPerCall: 2,
+        ceilings: { maxTokens: 8_000 },
+      }),
+    );
+    expect(receipt).toMatchObject({ calls: 1, units: 1, failures: 1, blocked: 1 });
+    expect(enrichStore.queueEntry(oversized)?.status).toBe("blocked");
+    expect(enrichStore.queueEntry(normal)?.status).toBe("done");
+  });
+
+  it("allows clean work under zero-valued error and discard ceilings", async () => {
+    seedUnit("100", "vllm ships fp8 kernels");
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        ceilings: { maxErrorRate: 0, maxDiscardedAssignments: 0 },
+      }),
+    );
+    expect(receipt).toMatchObject({ calls: 1, units: 1, failures: 0, discarded_assignments: 0 });
+    expect(receipt.stopped_by).toBeUndefined();
+  });
+
+  it("stops after the first failure under a zero error-rate ceiling", async () => {
+    const first = seedUnit("100", "first");
+    const second = seedUnit("101", "second");
+    const failing: LlmClient = () => Promise.reject(new Error("router down"));
+    const receipt = await runEnrichTick(
+      deps(failing, {
+        maxUnitsPerTick: 2,
+        unitsPerCall: 1,
+        ceilings: { maxErrorRate: 0 },
+      }),
+    );
+    expect(receipt).toMatchObject({ calls: 1, failures: 1, stopped_by: "max_error_rate" });
+    expect(enrichStore.queueEntry(first)?.status).toBe("retrying");
+    expect(enrichStore.queueEntry(second)?.status).toBe("pending");
   });
 
   it("rejects any model unit that has a third output key", async () => {
