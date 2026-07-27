@@ -62,7 +62,7 @@ export type SpaceConfig = {
 };
 
 /** Parse and normalize configuration from environment variables. Throws on invalid config. */
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- Cross-field credential, pricing, and ceiling invariants are validated at one configuration boundary.
 export function loadConfig(env: Record<string, string | undefined>): SpaceConfig {
   const parsed = configSchema.parse(env);
   if (parsed.ENRICH_ENABLED === "true" && parsed.INFERENCE_TOKEN === undefined) {

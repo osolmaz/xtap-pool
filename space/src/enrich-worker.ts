@@ -124,7 +124,7 @@ function routerErrorClass(status: number): ErrorClass {
   return "provider_4xx";
 }
 
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- Response validation keeps provider errors, schema checks, usage, and pricing fail-closed in one boundary.
 async function handleRouterResponse(response: Response, pricing?: LlmPricing): Promise<LlmResult> {
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
@@ -145,7 +145,7 @@ async function handleRouterResponse(response: Response, pricing?: LlmPricing): P
   };
 }
 
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- Provider-reported and configured pricing paths are validated together to fail closed.
 function routerCost(value: Record<string, unknown>, pricing?: LlmPricing): number | undefined {
   const direct = value["cost"];
   if (typeof direct === "number" && Number.isFinite(direct) && direct >= 0) return direct;
@@ -357,7 +357,7 @@ function initReceipt(contractHash: string, workerId: string, now: () => Date): E
   };
 }
 
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- One transaction-aware coordinator must enforce all shared run ceilings and durable transitions.
 export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichReceipt> {
   const workerId = deps.workerId ?? randomUUID();
   const contractHash = contractHashFor(deps);
@@ -979,7 +979,7 @@ async function persistRowsAndEvents(
  * constrained review are injected so this module never reaches for ambient
  * credentials or turns a reviewer into another label generator.
  */
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- Registry settlement applies all promotion, rejection, review, evidence, and ceiling rules together.
 async function settleRegistryDecisions(
   deps: EnrichWorkerDeps,
   receipt: EnrichReceipt,

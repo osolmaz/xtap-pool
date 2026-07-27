@@ -36,7 +36,7 @@ function sortMemberOrgs(orgs: readonly MemberOrgGrant[]): MemberOrgGrant[] {
   return [...orgs].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// eslint-disable-next-line complexity
+// eslint-disable-next-line complexity -- This stateful admin surface coordinates several independent controls.
 export function AdminPanel(): React.JSX.Element {
   const [state, setState] = useState<AdminState>({ status: "loading" });
   const [memberInput, setMemberInput] = useState("");
