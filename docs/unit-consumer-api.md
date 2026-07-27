@@ -22,10 +22,10 @@ Creating or copying the credential into another secret store is an explicit oper
 ## Enriched units
 
 ```http
-GET /api/units?labels=ai,local-models&label_mode=any&publication=public-original&limit=200
+GET /api/units?author_ids=123,456&labels=ai,local-models&label_mode=any&publication=public-original&limit=200
 ```
 
-The endpoint accepts the tweet query's contributor, author, text, date, media, article, preset-label, free-label, concept, unlabeled, and limit filters. `label_mode` is `any` or `all`; consumers should set it explicitly.
+The endpoint accepts the tweet query's contributor, author, author-ID, text, date, media, article, preset-label, free-label, concept, unlabeled, and limit filters. `author_ids` is a comma-separated exact allowlist of immutable X user IDs. It does not fuzzy-match handles. `label_mode` is `any` or `all`; consumers should set it explicitly.
 
 `publication=public-original` excludes an entire unit if any member post is subscriber-only and excludes units containing only retweets. Use this filter for public projections. Apply the same parameter to concept and graph reads so taxonomy names, counts, and edge weights come from exactly the publishable unit set.
 
@@ -69,17 +69,18 @@ The first page returns a result `revision`. Every cursor embeds that revision. A
 
 Discard the partial result and restart from page one. Invalid cursors return `400`.
 
-The labels, concepts, concept detail, and graph responses also return `revision`. Pass the unit revision as their `revision` query parameter. Concept and graph reads accept the same `labels=<csv>`, `label_mode=any|all`, and `publication=public-original` selection. They return only concepts and graph data from matching publishable units. A revision mismatch returns `409`, preventing one publication from mixing source states.
+The labels, concepts, concept detail, and graph responses also return `revision`. Pass the unit revision as their `revision` query parameter. Concept and graph reads accept the same `author_ids=<csv>`, `labels=<csv>`, `label_mode=any|all`, and `publication=public-original` selection. They return only concepts and graph data from matching publishable units. A revision mismatch returns `409`, preventing one publication from mixing source states or counting authors outside the selected boundary.
 
 ## Static publication
 
 A static downstream application should:
 
 1. Require `GET /readyz` to be ready.
-2. Download every unit page into a temporary local result.
-3. Fetch taxonomy and graph data at the same revision.
-4. Validate the complete response.
-5. Upload an immutable snapshot.
-6. Replace a small current-manifest object only after the snapshot is uploaded and verified.
+2. Load and validate the consumer's exact author-ID allowlist.
+3. Download every unit page with that `author_ids` selection into a temporary local result.
+4. Fetch taxonomy and graph data at the same revision and with the same author IDs.
+5. Validate the complete response and reject any unit outside the allowlist.
+6. Upload an immutable snapshot.
+7. Replace a small current-manifest object only after the snapshot is uploaded and verified.
 
 On any error, leave the previous manifest unchanged. Never expose the service credential to browser code and do not silently fall back to raw dataset scanning.

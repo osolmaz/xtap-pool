@@ -134,9 +134,9 @@ describe("queue state machine", () => {
 describe("label and concept query filters", () => {
   beforeEach(() => {
     insertAndRegister([
-      { id: "1", text: "vllm ships fp8", author: { username: "a" } },
-      { id: "2", text: "agents everywhere", author: { username: "b" } },
-      { id: "3", text: "unrelated", author: { username: "c" } },
+      { id: "1", text: "vllm ships fp8", author: { id: "author-a", username: "a" } },
+      { id: "2", text: "agents everywhere", author: { id: "author-b", username: "b" } },
+      { id: "3", text: "unrelated", author: { id: "author-c", username: "c" } },
     ]);
     enrich.applyEnrichment(
       row({
@@ -167,13 +167,46 @@ describe("label and concept query filters", () => {
     expect(ids({ labels: ["quantization"] })).toEqual([]);
   });
 
-  it("filters by free label, concept and unlabeled", () => {
+  it("filters by free label, concept, author ID and unlabeled", () => {
     const ids = (q: Parameters<TweetStore["query"]>[0]): string[] =>
       store.query(q).records.map((record) => record.tweet.id);
     expect(ids({ freeLabel: "fp8" })).toEqual(["1"]);
     expect(ids({ concept: "coding-agents" })).toEqual(["2"]);
+    expect(ids({ authorIds: ["author-a", "author-c"] }).sort()).toEqual(["1", "3"]);
     expect(ids({ unlabeled: true })).toEqual(["3"]);
     expect(ids({ labels: ["ai"], q: "vllm" })).toEqual(["1"]);
+  });
+
+  it("uses the same fail-closed author-ID selection for concepts, details and graph data", () => {
+    insertAndRegister([
+      {
+        id: "4",
+        conversation_id: "mixed",
+        author: { id: "author-a", username: "shared" },
+      },
+      {
+        id: "5",
+        conversation_id: "mixed",
+        author: { id: "author-outside", username: "shared" },
+      },
+    ]);
+    enrich.applyEnrichment(
+      row({
+        unit_id: "mixed:shared",
+        tweet_ids: ["4", "5"],
+        concepts: [{ name: "Mixed Author Concept", aliases: [] }],
+      }),
+    );
+
+    expect(enrich.concepts({ authorIds: ["author-a"] })).toEqual([
+      expect.objectContaining({ slug: "vllm", unit_count: 1 }),
+    ]);
+    expect(enrich.concept("coding-agents", { authorIds: ["author-a"] })).toBeUndefined();
+    expect(enrich.concept("mixed-author-concept", { authorIds: ["author-a"] })).toBeUndefined();
+    expect(enrich.graph({ authorIds: ["author-a"], top: 10 })).toEqual({
+      nodes: [{ slug: "vllm", name: "vLLM", unit_count: 1 }],
+      links: [],
+    });
   });
 });
 

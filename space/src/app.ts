@@ -90,6 +90,7 @@ type AuthorizedIdentity = PoolIdentity & {
 const tweetsQuerySchema = z.object({
   contributors: z.string().optional(),
   author: z.string().optional(),
+  author_ids: z.string().optional(),
   q: z.string().optional(),
   since: z.string().optional(),
   until: z.string().optional(),
@@ -107,6 +108,7 @@ const tweetsQuerySchema = z.object({
 });
 
 const taxonomyQuerySchema = z.object({
+  author_ids: z.string().optional(),
   labels: z.string().optional(),
   label_mode: z.enum(["any", "all"]).default("any"),
   publication: z.enum(["public-original"]).optional(),
@@ -149,6 +151,7 @@ function toFilteredQuery(raw: z.infer<typeof tweetsQuerySchema>): TweetQuery {
     limit: raw.limit,
     contributors: parseCsv(raw.contributors),
     author: raw.author,
+    authorIds: parseCsv(raw.author_ids),
     q: raw.q,
     since: raw.since,
     until: raw.until,
@@ -414,6 +417,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({
       revision,
       concepts: deps.enrich.store.concepts({
+        authorIds: parseCsv(parsed.data.author_ids),
         labels: parseCsv(parsed.data.labels),
         labelMode: parsed.data.label_mode,
         publication: parsed.data.publication,
@@ -428,6 +432,7 @@ export function createApp(deps: AppDeps): Hono {
     const revision = checkedRevision(parsed.data.revision, unitStore);
     if (revision instanceof Response) return revision;
     const concept = deps.enrich.store.concept(c.req.param("slug"), {
+      authorIds: parseCsv(parsed.data.author_ids),
       labels: parseCsv(parsed.data.labels),
       labelMode: parsed.data.label_mode,
       publication: parsed.data.publication,
@@ -445,6 +450,7 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({
       revision,
       ...deps.enrich.store.graph({
+        authorIds: parseCsv(parsed.data.author_ids),
         labels: parseCsv(parsed.data.labels),
         labelMode: parsed.data.label_mode,
         publication: parsed.data.publication,
