@@ -187,6 +187,29 @@ export class EnrichStore {
   }
 
   setContractHash(contractHash: string): void {
+    if (contractHash === this.contractHash) return;
+    const changedAt = this.now().toISOString();
+    const invalidate = this.db.transaction(() => {
+      for (const table of [
+        "label_evidence",
+        "label_assignments",
+        "enrichment",
+        "free_label_registry",
+        "recent_errors",
+      ]) {
+        this.db.prepare(`DELETE FROM ${table}`).run();
+      }
+      this.db
+        .prepare(
+          `UPDATE enrich_queue SET
+             status = 'pending', attempts = 0, last_error = NULL, last_error_class = NULL,
+             taxonomy_version = ?, contract_hash = ?, next_retry_at = NULL,
+             lease_owner = NULL, lease_expires_at = NULL, updated_at = ?`,
+        )
+        .run(this.taxonomyVersion, contractHash, changedAt);
+      this.db.prepare("UPDATE registry_revision SET revision = 1 WHERE singleton = 1").run();
+    });
+    invalidate();
     this.contractHash = contractHash;
   }
 

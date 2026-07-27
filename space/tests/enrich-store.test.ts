@@ -145,11 +145,24 @@ describe("unit derivation and enqueue", () => {
     enrich.markTransientFailure("100:someone", "boom", "other", NOW);
     expect(enrich.queueEntry("100:someone")?.attempts).toBe(1);
     enrich.setContractHash("different-contract");
-    insertAndRegister([{ id: "100" }]);
     const after = enrich.queueEntry("100:someone");
     expect(after?.status).toBe("pending");
     expect(after?.attempts).toBe(0);
     expect(after?.contractHash).toBe("different-contract");
+  });
+
+  it("withholds completed assignments immediately when the contract changes", () => {
+    insertAndRegister([{ id: "100" }]);
+    enrich.applyEnrichment(row());
+    enrich.recordCandidateIfNew("test-label");
+    expect(enrich.visibleAssignments(["100:someone"]).has("100:someone")).toBe(true);
+    expect(enrich.registrySnapshot()).not.toEqual([]);
+
+    enrich.setContractHash("different-contract");
+
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+    expect(enrich.visibleAssignments(["100:someone"]).has("100:someone")).toBe(false);
+    expect(enrich.registrySnapshot()).toEqual([]);
   });
 });
 
