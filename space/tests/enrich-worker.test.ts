@@ -198,6 +198,7 @@ describe("runEnrichTick", () => {
               free_labels: [
                 { name: "fp8", evidence: [{ tweet_id: "100", quote: "fp8" }] },
                 { name: "fp8", evidence: [{ tweet_id: "100", quote: "fp8" }] },
+                { name: "AI", evidence: [{ tweet_id: "100", quote: "vllm" }] },
                 { name: "blocked-label", evidence: [{ tweet_id: "100", quote: "vllm" }] },
               ],
             },
@@ -206,7 +207,7 @@ describe("runEnrichTick", () => {
         usage: { prompt_tokens: 0, completion_tokens: 0 },
       });
     const receipt = await runEnrichTick(deps(model));
-    expect(receipt.discarded_assignments).toBe(4);
+    expect(receipt.discarded_assignments).toBe(5);
     const row = JSON.parse(
       hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "{}",
     ) as { preset_labels: { name: string }[]; free_labels: { name: string }[] };

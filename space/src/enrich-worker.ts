@@ -668,6 +668,7 @@ function buildRow(
   );
   const freeLabels = validFreeLabels(
     entry.free_labels,
+    deps.taxonomy.labels,
     memberTexts,
     deps.enrichStore,
     receipt,
@@ -723,10 +724,11 @@ function acceptFreeLabel(
   memberTexts: ReadonlyMap<string, string>,
   store: EnrichStore,
   seen: ReadonlySet<string>,
+  presetNames: ReadonlySet<string>,
 ): { name: string; keep: LabelAssignment } | undefined {
   const name = normalizeFreeLabelName(assignment.name);
   if (!validateFreeLabelName(name, assignment.evidence).ok) return undefined;
-  if (seen.has(name)) return undefined;
+  if (seen.has(name) || presetNames.has(name)) return undefined;
   if (store.registryStatus(name) === "rejected") return undefined;
   if (!validateEvidenceQuotes(assignment, memberTexts).ok) return undefined;
   return { name, keep: { name, evidence: assignment.evidence } };
@@ -734,19 +736,21 @@ function acceptFreeLabel(
 
 function validFreeLabels(
   assignments: readonly LabelAssignment[],
+  taxonomy: readonly LabelConfig[],
   memberTexts: ReadonlyMap<string, string>,
   store: EnrichStore,
   receipt: EnrichReceipt,
   registryEvents: FreeLabelEvent[],
 ): LabelAssignment[] {
   const seen = new Set<string>();
+  const presetNames = new Set(taxonomy.map((label) => normalizeFreeLabelName(label.name)));
   const kept: LabelAssignment[] = [];
   for (const assignment of assignments) {
     if (kept.length >= MAX_FREE_LABELS_PER_UNIT) {
       receipt.discarded_assignments += 1;
       continue;
     }
-    const accepted = acceptFreeLabel(assignment, memberTexts, store, seen);
+    const accepted = acceptFreeLabel(assignment, memberTexts, store, seen, presetNames);
     if (accepted === undefined) {
       receipt.discarded_assignments += 1;
       continue;
