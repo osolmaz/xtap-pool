@@ -1,9 +1,8 @@
 import type { ContributorStats, Filters, LabelStat } from "../lib/api.js";
 import { formatCount } from "../lib/format.js";
 
-/** Minimal concept shape the picker needs (any vocabulary entry fits). */
-export type ConceptOption = {
-  slug: string;
+/** Minimal approved-free-label shape the picker needs. */
+export type FreeLabelOption = {
   name: string;
 };
 
@@ -11,7 +10,7 @@ export type FiltersPanelProps = {
   filters: Filters;
   contributors: readonly ContributorStats[];
   labels: readonly LabelStat[];
-  concepts: readonly ConceptOption[];
+  freeLabels: readonly FreeLabelOption[];
   onChange: (filters: Filters) => void;
 };
 
@@ -58,30 +57,34 @@ function LabelChips({ filters, labels, onChange }: LabelChipsProps): React.JSX.E
   );
 }
 
-type ConceptSelectProps = {
+type FreeLabelSelectProps = {
   filters: Filters;
-  concepts: readonly ConceptOption[];
+  freeLabels: readonly FreeLabelOption[];
   onChange: (filters: Filters) => void;
 };
 
-/** Concept picker; the selection goes out as concept=<slug>. */
-function ConceptSelect({ filters, concepts, onChange }: ConceptSelectProps): React.JSX.Element {
-  const sorted = [...concepts].sort((a, b) => a.name.localeCompare(b.name));
+/** Approved-free-label picker. */
+function FreeLabelSelect({
+  filters,
+  freeLabels,
+  onChange,
+}: FreeLabelSelectProps): React.JSX.Element {
+  const sorted = [...freeLabels].sort((a, b) => a.name.localeCompare(b.name));
   return (
     <fieldset className="flex flex-col gap-1">
-      <legend className="mb-1 font-bold">Concept</legend>
+      <legend className="mb-1 font-bold">Free label</legend>
       <select
-        aria-label="Concept"
-        value={filters.concept}
+        aria-label="Free label"
+        value={filters.freeLabel}
         className="rounded-md border border-(--x-border) bg-(--x-soft) px-2 py-1"
         onChange={(event) => {
-          onChange({ ...filters, concept: event.target.value });
+          onChange({ ...filters, freeLabel: event.target.value });
         }}
       >
-        <option value="">Any concept</option>
-        {sorted.map((concept) => (
-          <option key={concept.slug} value={concept.slug}>
-            {concept.name}
+        <option value="">Any free label</option>
+        {sorted.map((label) => (
+          <option key={label.name} value={label.name}>
+            {label.name}
           </option>
         ))}
       </select>
@@ -89,12 +92,12 @@ function ConceptSelect({ filters, concepts, onChange }: ConceptSelectProps): Rea
   );
 }
 
-/** Left-rail filter controls: search, labels, concept, contributors, flags, dates. */
+/** Left-rail filter controls: search, labels, free labels, contributors, flags, dates. */
 export function FiltersPanel({
   filters,
   contributors,
   labels,
-  concepts,
+  freeLabels,
   onChange,
 }: FiltersPanelProps): React.JSX.Element {
   const toggleContributor = (username: string): void => {
@@ -124,8 +127,8 @@ export function FiltersPanel({
         <LabelChips filters={filters} labels={labels} onChange={onChange} />
       ) : null}
 
-      {concepts.length > 0 ? (
-        <ConceptSelect filters={filters} concepts={concepts} onChange={onChange} />
+      {freeLabels.length > 0 ? (
+        <FreeLabelSelect filters={filters} freeLabels={freeLabels} onChange={onChange} />
       ) : null}
 
       <fieldset className="flex flex-col gap-1">

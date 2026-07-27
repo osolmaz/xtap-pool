@@ -29,6 +29,12 @@ Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
 comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
 (auto-injected by HF).
 
+If `ENRICH_MAX_COST_USD` is set, also set `ENRICH_MAX_COST_PER_CALL_USD` to a
+conservative upper bound for one classification or registry-review request,
+plus `ENRICH_INPUT_TOKEN_USD` and `ENRICH_OUTPUT_TOKEN_USD` in USD per token
+for the configured model. Cost-limited runs refuse to start without all three
+values and stop before a bounded request could exceed the run ceiling.
+
 After setup, admins manage individual members and one allowed member organization
 in the Space Admin tab. Durable membership is stored in the private dataset repo
 at `config/pool.json`; the Space variables are kept as bootstrap and recovery
@@ -38,5 +44,5 @@ compatibility, but only one organization grant is active.
 Admins issue read-only machine credentials from the Admin tab. Only credential
 hashes are stored in `config/service-accounts.json`; raw credentials are shown
 once. `units:read` grants `GET /api/units`, while `taxonomy:read` grants the
-label, concept, and graph read endpoints. These credentials cannot ingest or
+label, free-label, and graph read endpoints. These credentials cannot ingest or
 administer the pool.

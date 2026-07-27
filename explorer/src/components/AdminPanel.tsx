@@ -8,6 +8,8 @@ import {
   addPoolMember,
   addPoolMemberOrg,
   fetchAdminPool,
+  fetchAdminEnrichment,
+  fetchAdminFreeLabels,
   fetchAdminServiceAccounts,
   issueServiceAccount,
   removePoolAdmin,
@@ -34,11 +36,14 @@ function sortMemberOrgs(orgs: readonly MemberOrgGrant[]): MemberOrgGrant[] {
   return [...orgs].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// eslint-disable-next-line complexity -- This stateful admin surface coordinates several independent controls.
 export function AdminPanel(): React.JSX.Element {
   const [state, setState] = useState<AdminState>({ status: "loading" });
   const [memberInput, setMemberInput] = useState("");
   const [adminInput, setAdminInput] = useState("");
   const [orgInput, setOrgInput] = useState("");
+  const [enrichment, setEnrichment] = useState<Awaited<ReturnType<typeof fetchAdminEnrichment>>>();
+  const [freeLabels, setFreeLabels] = useState<Awaited<ReturnType<typeof fetchAdminFreeLabels>>>();
 
   useEffect(() => {
     void fetchAdminPool().then(
@@ -49,6 +54,11 @@ export function AdminPanel(): React.JSX.Element {
         setState({ status: "error", error: message(error) });
       },
     );
+  }, []);
+
+  useEffect(() => {
+    void fetchAdminEnrichment().then(setEnrichment, () => undefined);
+    void fetchAdminFreeLabels().then(setFreeLabels, () => undefined);
   }, []);
 
   async function mutate(label: string, action: () => Promise<PoolSnapshot>): Promise<void> {
@@ -99,6 +109,46 @@ export function AdminPanel(): React.JSX.Element {
         </div>
       )}
       {error === undefined ? null : <p className="text-sm text-red-500">{error}</p>}
+
+      <section>
+        <h3 className="mb-2 font-bold">Enrichment</h3>
+        {enrichment === undefined ? (
+          <p className="text-sm text-(--x-muted)">Loading worker status…</p>
+        ) : (
+          <p className="text-sm text-(--x-muted)">
+            {enrichment.worker_recently_completed ? "Worker recently completed" : "No recent run"} ·
+            pending {enrichment.totals.pending} · retrying {enrichment.totals.retrying} · blocked{" "}
+            {enrichment.totals.blocked} · complete {enrichment.totals.completed}
+          </p>
+        )}
+        {freeLabels === undefined ? null : (
+          <div className="mt-1 text-sm text-(--x-muted)">
+            <p>
+              Free labels:{" "}
+              {freeLabels.labels.filter((label) => label.status === "candidate").length} candidate ·{" "}
+              {freeLabels.labels.filter((label) => label.status === "approved").length} approved ·{" "}
+              {freeLabels.labels.filter((label) => label.status === "rejected").length} rejected
+            </p>
+            {freeLabels.candidates.length === 0 ? null : (
+              <ul className="mt-2 divide-y divide-(--x-border) border-y border-(--x-border)">
+                {freeLabels.candidates.map((label) => (
+                  <li key={label.name} className="py-2">
+                    <p className="font-medium text-(--x-text)">
+                      {label.name} · {label.unit_count} units · {label.distinct_authors} authors ·{" "}
+                      {label.distinct_days} days
+                    </p>
+                    {label.representative_quotes.slice(0, 2).map((evidence) => (
+                      <p key={`${evidence.unit_id}:${evidence.tweet_id}:${evidence.quote}`}>
+                        {evidence.tweet_id}: {evidence.quote}
+                      </p>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </section>
 
       <form
         className="flex flex-wrap gap-2"

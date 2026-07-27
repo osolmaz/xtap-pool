@@ -1,21 +1,20 @@
 import { useEffect, useState } from "react";
 
 import { AdminPanel } from "./components/AdminPanel.js";
-import { ConceptPage } from "./components/ConceptPage.js";
+import { FreeLabelPage } from "./components/FreeLabelPage.js";
 import { FiltersPanel } from "./components/Filters.js";
 import { Feed } from "./components/Feed.js";
 import { GraphPage } from "./components/GraphPage.js";
-import type { ConceptSummary, ContributorStats, Filters, LabelStat } from "./lib/api.js";
+import type { FreeLabelSummary, ContributorStats, Filters, LabelStat } from "./lib/api.js";
 import {
   defaultFilters,
-  fetchConcepts,
+  fetchFreeLabels,
   fetchContributors,
   fetchLabels,
   fetchMe,
 } from "./lib/api.js";
 import type { Route } from "./lib/router.js";
 import { navigate, useRoute } from "./lib/router.js";
-import { VocabularyContext } from "./lib/vocabulary.js";
 
 type AuthState =
   | { status: "checking" }
@@ -102,7 +101,7 @@ type SidebarProps = {
   filters: Filters;
   contributors: readonly ContributorStats[];
   labels: readonly LabelStat[];
-  concepts: readonly ConceptSummary[];
+  freeLabels: readonly FreeLabelSummary[];
   onView: (view: View) => void;
   onFilters: (filters: Filters) => void;
 };
@@ -116,7 +115,7 @@ function Sidebar({
   filters,
   contributors,
   labels,
-  concepts,
+  freeLabels,
   onView,
   onFilters,
 }: SidebarProps): React.JSX.Element {
@@ -187,7 +186,7 @@ function Sidebar({
           filters={filters}
           contributors={contributors}
           labels={labels}
-          concepts={concepts}
+          freeLabels={freeLabels}
           onChange={onFilters}
         />
       ) : null}
@@ -204,7 +203,7 @@ type MainContentProps = {
 
 /** Active main pane: graph routes win over the feed-shell view tabs. */
 function MainContent({ route, view, isAdmin, filters }: MainContentProps): React.JSX.Element {
-  if (route.kind === "concept") return <ConceptPage key={route.slug} slug={route.slug} />;
+  if (route.kind === "free-label") return <FreeLabelPage key={route.slug} slug={route.slug} />;
   if (route.kind === "graph") return <GraphPage />;
   if (view === "install") return <InstallExtension />;
   if (view === "admin" && isAdmin) return <AdminPanel />;
@@ -218,7 +217,7 @@ export function App(): React.JSX.Element {
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [contributors, setContributors] = useState<readonly ContributorStats[]>([]);
   const [labels, setLabels] = useState<readonly LabelStat[]>([]);
-  const [vocabulary, setVocabulary] = useState<readonly ConceptSummary[]>([]);
+  const [freeLabels, setFreeLabels] = useState<readonly FreeLabelSummary[]>([]);
   const route = useRoute();
 
   useEffect(() => {
@@ -240,7 +239,7 @@ export function App(): React.JSX.Element {
     if (auth.status !== "signed-in") return;
     void fetchContributors().then(setContributors, () => undefined);
     void fetchLabels().then(setLabels, () => undefined);
-    void fetchConcepts().then(setVocabulary, () => undefined);
+    void fetchFreeLabels().then(setFreeLabels, () => undefined);
   }, [auth.status]);
 
   if (auth.status === "checking") {
@@ -256,24 +255,22 @@ export function App(): React.JSX.Element {
   };
 
   return (
-    <VocabularyContext.Provider value={vocabulary}>
-      <div className="mx-auto grid max-w-4xl grid-cols-1 gap-6 px-4 py-6 md:grid-cols-[14rem_minmax(0,1fr)]">
-        <Sidebar
-          username={auth.username}
-          isAdmin={auth.isAdmin}
-          view={view}
-          onGraphRoute={route.kind !== "home"}
-          filters={filters}
-          contributors={contributors}
-          labels={labels}
-          concepts={vocabulary}
-          onView={selectView}
-          onFilters={setFilters}
-        />
-        <main className="border-x border-(--x-border)">
-          <MainContent route={route} view={view} isAdmin={auth.isAdmin} filters={filters} />
-        </main>
-      </div>
-    </VocabularyContext.Provider>
+    <div className="mx-auto grid max-w-4xl grid-cols-1 gap-6 px-4 py-6 md:grid-cols-[14rem_minmax(0,1fr)]">
+      <Sidebar
+        username={auth.username}
+        isAdmin={auth.isAdmin}
+        view={view}
+        onGraphRoute={route.kind !== "home"}
+        filters={filters}
+        contributors={contributors}
+        labels={labels}
+        freeLabels={freeLabels}
+        onView={selectView}
+        onFilters={setFilters}
+      />
+      <main className="border-x border-(--x-border)">
+        <MainContent route={route} view={view} isAdmin={auth.isAdmin} filters={filters} />
+      </main>
+    </div>
   );
 }

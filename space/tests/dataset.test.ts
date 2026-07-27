@@ -10,6 +10,26 @@ import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 import { FakeHub, makePooled, makeTweet } from "./helpers.js";
 
+function receipt(finishedAt: string): Record<string, unknown> {
+  return {
+    started_at: "2026-07-06T00:00:00.000Z",
+    finished_at: finishedAt,
+    units: 1,
+    calls: 1,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    failures: 0,
+    retries: 0,
+    blocked: 0,
+    contract_hash: "external-contract",
+    worker_id: "external-worker",
+    discarded_assignments: 0,
+    new_candidates: 0,
+    new_approvals: 0,
+    new_rejections: 0,
+  };
+}
+
 let dir: string;
 let hub: FakeHub;
 let mirror: DatasetMirror;
@@ -96,18 +116,10 @@ describe("DatasetMirror.rebuild", () => {
 });
 
 describe("DatasetMirror enrichment rebuild", () => {
-  it("registers units during rebuild and replays enrichment shards", async () => {
+  it("replays enrichment shards without seeding label output from legacy rows", async () => {
     hub.files.set(
       "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
       `${JSON.stringify(makePooled({ id: "1" }))}\n${JSON.stringify(makePooled({ id: "2", author: { username: "other" } }))}\n`,
-    );
-    hub.files.set(
-      "enrichment/vocabulary.json",
-      JSON.stringify({
-        version: 1,
-        updated_at: "2026-07-06T00:00:00.000Z",
-        concepts: [{ slug: "vllm", name: "vLLM", aliases: ["PagedAttention"] }],
-      }),
     );
     hub.files.set(
       "enrichment/2026/07/enrichment-2026-07-06.jsonl",
@@ -116,7 +128,7 @@ describe("DatasetMirror enrichment rebuild", () => {
           unit_id: "1:someone",
           tweet_ids: ["1"],
           labels: ["ai"],
-          free_labels: [],
+          free_labels: ["gguf"],
           concepts: [{ name: "vLLM", aliases: [] }],
           model: "m",
           taxonomy_version: 1,
@@ -126,23 +138,166 @@ describe("DatasetMirror enrichment rebuild", () => {
         JSON.stringify({ unit_id: "broken" }),
       ].join("\n"),
     );
-    // Receipts must be restored to the mirror without being replayed as enrichment rows.
     const receiptPath = "enrichment/receipts/2026-07-06.jsonl";
     hub.files.set(receiptPath, '{"units":1}\n');
 
     const enrich = new EnrichStore(store.database, 1);
     await mirror.rebuild(store, enrich);
     const result = await mirror.rebuildEnrichment(enrich);
-    expect(result).toEqual({ files: 1, rows: 1 });
+    expect(result).toEqual({ files: 1, rows: 0, attempts: 0, registryEvents: 0 });
     expect(readFileSync(join(dir, receiptPath), "utf8")).toBe('{"units":1}\n');
-    await mirror.commitBatch([{ path: receiptPath, lines: ['{"units":2}'] }], [], "receipt");
-    expect(hub.files.get(receiptPath)).toBe('{"units":1}\n{"units":2}\n');
-    expect(enrich.queueEntry("1:someone")?.status).toBe("done");
-    expect(enrich.queueEntry("2:other")?.status).toBe("queued");
-    expect(enrich.concepts()).toEqual([
-      { slug: "vllm", name: "vLLM", aliases: ["PagedAttention"], unit_count: 1 },
-    ]);
-    expect(store.query({ labels: ["ai"] }).records.map((r) => r.tweet.id)).toEqual(["1"]);
+    // Legacy rows do not settle the queue — both units remain pending under
+    // the current contract.
+    expect(enrich.queueEntry("1:someone")?.status).toBe("pending");
+    expect(enrich.queueEntry("2:other")?.status).toBe("pending");
+    // No free-label registry entries seeded from legacy rows.
+    expect(enrich.registrySnapshot()).toEqual([]);
+    // No preset assignments materialize either.
+    expect(enrich.approvedFreeLabels()).toEqual([]);
+  });
+});
+
+describe("DatasetMirror external enrichment refresh", () => {
+  it("replays changed durable shards and keeps the newest valid receipt", async () => {
+    hub.files.set(
+      "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
+      `${JSON.stringify(makePooled({ id: "1" }))}\n${JSON.stringify(makePooled({ id: "2", author: { username: "other" } }))}\n`,
+    );
+    const enrich = new EnrichStore(store.database, 1);
+    await mirror.rebuild(store, enrich);
+    await mirror.rebuildEnrichment(enrich);
+    const queued = enrich.claimQueued(10);
+    enrich.releaseClaims();
+    const first = queued.find((item) => item.unitId === "1:someone");
+    const second = queued.find((item) => item.unitId === "2:other");
+    if (first === undefined || second === undefined) throw new Error("expected queued units");
+
+    hub.files.set(
+      "enrichment/2026/07/enrichment-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: first.unitId,
+        tweet_ids: ["1"],
+        input_hash: first.inputHash,
+        contract_hash: first.contractHash,
+        preset_labels: [{ name: "ai", evidence: [{ tweet_id: "1", quote: "hello world" }] }],
+        free_labels: [],
+        model: "m",
+        taxonomy_version: 1,
+        enriched_at: "2026-07-06T00:00:00.000Z",
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/attempts/2026/07/attempts-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: second.unitId,
+        input_hash: second.inputHash,
+        contract_hash: second.contractHash,
+        attempt: 1,
+        outcome: "transient_failure",
+        error_class: "timeout",
+        at: "2026-07-06T00:00:00.000Z",
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/registry/2026/07/registry-2026-07-06.jsonl",
+      `${JSON.stringify({
+        name: "external-label",
+        status: "candidate",
+        at: "2026-07-06T00:00:00.000Z",
+        actor: "worker",
+        contract_hash: first.contractHash,
+        registry_revision: 2,
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/receipts/2026-07-06.jsonl",
+      [
+        '{"finished_at":"2026-07-06T00:00:00.000Z"}',
+        JSON.stringify(receipt("2026-07-06T00:01:00.000Z")),
+        JSON.stringify(receipt("2026-07-06T00:02:00.000Z")),
+      ]
+        .join("\n")
+        .concat("\n"),
+    );
+
+    let beforeApplyCalls = 0;
+    const refreshed = await mirror.refreshEnrichment(enrich, () => {
+      beforeApplyCalls += 1;
+    });
+    expect(beforeApplyCalls).toBe(1);
+    expect(refreshed).toMatchObject({ files: 4, rows: 1, attempts: 1, registryEvents: 1 });
+    expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
+    expect(enrich.queueEntry(second.unitId)?.status).toBe("retrying");
+    expect(enrich.registryStatus("external-label")).toBe("candidate");
+    expect(mirror.latestReceipt()?.finished_at).toBe("2026-07-06T00:02:00.000Z");
+
+    hub.files.set(
+      "enrichment/receipts/2026-07-06.jsonl",
+      `${JSON.stringify(receipt("2026-07-06T00:03:00.000Z"))}\n`,
+    );
+    hub.failDownloadAttempts = 2;
+    await expect(
+      mirror.refreshEnrichment(enrich, () => {
+        beforeApplyCalls += 1;
+      }),
+    ).rejects.toThrow("hub unavailable");
+    expect(beforeApplyCalls).toBe(1);
+    expect(mirror.latestReceipt()?.finished_at).toBe("2026-07-06T00:02:00.000Z");
+    expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
+  });
+
+  it("eventually replays every missing shard while keeping each poll bounded", async () => {
+    const enrich = new EnrichStore(store.database, 1);
+    for (let day = 1; day <= 6; day += 1) {
+      const date = `2026-08-${String(day).padStart(2, "0")}`;
+      hub.files.set(`enrichment/2026/08/enrichment-${date}.jsonl`, "");
+    }
+
+    await expect(mirror.refreshEnrichment(enrich)).resolves.toMatchObject({ files: 4 });
+    await expect(mirror.refreshEnrichment(enrich)).resolves.toMatchObject({ files: 2 });
+    for (const path of hub.files.keys()) {
+      expect(existsSync(join(dir, path))).toBe(true);
+    }
+  });
+});
+
+describe("DatasetMirror attempt-event replay", () => {
+  it("restores retrying/blocked state from committed attempt events", async () => {
+    hub.files.set(
+      "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
+      `${JSON.stringify(makePooled({ id: "1" }))}\n`,
+    );
+    // No enrichment shard for this unit -> queue is pending on boot.
+    // A prior worker recorded a transient failure. Replay must restore the
+    // retrying status + attempt count + last_error class.
+    const enrich = new EnrichStore(store.database, 1);
+    await mirror.rebuild(store, enrich);
+    // Update contract to match — replay only applies attempts to the current
+    // contract. Grab the input hash the store computed.
+    const claimed = enrich.claimQueued(10);
+    enrich.releaseClaims();
+    const item = claimed[0];
+    if (item === undefined) throw new Error("expected a pending unit");
+    hub.files.set(
+      "enrichment/attempts/2026/07/attempts-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: item.unitId,
+        input_hash: item.inputHash,
+        contract_hash: item.contractHash,
+        attempt: 2,
+        outcome: "transient_failure",
+        error_class: "timeout",
+        error_message: "router timed out",
+        at: "2026-07-06T00:00:00.000Z",
+        next_retry_at: "2026-07-06T00:05:00.000Z",
+      })}\n`,
+    );
+    await mirror.rebuildEnrichment(enrich);
+    const entry = enrich.queueEntry(item.unitId);
+    expect(entry?.status).toBe("retrying");
+    expect(entry?.attempts).toBe(2);
+    expect(entry?.lastErrorClass).toBe("timeout");
+    expect(entry?.nextRetryAt).toBe("2026-07-06T00:05:00.000Z");
   });
 });
 

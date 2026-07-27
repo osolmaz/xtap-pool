@@ -75,22 +75,26 @@ console.log("receipt:", JSON.stringify(receipt));
 const db = store.database;
 const labelCounts = db
   .prepare(
-    "SELECT label, COUNT(*) AS n FROM tweet_labels WHERE kind='preset' GROUP BY label ORDER BY n DESC",
+    "SELECT name AS label, COUNT(*) AS n FROM label_assignments WHERE kind='preset' GROUP BY name ORDER BY n DESC",
   )
   .all();
 console.log("preset label counts:", JSON.stringify(labelCounts));
 const freeTop = db
   .prepare(
-    "SELECT label, COUNT(*) AS n FROM tweet_labels WHERE kind='free' GROUP BY label ORDER BY n DESC LIMIT 10",
+    `SELECT a.name AS label, COUNT(*) AS n
+     FROM label_assignments a
+     JOIN free_label_registry r ON r.name = a.name AND r.status = 'approved'
+     WHERE a.kind = 'free'
+     GROUP BY a.name ORDER BY n DESC LIMIT 10`,
   )
   .all();
 console.log("top free labels:", JSON.stringify(freeTop));
-const vocab = db
+const approvedFreeLabels = db
   .prepare(
-    "SELECT slug, name, unit_count FROM concept_vocabulary ORDER BY unit_count DESC LIMIT 12",
+    "SELECT name, status FROM free_label_registry WHERE status = 'approved' ORDER BY name LIMIT 12",
   )
   .all();
-console.log("top concepts:", JSON.stringify(vocab, null, 1));
+console.log("approved free labels:", JSON.stringify(approvedFreeLabels, null, 1));
 
 const queueSample = db
   .prepare(

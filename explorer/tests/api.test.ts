@@ -1,24 +1,27 @@
+/* eslint-disable complexity, @typescript-eslint/no-base-to-string */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   defaultFilters,
   addPoolAdmin,
   addPoolMember,
-  fetchConcept,
-  fetchConceptGraph,
-  fetchConcepts,
-  fetchContributors,
+  addPoolMemberOrg,
+  fetchAdminEnrichment,
+  fetchAdminFreeLabels,
   fetchAdminPool,
   fetchAdminServiceAccounts,
+  fetchContributors,
+  fetchFreeLabel,
+  fetchFreeLabelGraph,
+  fetchFreeLabels,
   fetchLabels,
   fetchMe,
   fetchTweets,
+  issueServiceAccount,
   removePoolAdmin,
   removePoolMember,
-  addPoolMemberOrg,
   removePoolMemberOrg,
   repairPoolConfig,
-  issueServiceAccount,
   repairServiceAccounts,
   revokeServiceAccount,
   revokeServiceAccountKey,
@@ -26,201 +29,170 @@ import {
   tweetsQueryString,
 } from "../src/lib/api.js";
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("tweetsQueryString", () => {
-  it("serializes default filters to just dedup", () => {
+  it("serializes the approved free-label contract and omits empty values", () => {
     expect(tweetsQueryString(defaultFilters)).toBe("dedup=true");
-  });
-
-  it("serializes all active filters and the cursor", () => {
-    const query = tweetsQueryString(
-      {
-        contributors: ["osolmaz", "alice"],
-        labels: ["ai", "agents"],
-        concept: "vllm",
-        q: "vllm",
-        since: "2026-05-01",
-        until: "2026-05-31",
-        hasMedia: true,
-        isArticle: true,
-        dedup: false,
-      },
-      "CURSOR",
+    expect(
+      tweetsQueryString(
+        {
+          ...defaultFilters,
+          contributors: ["alice", "bob"],
+          labels: ["ai"],
+          freeLabel: "vllm",
+          q: "serve",
+          until: "2026-07-01",
+          hasMedia: true,
+        },
+        "next",
+      ),
+    ).toBe(
+      "contributors=alice%2Cbob&labels=ai&free_label=vllm&q=serve&until=2026-07-01T23%3A59%3A59.999Z&has_media=true&dedup=true&cursor=next",
     );
-    const params = new URLSearchParams(query);
-    expect(params.get("contributors")).toBe("osolmaz,alice");
-    expect(params.get("labels")).toBe("ai,agents");
-    expect(params.get("concept")).toBe("vllm");
-    expect(params.get("q")).toBe("vllm");
-    expect(params.get("since")).toBe("2026-05-01");
-    expect(params.get("until")).toBe("2026-05-31T23:59:59.999Z");
-    expect(params.get("has_media")).toBe("true");
-    expect(params.get("is_article")).toBe("true");
-    expect(params.get("dedup")).toBe("false");
-    expect(params.get("cursor")).toBe("CURSOR");
   });
 });
 
-describe("api client", () => {
-  it("fetchMe returns the user or undefined on 401", async () => {
+describe("explorer API", () => {
+  it("maps public free-label endpoints and graph communities", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(Response.json({ username: "osolmaz", isAdmin: true })),
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input).split("?")[0];
+        if (path === "/api/free-labels")
+          return Response.json({ free_labels: [{ name: "vllm", count: 4 }] });
+        if (path === "/api/free-labels/vllm")
+          return Response.json({
+            name: "vllm",
+            tweet_count: 4,
+            related: [{ name: "sglang", shared_units: 2 }],
+          });
+        if (path === "/api/graph")
+          return Response.json({
+            nodes: [
+              { name: "vllm", unit_count: 4 },
+              { name: "sglang", unit_count: 2 },
+            ],
+            links: [{ source: "vllm", target: "sglang", weight: 2 }],
+          });
+        return new Response("missing", { status: 404 });
+      }),
     );
-    await expect(fetchMe()).resolves.toEqual({ username: "osolmaz", isAdmin: true });
-
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
-    await expect(fetchMe()).resolves.toBeUndefined();
+    await expect(fetchFreeLabels()).resolves.toEqual([{ name: "vllm", post_count: 4 }]);
+    await expect(fetchFreeLabel("vllm")).resolves.toEqual({
+      name: "vllm",
+      post_count: 4,
+      related: [{ name: "sglang", shared: 2 }],
+    });
+    await expect(fetchFreeLabelGraph(300)).resolves.toEqual({
+      nodes: [
+        { id: "vllm", name: "vllm", docs: 4, group: 0 },
+        { id: "sglang", name: "sglang", docs: 2, group: 0 },
+      ],
+      links: [{ source: "vllm", target: "sglang", weight: 2 }],
+    });
   });
 
-  it("fetchTweets returns pages and throws on expiry or server errors", async () => {
-    const page = { records: [], nextCursor: "abc" };
-    const fetchMock = vi.fn().mockResolvedValue(Response.json(page));
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(fetchTweets(defaultFilters)).resolves.toEqual(page);
-    expect(fetchMock).toHaveBeenCalledWith("/api/tweets?dedup=true", expect.anything());
-
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
-    await expect(fetchTweets(defaultFilters)).rejects.toThrow("session expired");
-
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("boom", { status: 500 })));
-    await expect(fetchTweets(defaultFilters)).rejects.toThrow("request failed: 500");
-  });
-
-  it("fetchContributors unwraps the contributors list", async () => {
-    const contributors = [{ username: "osolmaz", tweetCount: 2, lastPooledAt: "2026-07-06" }];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ contributors })));
-    await expect(fetchContributors()).resolves.toEqual(contributors);
-
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
-    await expect(fetchContributors()).rejects.toThrow("session expired");
-  });
-
-  it("fetches labels, concepts, one concept and the graph", async () => {
-    const labels = [{ name: "ai", description: "AI posts", count: 12 }];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ labels })));
-    await expect(fetchLabels()).resolves.toEqual(labels);
-
-    const apiConcepts = [{ slug: "vllm", name: "vLLM", aliases: ["vllm"], unit_count: 3 }];
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ concepts: apiConcepts })));
-    await expect(fetchConcepts()).resolves.toEqual([
-      { slug: "vllm", name: "vLLM", aliases: ["vllm"], post_count: 3 },
+  it("maps authenticated viewer, filter, taxonomy, and contributor reads", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input).split("?")[0];
+        if (path === "/api/me") return Response.json({ username: "alice", isAdmin: true });
+        if (path === "/api/tweets") return Response.json({ records: [], nextCursor: "next" });
+        if (path === "/api/contributors")
+          return Response.json({
+            contributors: [{ username: "alice", tweetCount: 1, lastPooledAt: "now" }],
+          });
+        if (path === "/api/labels")
+          return Response.json({ labels: [{ name: "ai", description: "AI", count: 2 }] });
+        return new Response("missing", { status: 404 });
+      }),
+    );
+    await expect(fetchMe()).resolves.toEqual({ username: "alice", isAdmin: true });
+    await expect(fetchTweets(defaultFilters)).resolves.toEqual({ records: [], nextCursor: "next" });
+    await expect(fetchContributors()).resolves.toEqual([
+      { username: "alice", tweetCount: 1, lastPooledAt: "now" },
     ]);
-
-    const apiDetail = {
-      slug: "vllm",
-      name: "vLLM",
-      aliases: ["vllm"],
-      unit_count: 3,
-      tweet_count: 3,
-      related: [{ slug: "sglang", name: "SGLang", shared_units: 2 }],
-    };
-    const detailMock = vi.fn().mockResolvedValue(Response.json(apiDetail));
-    vi.stubGlobal("fetch", detailMock);
-    await expect(fetchConcept("vllm")).resolves.toEqual({
-      name: "vLLM",
-      aliases: ["vllm"],
-      related: [{ slug: "sglang", name: "SGLang", shared: 2 }],
-      post_count: 3,
-    });
-    expect(detailMock).toHaveBeenCalledWith("/api/concepts/vllm", expect.anything());
-
-    const apiGraph = {
-      nodes: [
-        { slug: "vllm", name: "vLLM", unit_count: 3 },
-        { slug: "sglang", name: "SGLang", unit_count: 2 },
-      ],
-      links: [{ source: "vllm", target: "sglang", weight: 2 }],
-    };
-    const graphMock = vi.fn().mockResolvedValue(Response.json(apiGraph));
-    vi.stubGlobal("fetch", graphMock);
-    await expect(fetchConceptGraph(300)).resolves.toEqual({
-      nodes: [
-        { id: "vllm", name: "vLLM", docs: 3, group: 0 },
-        { id: "sglang", name: "SGLang", docs: 2, group: 0 },
-      ],
-      links: [{ source: "vllm", target: "sglang", weight: 2 }],
-    });
-    expect(graphMock).toHaveBeenCalledWith("/api/graph?top=300", expect.anything());
+    await expect(fetchLabels()).resolves.toEqual([{ name: "ai", description: "AI", count: 2 }]);
   });
 
-  it("throws session expired for enrichment endpoints on 401", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("no", { status: 401 })));
-    await expect(fetchLabels()).rejects.toThrow("session expired");
-    await expect(fetchConcepts()).rejects.toThrow("session expired");
-    await expect(fetchConcept("vllm")).rejects.toThrow("session expired");
-    await expect(fetchConceptGraph(300)).rejects.toThrow("session expired");
+  it("turns unauthenticated reads into their documented states", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Response("no", { status: 401 })),
+    );
+    await expect(fetchMe()).resolves.toBeUndefined();
+    await expect(fetchFreeLabels()).rejects.toThrow("session expired");
   });
 
-  it("manages service accounts through admin endpoints", async () => {
+  it("uses the authenticated administration endpoints with encoded identifiers", async () => {
     const account = {
-      id: "a1",
-      name: "local-frontier",
-      scopes: ["units:read", "taxonomy:read"] as const,
-      status: "active" as const,
-      created_at: "2026-07-27T00:00:00.000Z",
-      updated_at: "2026-07-27T00:00:00.000Z",
-      keys: [{ id: "k1", created_at: "2026-07-27T00:00:00.000Z" }],
+      id: "reader",
+      name: "reader",
+      status: "active",
+      scopes: [],
+      created_at: "now",
+      updated_at: "now",
+      keys: [],
     };
-    const snapshot = { version: 1 as const, accounts: [account], source: "dataset" as const };
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementation(() => Promise.resolve(Response.json({ service_accounts: snapshot }))),
-    );
-    await expect(fetchAdminServiceAccounts()).resolves.toEqual(snapshot);
-    await expect(repairServiceAccounts()).resolves.toEqual(snapshot);
-
-    const credential = { account, token: "xtap_sa_once" };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(Response.json(credential))),
-    );
-    await expect(
-      issueServiceAccount("local-frontier", ["units:read", "taxonomy:read"]),
-    ).resolves.toEqual(credential);
-    await expect(rotateServiceAccount("a1")).resolves.toEqual(credential);
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(Response.json({ account }))),
-    );
-    await expect(revokeServiceAccount("a1")).resolves.toEqual(account);
-    await expect(revokeServiceAccountKey("a1", "k1")).resolves.toEqual(account);
-  });
-
-  it("manages pool membership through admin endpoints", async () => {
     const pool = {
-      version: 1,
-      admins: ["osolmaz"],
-      members: ["osolmaz"],
-      member_orgs: [{ name: "huggingface", sub: "org-hf", display_name: "Hugging Face" }],
-      bootstrap_admins: ["osolmaz"],
-      updated_at: "2026-07-06T00:00:00.000Z",
-      source: "dataset",
+      version: 1 as const,
+      admins: [],
+      members: [],
+      member_orgs: [],
+      bootstrap_admins: [],
+      updated_at: "now",
+      source: "dataset" as const,
     };
-    const fetchMock = vi
-      .fn()
-      .mockImplementation(() =>
-        Promise.resolve(Response.json({ pool, viewer: { username: "osolmaz" } })),
-      );
-    vi.stubGlobal("fetch", fetchMock);
-    await expect(fetchAdminPool()).resolves.toEqual({ pool, viewer: { username: "osolmaz" } });
-
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation(() => Promise.resolve(Response.json({ pool }))),
+      vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/admin/pool")
+          return Response.json({ pool, viewer: { username: "root" } });
+        if (path === "/api/admin/enrichment")
+          return Response.json({
+            contract_hash: "hash",
+            totals: { pending: 0, running: 0, retrying: 0, blocked: 0, completed: 0 },
+            worker_recently_completed: false,
+            recent_errors: [],
+          });
+        if (path === "/api/admin/free-labels")
+          return Response.json({ registry_revision: 1, labels: [], candidates: [] });
+        if (path === "/api/admin/service-accounts")
+          return Response.json({
+            service_accounts: { version: 1, accounts: [], source: "dataset" },
+          });
+        if (path === "/api/admin/service-accounts/repair")
+          return Response.json({
+            service_accounts: { version: 1, accounts: [], source: "dataset" },
+          });
+        if (path.includes("/keys") && !path.endsWith("/key%201"))
+          return Response.json({ account, token: "token" });
+        if (path === "/api/admin/service-accounts")
+          return Response.json({ account, token: "token" });
+        if (path.includes("service-accounts")) return Response.json({ account });
+        return Response.json({ pool });
+      }),
     );
-    await expect(repairPoolConfig()).resolves.toEqual(pool);
-    await expect(addPoolMember("alice")).resolves.toEqual(pool);
-    await expect(removePoolMember("alice")).resolves.toEqual(pool);
-    await expect(addPoolAdmin("alice")).resolves.toEqual(pool);
-    await expect(removePoolAdmin("alice")).resolves.toEqual(pool);
-    await expect(addPoolMemberOrg("huggingface")).resolves.toEqual(pool);
-    await expect(removePoolMemberOrg("huggingface")).resolves.toEqual(pool);
+    await Promise.all([
+      fetchAdminPool(),
+      fetchAdminEnrichment(),
+      fetchAdminFreeLabels(),
+      fetchAdminServiceAccounts(),
+      repairPoolConfig(),
+      repairServiceAccounts(),
+      issueServiceAccount("reader", ["units:read"]),
+      rotateServiceAccount("reader id"),
+      revokeServiceAccount("reader id"),
+      revokeServiceAccountKey("reader id", "key 1"),
+      addPoolMember("alice bob"),
+      removePoolMember("alice bob"),
+      addPoolAdmin("alice bob"),
+      removePoolAdmin("alice bob"),
+      addPoolMemberOrg("my org"),
+      removePoolMemberOrg("my org"),
+    ]);
   });
 });

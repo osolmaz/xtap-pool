@@ -18,6 +18,14 @@ const configSchema = z.object({
   ENRICH_ENABLED: z.enum(["true", "false"]).default("false"),
   ENRICH_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   ENRICH_MAX_UNITS_PER_TICK: z.coerce.number().int().positive().default(100),
+  ENRICH_MAX_TOKENS: z.coerce.number().int().positive().optional(),
+  ENRICH_MAX_ELAPSED_MS: z.coerce.number().int().positive().optional(),
+  ENRICH_MAX_ERROR_RATE: z.coerce.number().min(0).max(1).optional(),
+  ENRICH_MAX_COST_USD: z.coerce.number().positive().optional(),
+  ENRICH_MAX_COST_PER_CALL_USD: z.coerce.number().positive().optional(),
+  ENRICH_INPUT_TOKEN_USD: z.coerce.number().nonnegative().optional(),
+  ENRICH_OUTPUT_TOKEN_USD: z.coerce.number().nonnegative().optional(),
+  ENRICH_MAX_DISCARDED_ASSIGNMENTS: z.coerce.number().int().nonnegative().optional(),
   LLM_MODEL: z.string().min(1).default("zai-org/GLM-5.2"),
   TAXONOMY_VERSION: z.coerce.number().int().min(1).default(1),
 });
@@ -41,15 +49,34 @@ export type SpaceConfig = {
   enrichEnabled: boolean;
   enrichIntervalMs: number;
   enrichMaxUnitsPerTick: number;
+  enrichMaxTokens?: number;
+  enrichMaxElapsedMs?: number;
+  enrichMaxErrorRate?: number;
+  enrichMaxCostUsd?: number;
+  enrichMaxCostPerCallUsd?: number;
+  enrichInputTokenUsd?: number;
+  enrichOutputTokenUsd?: number;
+  enrichMaxDiscardedAssignments?: number;
   llmModel: string;
   taxonomyVersion: number;
 };
 
 /** Parse and normalize configuration from environment variables. Throws on invalid config. */
+// eslint-disable-next-line complexity -- Cross-field credential, pricing, and ceiling invariants are validated at one configuration boundary.
 export function loadConfig(env: Record<string, string | undefined>): SpaceConfig {
   const parsed = configSchema.parse(env);
   if (parsed.ENRICH_ENABLED === "true" && parsed.INFERENCE_TOKEN === undefined) {
     throw new Error("INFERENCE_TOKEN is required when ENRICH_ENABLED=true.");
+  }
+  if (
+    parsed.ENRICH_MAX_COST_USD !== undefined &&
+    (parsed.ENRICH_MAX_COST_PER_CALL_USD === undefined ||
+      parsed.ENRICH_INPUT_TOKEN_USD === undefined ||
+      parsed.ENRICH_OUTPUT_TOKEN_USD === undefined)
+  ) {
+    throw new Error(
+      "ENRICH_MAX_COST_USD requires ENRICH_MAX_COST_PER_CALL_USD, ENRICH_INPUT_TOKEN_USD and ENRICH_OUTPUT_TOKEN_USD.",
+    );
   }
   const host = parsed.SPACE_HOST.replace(/\/+$/, "");
   const allowedUsers = users(parsed.ALLOWED_USERS);
@@ -72,6 +99,30 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     enrichEnabled: parsed.ENRICH_ENABLED === "true",
     enrichIntervalMs: parsed.ENRICH_INTERVAL_MS,
     enrichMaxUnitsPerTick: parsed.ENRICH_MAX_UNITS_PER_TICK,
+    ...(parsed.ENRICH_MAX_TOKENS === undefined
+      ? {}
+      : { enrichMaxTokens: parsed.ENRICH_MAX_TOKENS }),
+    ...(parsed.ENRICH_MAX_ELAPSED_MS === undefined
+      ? {}
+      : { enrichMaxElapsedMs: parsed.ENRICH_MAX_ELAPSED_MS }),
+    ...(parsed.ENRICH_MAX_ERROR_RATE === undefined
+      ? {}
+      : { enrichMaxErrorRate: parsed.ENRICH_MAX_ERROR_RATE }),
+    ...(parsed.ENRICH_MAX_COST_USD === undefined
+      ? {}
+      : { enrichMaxCostUsd: parsed.ENRICH_MAX_COST_USD }),
+    ...(parsed.ENRICH_MAX_COST_PER_CALL_USD === undefined
+      ? {}
+      : { enrichMaxCostPerCallUsd: parsed.ENRICH_MAX_COST_PER_CALL_USD }),
+    ...(parsed.ENRICH_INPUT_TOKEN_USD === undefined
+      ? {}
+      : { enrichInputTokenUsd: parsed.ENRICH_INPUT_TOKEN_USD }),
+    ...(parsed.ENRICH_OUTPUT_TOKEN_USD === undefined
+      ? {}
+      : { enrichOutputTokenUsd: parsed.ENRICH_OUTPUT_TOKEN_USD }),
+    ...(parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS === undefined
+      ? {}
+      : { enrichMaxDiscardedAssignments: parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS }),
     llmModel: parsed.LLM_MODEL,
     taxonomyVersion: parsed.TAXONOMY_VERSION,
   };

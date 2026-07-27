@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { Concept } from "./enrichment.js";
+import type { LabelAssignment } from "./enrichment.js";
 import type { PooledTweet } from "./tweet.js";
 
 /** Stable read scopes granted to a machine consumer. */
@@ -8,21 +8,23 @@ export const serviceAccountScopeSchema = z.enum(["units:read", "taxonomy:read"])
 
 export type ServiceAccountScope = z.infer<typeof serviceAccountScopeSchema>;
 
-export type UnitConcept = Concept & { slug: string };
-
-/** One enriched conversation-author unit returned by `GET /api/units`. */
+/**
+ * One enriched conversation-author unit returned by `GET /api/units`.
+ * `preset_labels` and `free_labels` are evidence-bearing assignments; only
+ * approved free labels appear here.
+ */
 export type EnrichedUnit = {
   id: string;
   posts: readonly PooledTweet[];
   contributors: readonly string[];
-  preset_labels: readonly string[];
-  free_labels: readonly string[];
-  concepts: readonly UnitConcept[];
+  preset_labels: readonly LabelAssignment[];
+  free_labels: readonly LabelAssignment[];
 };
 
 /** A revision-consistent page of enriched units. */
 export type UnitPage = {
   revision: string;
+  cutoff?: string;
   units: readonly EnrichedUnit[];
   next_cursor?: string;
 };

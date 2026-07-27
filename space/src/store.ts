@@ -16,7 +16,6 @@ export type TweetQuery = {
   labels?: readonly string[];
   labelMode?: "any" | "all";
   freeLabel?: string;
-  concept?: string;
   unlabeled?: boolean;
   dedup?: boolean;
   limit?: number;
@@ -349,41 +348,61 @@ function labelFilters(query: TweetQuery): Filter[] {
     if (query.labelMode === "all") {
       for (const label of query.labels) {
         filters.push({
-          sql: `EXISTS (SELECT 1 FROM tweet_labels tl
-                WHERE tl.tweet_id = tweets.id AND tl.kind = 'preset' AND tl.label = ?)`,
+          sql: `EXISTS (
+                  SELECT 1 FROM label_assignments la
+                  JOIN unit_members um ON um.unit_id = la.unit_id
+                  JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+                  JOIN enrichment e ON e.unit_id = eq.unit_id
+                    AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+                  WHERE um.tweet_id = tweets.id AND la.kind = 'preset' AND la.name = ?
+                )`,
           values: [label],
         });
       }
     } else {
       filters.push({
-        sql: `tweets.id IN (SELECT tweet_id FROM tweet_labels
-              WHERE kind = 'preset' AND label IN (${query.labels.map(() => "?").join(",")}))`,
+        sql: `tweets.id IN (
+                SELECT um.tweet_id FROM unit_members um
+                JOIN label_assignments la ON la.unit_id = um.unit_id
+                JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+                JOIN enrichment e ON e.unit_id = eq.unit_id
+                  AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+                WHERE la.kind = 'preset' AND la.name IN (${query.labels.map(() => "?").join(",")})
+              )`,
         values: query.labels,
       });
     }
   }
   if (query.unlabeled === true) {
     filters.push({
-      sql: "tweets.id NOT IN (SELECT tweet_id FROM tweet_labels WHERE kind = 'preset')",
+      sql: `tweets.id NOT IN (
+              SELECT um.tweet_id FROM unit_members um
+              JOIN label_assignments la ON la.unit_id = um.unit_id
+              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+              JOIN enrichment e ON e.unit_id = eq.unit_id
+                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+              WHERE la.kind = 'preset'
+            )`,
       values: [],
     });
   }
   return filters;
 }
 
-function conceptFilters(query: TweetQuery): Filter[] {
+function freeLabelFilters(query: TweetQuery): Filter[] {
   const filters: Filter[] = [];
   if (query.freeLabel !== undefined) {
     filters.push({
-      sql: "tweets.id IN (SELECT tweet_id FROM tweet_labels WHERE kind = 'free' AND label = ?)",
+      sql: `tweets.id IN (
+              SELECT um.tweet_id FROM unit_members um
+              JOIN label_assignments la ON la.unit_id = um.unit_id
+              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+              JOIN enrichment e ON e.unit_id = eq.unit_id
+                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+              JOIN free_label_registry r ON r.name = la.name AND r.status = 'approved'
+              WHERE la.kind = 'free' AND la.name = ?
+            )`,
       values: [query.freeLabel],
-    });
-  }
-  if (query.concept !== undefined) {
-    filters.push({
-      sql: `tweets.id IN (SELECT um.tweet_id FROM unit_members um
-            JOIN concept_assignments ca ON ca.unit_id = um.unit_id WHERE ca.slug = ?)`,
-      values: [query.concept],
     });
   }
   return filters;
@@ -407,7 +426,7 @@ function buildFilters(query: TweetQuery): { whereSql: string; params: unknown[] 
     ...textFilters(query),
     ...rangeAndFlagFilters(query),
     ...labelFilters(query),
-    ...conceptFilters(query),
+    ...freeLabelFilters(query),
   ];
   const whereSql = ["1=1", ...filters.map((filter) => filter.sql)].join(" AND ");
   return { whereSql, params: filters.flatMap((filter) => [...filter.values]) };

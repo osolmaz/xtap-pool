@@ -299,13 +299,7 @@ button.x-chip:hover {
   border-color: var(--x-strong-border);
 }
 
-/* Inline concept links inside tweet text */
-.x-tweet-card__text a.concept-link {
-  text-decoration: underline dashed;
-  text-underline-offset: 0.2em;
-}
-
-/* Concept graph canvas frame */
+/* Approved free-label graph canvas frame */
 .x-graph-frame {
   border: 1px solid var(--x-border);
   border-radius: 1rem;

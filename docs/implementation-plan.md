@@ -168,18 +168,18 @@ any flow.
 
 Endpoints:
 
-| Route                                            | Auth                                       | Purpose                                                                                                                   |
-| ------------------------------------------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `GET /` + static                                 | session                                    | serves built explorer                                                                                                     |
-| `GET /oauth/login` → `/oauth/callback`           | —                                          | HF OIDC code flow, sets session cookie, enforces pool membership                                                          |
-| `GET /connect`                                   | session                                    | mints + renders pool token for extension pickup                                                                           |
-| `POST /api/ingest`                               | pool token                                 | validate (zod), stamp, dedup, persist                                                                                     |
-| `GET /api/tweets`                                | session                                    | filters: `contributors`, `author`, `q` (FTS), `since`/`until`, `has_media`, `is_article`, `dedup=true`, cursor pagination |
-| `GET /api/units`                                 | session or `units:read` service account    | complete enriched conversation-author units with revision-bound cursor pagination                                         |
-| `GET /api/labels`, `/api/concepts`, `/api/graph` | session or `taxonomy:read` service account | revision-consistent enrichment vocabulary and graph reads                                                                 |
-| `/api/admin/service-accounts/*`                  | admin session                              | issue, rotate, and revoke hashed, scoped machine credentials                                                              |
-| `GET /api/contributors`                          | session                                    | per-user counts, last sync                                                                                                |
-| `GET /healthz`                                   | —                                          | liveness                                                                                                                  |
+| Route                                               | Auth                                       | Purpose                                                                                                                   |
+| --------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `GET /` + static                                    | session                                    | serves built explorer                                                                                                     |
+| `GET /oauth/login` → `/oauth/callback`              | —                                          | HF OIDC code flow, sets session cookie, enforces pool membership                                                          |
+| `GET /connect`                                      | session                                    | mints + renders pool token for extension pickup                                                                           |
+| `POST /api/ingest`                                  | pool token                                 | validate (zod), stamp, dedup, persist                                                                                     |
+| `GET /api/tweets`                                   | session                                    | filters: `contributors`, `author`, `q` (FTS), `since`/`until`, `has_media`, `is_article`, `dedup=true`, cursor pagination |
+| `GET /api/units`                                    | session or `units:read` service account    | complete enriched conversation-author units with revision-bound cursor pagination                                         |
+| `GET /api/labels`, `/api/free-labels`, `/api/graph` | session or `taxonomy:read` service account | revision-consistent enrichment vocabulary and graph reads                                                                 |
+| `/api/admin/service-accounts/*`                     | admin session                              | issue, rotate, and revoke hashed, scoped machine credentials                                                              |
+| `GET /api/contributors`                             | session                                    | per-user counts, last sync                                                                                                |
+| `GET /healthz`                                      | —                                          | liveness                                                                                                                  |
 
 Storage engine inside the Space: **SQLite** (`better-sqlite3`) on ephemeral
 disk + FTS5 for text search. Boot: download dataset snapshot (`@huggingface/hub`)

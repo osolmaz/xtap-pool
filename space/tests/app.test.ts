@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { computeContractHash, PROCESSOR_VERSION } from "@xtap-pool/shared";
 import type { EnrichReceipt } from "@xtap-pool/shared";
 
 import { createApp } from "../src/app.js";
@@ -12,6 +13,12 @@ import type { EnrichDeps } from "../src/app.js";
 import { DatasetMirror } from "../src/dataset.js";
 import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
 import { EnrichStore } from "../src/enrich-store.js";
+import {
+  contractHashFor,
+  NORMALIZATION_ID,
+  OUTPUT_SCHEMA_ID,
+  PROMPT_TEMPLATE_ID,
+} from "../src/enrich-worker.js";
 import { Mutex, ingestBatch } from "../src/ingest.js";
 import { PoolMembership } from "../src/membership.js";
 import { mintPoolToken } from "../src/pool-token.js";
@@ -22,6 +29,10 @@ import { FakeHub, makeTweet, testConfig } from "./helpers.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
+const CONTRACT_HASH = contractHashFor({
+  taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
+  model: "m",
+});
 
 const EMPTY_RECEIPT: EnrichReceipt = {
   started_at: NOW.toISOString(),
@@ -31,7 +42,27 @@ const EMPTY_RECEIPT: EnrichReceipt = {
   prompt_tokens: 0,
   completion_tokens: 0,
   failures: 0,
+  retries: 0,
+  blocked: 0,
+  contract_hash: CONTRACT_HASH,
+  worker_id: "test-worker",
+  discarded_assignments: 0,
+  new_candidates: 0,
+  new_approvals: 0,
+  new_rejections: 0,
 };
+
+// Verifies PROCESSOR_VERSION participates: contract hash changes when the
+// processor version changes, even if all other inputs are identical.
+void computeContractHash({
+  taxonomy_version: 1,
+  labels: [],
+  model: "x",
+  processor_version: PROCESSOR_VERSION,
+  prompt_template_id: PROMPT_TEMPLATE_ID,
+  output_schema_id: OUTPUT_SCHEMA_ID,
+  normalization_id: NORMALIZATION_ID,
+});
 
 let dir: string;
 let hub: FakeHub;
@@ -71,9 +102,8 @@ beforeEach(async () => {
   serviceAccounts = await ServiceAccountRegistry.load({ mirror, now: () => NOW });
   const mutex = new Mutex();
   enrich = {
-    store: new EnrichStore(store.database, 1, () => NOW),
+    store: new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH),
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
-    run: () => Promise.resolve(EMPTY_RECEIPT),
   };
   unitStore = new UnitStore(store.database, 1);
   app = createApp({
@@ -310,29 +340,37 @@ describe("enrichment endpoints", () => {
         ],
       }),
     });
+    const semantic = enrich.store.unitSemanticMembers("1:someone");
+    const { computeInputHash } = await import("@xtap-pool/shared");
     enrich.store.applyEnrichment({
       unit_id: "1:someone",
       tweet_ids: ["1"],
-      labels: ["ai", "inference-performance"],
-      free_labels: ["fp8"],
-      concepts: [
-        { name: "vLLM", aliases: ["vllm engine"] },
-        { name: "FP8", aliases: [] },
+      input_hash: computeInputHash("1:someone", semantic),
+      contract_hash: CONTRACT_HASH,
+      preset_labels: [
+        { name: "ai", evidence: [{ tweet_id: "1", quote: "vllm ships fp8" }] },
+        { name: "inference-performance", evidence: [{ tweet_id: "1", quote: "fp8" }] },
       ],
+      free_labels: [{ name: "fp8", evidence: [{ tweet_id: "1", quote: "fp8" }] }],
       model: "m",
       taxonomy_version: 1,
       enriched_at: NOW.toISOString(),
     });
+    // Approve the seeded free label so consumer reads surface it.
+    const candidate = enrich.store.candidateEventIfNew("fp8").event;
+    if (candidate === undefined) throw new Error("expected fp8 candidate");
+    enrich.store.applyRegistryEvent(candidate);
+    enrich.store.promoteName("fp8", "test-approved");
   }
 
   it("rejects unauthenticated enrichment reads", async () => {
     expect((await app.request("/api/labels")).status).toBe(401);
-    expect((await app.request("/api/concepts")).status).toBe(401);
-    expect((await app.request("/api/concepts/vllm")).status).toBe(401);
+    expect((await app.request("/api/free-labels")).status).toBe(401);
+    expect((await app.request("/api/free-labels/fp8")).status).toBe(401);
     expect((await app.request("/api/graph")).status).toBe(401);
   });
 
-  it("filters /api/tweets by labels, free labels, concepts and unlabeled", async () => {
+  it("filters /api/tweets by labels, free labels, and unlabeled", async () => {
     await seedEnrichedTweets();
     const ids = async (query: string): Promise<string[]> => {
       const response = await app.request(`/api/tweets?${query}`, { headers });
@@ -343,7 +381,6 @@ describe("enrichment endpoints", () => {
     await expect(ids("labels=ai,agents&label_mode=all")).resolves.toEqual([]);
     await expect(ids("labels=ai,inference-performance&label_mode=all")).resolves.toEqual(["1"]);
     await expect(ids("free_label=fp8")).resolves.toEqual(["1"]);
-    await expect(ids("concept=vllm")).resolves.toEqual(["1"]);
     await expect(ids("author_ids=author-allowed")).resolves.toEqual(["1"]);
     await expect(ids("unlabeled=true")).resolves.toEqual(["2"]);
     await expect(ids("labels=ai&q=vllm")).resolves.toEqual(["1"]);
@@ -376,7 +413,7 @@ describe("enrichment endpoints", () => {
       units: [expect.objectContaining({ id: "1:someone" })],
     });
 
-    expect((await app.request("/api/concepts", { headers: authorization })).status).toBe(401);
+    expect((await app.request("/api/free-labels", { headers: authorization })).status).toBe(401);
     expect(
       (
         await app.request("/api/ingest", {
@@ -394,70 +431,73 @@ describe("enrichment endpoints", () => {
     await expect(stale.json()).resolves.toMatchObject({ current_revision: page.revision });
   });
 
-  it("serves taxonomy endpoints to taxonomy-scoped credentials", async () => {
+  it("serves free-label endpoints to taxonomy-scoped credentials", async () => {
     await seedEnrichedTweets();
     const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
     const headers = { authorization: `Bearer ${issued.token}` };
-    const concepts = await app.request("/api/concepts?author_ids=author-allowed", { headers });
-    expect(concepts.status).toBe(200);
-    const body = (await concepts.json()) as { revision: string; concepts: { slug: string }[] };
-    expect(body.concepts.map((concept) => concept.slug)).toEqual(["fp8", "vllm"]);
+    const freeLabels = await app.request("/api/free-labels?author_ids=author-allowed", { headers });
+    expect(freeLabels.status).toBe(200);
+    const body = (await freeLabels.json()) as {
+      revision: string;
+      contract_hash: string;
+      free_label_registry_revision: number;
+      free_labels: { name: string; count: number }[];
+    };
+    expect(body.contract_hash.length).toBeGreaterThan(10);
+    expect(body.free_label_registry_revision).toBeGreaterThan(1);
+    expect(body.free_labels.map((entry) => entry.name)).toEqual(["fp8"]);
     const graph = await app.request(
       `/api/graph?author_ids=author-allowed&revision=${encodeURIComponent(body.revision)}`,
       { headers },
     );
     expect(graph.status).toBe(200);
-    const excluded = await app.request("/api/concepts?author_ids=author-excluded", { headers });
-    await expect(excluded.json()).resolves.toMatchObject({ concepts: [] });
+    const excluded = await app.request("/api/free-labels?author_ids=author-excluded", { headers });
+    await expect(excluded.json()).resolves.toMatchObject({ free_labels: [] });
     expect((await app.request("/api/units", { headers })).status).toBe(401);
   });
 
   it("serves the labels summary with counts, queue depth and coverage", async () => {
     await seedEnrichedTweets();
     const summary = (await (await app.request("/api/labels", { headers })).json()) as {
+      contract_hash: string;
+      free_label_registry_revision: number;
       taxonomy_version: number;
       labels: { name: string; count: number }[];
       free_labels: { name: string; count: number }[];
-      queue: { queued: number; done: number };
+      queue: { pending: number; running: number; retrying: number; blocked: number; done: number };
       coverage: { units_total: number; units_enriched: number };
     };
+    expect(summary.contract_hash.length).toBeGreaterThan(10);
+    expect(summary.free_label_registry_revision).toBeGreaterThan(1);
     expect(summary.taxonomy_version).toBe(1);
     expect(summary.labels.find((label) => label.name === "ai")?.count).toBe(1);
     expect(summary.free_labels).toEqual([{ name: "fp8", count: 1 }]);
-    expect(summary.queue).toMatchObject({ queued: 1, done: 1 });
+    expect(summary.queue).toMatchObject({ pending: 1, done: 1 });
     expect(summary.coverage).toEqual({ units_total: 2, units_enriched: 1 });
   });
 
-  it("serves concepts, one concept with relations, and 404 for unknown slugs", async () => {
+  it("serves approved free-labels, one detail, and 404 for unknown names", async () => {
     await seedEnrichedTweets();
-    const list = (await (await app.request("/api/concepts", { headers })).json()) as {
-      concepts: { slug: string }[];
+    const list = (await (await app.request("/api/free-labels", { headers })).json()) as {
+      free_labels: { name: string }[];
     };
-    expect(list.concepts.map((concept) => concept.slug)).toEqual(["fp8", "vllm"]);
+    expect(list.free_labels.map((entry) => entry.name)).toEqual(["fp8"]);
 
-    const detail = (await (await app.request("/api/concepts/vllm", { headers })).json()) as Record<
-      string,
-      unknown
-    >;
-    expect(detail).toMatchObject({
-      slug: "vllm",
-      name: "vLLM",
-      aliases: ["vllm engine"],
-      unit_count: 1,
-      tweet_count: 1,
-      related: [{ slug: "fp8", name: "FP8", shared_units: 1 }],
-    });
-    expect((await app.request("/api/concepts/nope", { headers })).status).toBe(404);
+    const detail = (await (
+      await app.request("/api/free-labels/fp8", { headers })
+    ).json()) as Record<string, unknown>;
+    expect(detail).toMatchObject({ name: "fp8", unit_count: 1, tweet_count: 1 });
+    expect((await app.request("/api/free-labels/nope", { headers })).status).toBe(404);
   });
 
-  it("serves a bounded concept graph with an optional label filter", async () => {
+  it("serves a bounded free-label graph with an optional label filter", async () => {
     await seedEnrichedTweets();
     const graph = (await (await app.request("/api/graph", { headers })).json()) as {
-      nodes: { slug: string }[];
+      nodes: { name: string }[];
       links: { source: string; target: string; weight: number }[];
     };
-    expect(graph.nodes.map((node) => node.slug).sort()).toEqual(["fp8", "vllm"]);
-    expect(graph.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
+    expect(graph.nodes.map((node) => node.name).sort()).toEqual(["fp8"]);
+    expect(graph.links).toEqual([]);
 
     const bounded = (await (await app.request("/api/graph?top=1", { headers })).json()) as {
       nodes: unknown[];
@@ -475,37 +515,123 @@ describe("enrichment endpoints", () => {
     expect((await app.request("/api/graph?top=5000", { headers })).status).toBe(400);
   });
 
-  it("gates manual enrichment runs to pool tokens and admin sessions", async () => {
-    const run = async (init: RequestInit = {}): Promise<Response> =>
-      app.request("/api/enrich/run", { method: "POST", ...init });
-    expect((await run()).status).toBe(401);
-    expect((await run({ headers: { cookie: sessionCookie("alice") } })).status).toBe(403);
-
-    const viaAdmin = await run({ headers: { cookie: sessionCookie("osolmaz") } });
-    expect(viaAdmin.status).toBe(200);
-    await expect(viaAdmin.json()).resolves.toEqual(EMPTY_RECEIPT);
-
-    const viaToken = await run({ headers: { authorization: bearer("alice") } });
-    expect(viaToken.status).toBe(200);
+  it("does not expose an in-process enrichment writer", async () => {
+    expect((await app.request("/api/enrich/run", { method: "POST" })).status).toBe(404);
   });
 
-  it("returns 500 with the error message when a manual run fails", async () => {
-    const failingApp = createApp({
-      config: testConfig,
-      store,
-      membership,
-      serviceAccounts,
-      unitStore,
-      enrich: { ...enrich, run: () => Promise.reject(new Error("router down")) },
-      now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
+  it("serves /api/enrichment/status with author-filtered counts", async () => {
+    await seedEnrichedTweets();
+    const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
+    const headers = { authorization: `Bearer ${issued.token}` };
+    const response = await app.request("/api/enrichment/status?author_ids=author-allowed", {
+      headers,
     });
-    const response = await failingApp.request("/api/enrich/run", {
-      method: "POST",
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      revision: string;
+      author_ids: string[];
+      contract_hash: string;
+      free_label_registry_revision: number;
+      taxonomy_version: number;
+      complete_through?: string;
+      totals: {
+        total: number;
+        pending: number;
+        blocked: number;
+        completed: number;
+        retrying: number;
+        running: number;
+      };
+      worker_recently_completed: boolean;
+      recent_errors: unknown[];
+    };
+    expect(body.author_ids).toEqual(["author-allowed"]);
+    expect(body.taxonomy_version).toBe(1);
+    expect(body.contract_hash.length).toBeGreaterThan(10);
+    expect(body.free_label_registry_revision).toBeGreaterThan(1);
+    expect(body.complete_through).toBeDefined();
+    expect(body.totals.total).toBe(1);
+    expect(body.totals.completed).toBe(1);
+    expect(body.worker_recently_completed).toBe(false);
+    expect(Array.isArray(body.recent_errors)).toBe(true);
+    if (body.complete_through === undefined) throw new Error("missing complete_through");
+    const matchingCutoff = await app.request(
+      `/api/free-labels?cutoff=${encodeURIComponent(body.complete_through)}` +
+        `&revision=${encodeURIComponent(body.revision)}`,
+      { headers },
+    );
+    expect(matchingCutoff.status).toBe(200);
+    const mismatchedCutoff = await app.request(
+      `/api/free-labels?cutoff=${encodeURIComponent("2020-01-01T00:00:00.000Z")}` +
+        `&revision=${encodeURIComponent(body.revision)}`,
+      { headers },
+    );
+    expect(mismatchedCutoff.status).toBe(409);
+    // No selection filter given → the endpoint sees the whole pool
+    const wide = await app.request("/api/enrichment/status", { headers });
+    const wideBody = (await wide.json()) as { totals: { total: number } };
+    expect(wideBody.totals.total).toBe(2);
+    // 409 on stale revision
+    const stale = await app.request(
+      `/api/enrichment/status?revision=${encodeURIComponent("old")}`,
+      { headers },
+    );
+    expect(stale.status).toBe(409);
+  });
+
+  it("uses only a current-contract durable receipt for the recent-completion signal", async () => {
+    enrich.lastReceipt = () => EMPTY_RECEIPT;
+    const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
+    const headers = { authorization: `Bearer ${issued.token}` };
+    const response = await app.request("/api/enrichment/status", { headers });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ worker_recently_completed: true });
+
+    enrich.lastReceipt = () => ({ ...EMPTY_RECEIPT, contract_hash: "superseded-contract" });
+    const stale = await app.request("/api/enrichment/status", { headers });
+    await expect(stale.json()).resolves.toMatchObject({ worker_recently_completed: false });
+    const admin = await app.request("/api/admin/enrichment", {
       headers: { cookie: sessionCookie("osolmaz") },
     });
-    expect(response.status).toBe(500);
-    await expect(response.json()).resolves.toEqual({ error: "router down" });
+    const adminBody = (await admin.json()) as Record<string, unknown>;
+    expect(adminBody["last_receipt"]).toBeUndefined();
+  });
+
+  it("applies a cutoff to /api/free-labels", async () => {
+    await seedEnrichedTweets();
+    // The seeded unit's tweet was captured at 2026-05-21; a cutoff before
+    // that produces no free labels.
+    const before = await app.request("/api/free-labels?cutoff=2020-01-01T00:00:00.000Z", {
+      headers,
+    });
+    const beforeBody = (await before.json()) as { free_labels: unknown[] };
+    expect(beforeBody.free_labels).toEqual([]);
+    const after = await app.request("/api/free-labels?cutoff=2030-01-01T00:00:00.000Z", {
+      headers,
+    });
+    const afterBody = (await after.json()) as { free_labels: { name: string }[] };
+    expect(afterBody.free_labels.map((entry) => entry.name)).toEqual(["fp8"]);
+  });
+
+  it("serves the admin enrichment surface with counts and contract hash", async () => {
+    await seedEnrichedTweets();
+    const response = await app.request("/api/admin/enrichment", { headers });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      viewer: { username: string };
+      contract_hash: string;
+      totals: { total: number };
+      worker_recently_completed: boolean;
+    };
+    expect(body.viewer.username).toBe("osolmaz");
+    expect(body.contract_hash.length).toBeGreaterThan(10);
+    expect(body.totals.total).toBeGreaterThan(0);
+    expect(body.worker_recently_completed).toBe(false);
+    // Non-admins are rejected
+    const nonAdmin = await app.request("/api/admin/enrichment", {
+      headers: { cookie: sessionCookie("alice") },
+    });
+    expect(nonAdmin.status).toBe(403);
   });
 });
 

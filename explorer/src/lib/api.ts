@@ -1,7 +1,6 @@
 import type {
-  ConceptGraph,
-  ConceptSummary as ApiConceptSummary,
-  ConceptsSummary,
+  FreeLabelGraph,
+  FreeLabelDetail as ApiFreeLabelDetail,
   LabelsSummary,
   PooledTweet,
   ServiceAccountScope,
@@ -56,9 +55,40 @@ export type AdminPoolResponse = {
   viewer: { username: string };
 };
 
+export type AdminEnrichment = {
+  contract_hash: string;
+  totals: {
+    pending: number;
+    running: number;
+    retrying: number;
+    blocked: number;
+    completed: number;
+  };
+  worker_recently_completed: boolean;
+  freshness_lag_seconds?: number;
+  recent_errors: readonly { error_class: string; count: number }[];
+};
+
+export type AdminFreeLabels = {
+  registry_revision: number;
+  labels: readonly {
+    name: string;
+    status: "candidate" | "approved" | "rejected";
+    unit_count: number;
+    reason?: string;
+  }[];
+  candidates: readonly {
+    name: string;
+    unit_count: number;
+    distinct_authors: number;
+    distinct_days: number;
+    representative_quotes: readonly { unit_id: string; tweet_id: string; quote: string }[];
+  }[];
+};
+
 /**
- * Enrichment API shapes (labels/concepts/graph). Local contract types for
- * the endpoints described in docs/labels-and-concepts-implementation-plan.md.
+ * Enrichment API shapes (labels/free labels/graph). Local contract types for
+ * the endpoints described in docs/labels-and-free-labels-implementation-plan.md.
  */
 export type LabelStat = {
   name: string;
@@ -66,35 +96,34 @@ export type LabelStat = {
   count: number;
 };
 
-export type ConceptSummary = {
-  slug: string;
+export type FreeLabelSummary = {
   name: string;
-  aliases: readonly string[];
   post_count: number;
 };
 
-export type RelatedConcept = {
-  slug: string;
+export type RelatedFreeLabel = {
   name: string;
   shared: number;
 };
 
-export type ConceptDetail = {
+export type FreeLabelDetail = {
   name: string;
-  aliases: readonly string[];
-  related: readonly RelatedConcept[];
+  related: readonly RelatedFreeLabel[];
   post_count: number;
 };
 
-export type ConceptGraphData = {
+export type FreeLabelGraphData = {
   nodes: readonly { id: string; name: string; docs: number; group: number }[];
   links: readonly { source: string; target: string; weight: number }[];
 };
 
+/** Free label listing (approved names only). */
+export type FreeLabelStat = { name: string; count: number };
+
 export type Filters = {
   contributors: readonly string[];
   labels: readonly string[];
-  concept: string;
+  freeLabel: string;
   q: string;
   since: string;
   until: string;
@@ -106,7 +135,7 @@ export type Filters = {
 export const defaultFilters: Filters = {
   contributors: [],
   labels: [],
-  concept: "",
+  freeLabel: "",
   q: "",
   since: "",
   until: "",
@@ -129,7 +158,7 @@ export function tweetsQueryString(filters: Filters, cursor?: string): string {
   const entries: [string, string | undefined][] = [
     ["contributors", nonEmpty(filters.contributors.join(","))],
     ["labels", nonEmpty(filters.labels.join(","))],
-    ["concept", nonEmpty(filters.concept)],
+    ["free_label", nonEmpty(filters.freeLabel)],
     ["q", nonEmpty(filters.q)],
     ["since", nonEmpty(filters.since)],
     ["until", until === undefined ? undefined : `${until}T23:59:59.999Z`],
@@ -198,27 +227,25 @@ export async function fetchLabels(): Promise<LabelStat[]> {
   }));
 }
 
-/** Full concept vocabulary with post counts. */
-export async function fetchConcepts(): Promise<ConceptSummary[]> {
-  const body = await getJson<ConceptsSummary>("/api/concepts");
+/**
+ * Approved free-label vocabulary with unit counts.
+ */
+export async function fetchFreeLabels(): Promise<FreeLabelSummary[]> {
+  const body = await getJson<{ free_labels: FreeLabelStat[] }>("/api/free-labels");
   if (body === undefined) throw new Error("session expired");
-  return body.concepts.map((concept) => ({
-    slug: concept.slug,
-    name: concept.name,
-    aliases: concept.aliases,
-    post_count: concept.unit_count,
+  return body.free_labels.map((entry) => ({
+    name: entry.name,
+    post_count: entry.count,
   }));
 }
 
-/** One concept with aliases, related concepts and its post count. */
-export async function fetchConcept(slug: string): Promise<ConceptDetail> {
-  const body = await getJson<ApiConceptSummary>(`/api/concepts/${encodeURIComponent(slug)}`);
+/** One approved free label with related approved labels. */
+export async function fetchFreeLabel(name: string): Promise<FreeLabelDetail> {
+  const body = await getJson<ApiFreeLabelDetail>(`/api/free-labels/${encodeURIComponent(name)}`);
   if (body === undefined) throw new Error("session expired");
   return {
     name: body.name,
-    aliases: body.aliases,
     related: body.related.map((entry) => ({
-      slug: entry.slug,
       name: entry.name,
       shared: entry.shared_units,
     })),
@@ -226,20 +253,20 @@ export async function fetchConcept(slug: string): Promise<ConceptDetail> {
   };
 }
 
-/** Bounded co-occurrence subgraph of the top concepts. */
-export async function fetchConceptGraph(top: number): Promise<ConceptGraphData> {
-  const body = await getJson<ConceptGraph>(`/api/graph?top=${String(top)}`);
+/** Bounded co-occurrence subgraph of the top approved free labels. */
+export async function fetchFreeLabelGraph(top: number): Promise<FreeLabelGraphData> {
+  const body = await getJson<FreeLabelGraph>(`/api/graph?top=${String(top)}`);
   if (body === undefined) throw new Error("session expired");
   const groups = communityGroups(
-    body.nodes.map((node) => node.slug),
+    body.nodes.map((node) => node.name),
     body.links,
   );
   return {
     nodes: body.nodes.map((node) => ({
-      id: node.slug,
+      id: node.name,
       name: node.name,
       docs: node.unit_count,
-      group: groups[node.slug] ?? -1,
+      group: groups[node.name] ?? -1,
     })),
     links: body.links,
   };
@@ -247,6 +274,18 @@ export async function fetchConceptGraph(top: number): Promise<ConceptGraphData> 
 
 export async function fetchAdminPool(): Promise<AdminPoolResponse> {
   const body = await getJson<AdminPoolResponse>("/api/admin/pool");
+  if (body === undefined) throw new Error("session expired");
+  return body;
+}
+
+export async function fetchAdminEnrichment(): Promise<AdminEnrichment> {
+  const body = await getJson<AdminEnrichment>("/api/admin/enrichment");
+  if (body === undefined) throw new Error("session expired");
+  return body;
+}
+
+export async function fetchAdminFreeLabels(): Promise<AdminFreeLabels> {
+  const body = await getJson<AdminFreeLabels>("/api/admin/free-labels");
   if (body === undefined) throw new Error("session expired");
   return body;
 }

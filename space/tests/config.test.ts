@@ -81,4 +81,23 @@ describe("loadConfig", () => {
       "INFERENCE_TOKEN is required",
     );
   });
+
+  it("requires measurable pricing and a conservative per-call bound for a cost ceiling", () => {
+    expect(() => loadConfig({ ...baseEnv, ENRICH_MAX_COST_USD: "1" })).toThrow(
+      "ENRICH_MAX_COST_USD requires",
+    );
+    const config = loadConfig({
+      ...baseEnv,
+      ENRICH_MAX_COST_USD: "1",
+      ENRICH_MAX_COST_PER_CALL_USD: "0.2",
+      ENRICH_INPUT_TOKEN_USD: "0.000001",
+      ENRICH_OUTPUT_TOKEN_USD: "0.000002",
+    });
+    expect(config).toMatchObject({
+      enrichMaxCostUsd: 1,
+      enrichMaxCostPerCallUsd: 0.2,
+      enrichInputTokenUsd: 0.000001,
+      enrichOutputTokenUsd: 0.000002,
+    });
+  });
 });

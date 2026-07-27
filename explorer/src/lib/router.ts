@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-/** Parsed explorer location: the feed shell, the graph index, or one concept. */
-export type Route = { kind: "home" } | { kind: "graph" } | { kind: "concept"; slug: string };
+/** Parsed explorer location: the feed shell, the graph index, or one free label. */
+export type Route = { kind: "home" } | { kind: "graph" } | { kind: "free-label"; slug: string };
 
 /** Map a pathname onto an explorer route; unknown paths fall back to the feed. */
 export function parseRoute(pathname: string): Route {
@@ -10,7 +10,7 @@ export function parseRoute(pathname: string): Route {
   const slug = segments[1];
   if (slug === undefined) return { kind: "graph" };
   try {
-    return { kind: "concept", slug: decodeURIComponent(slug) };
+    return { kind: "free-label", slug: decodeURIComponent(slug) };
   } catch {
     return { kind: "graph" };
   }

@@ -17,8 +17,7 @@ xtap-pool is three pieces in one repo:
   for downstream applications that should not scan the private dataset or
   repeat semantic extraction.
 
-See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the full
-design and delivery plan.
+See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the original design, [`docs/labels-and-free-labels-implementation-plan.md`](docs/labels-and-free-labels-implementation-plan.md) for the target two-output classification contract, and [`docs/durable-enrichment-implementation-plan.md`](docs/durable-enrichment-implementation-plan.md) for the durable worker and completion contract.
 
 ## Set up a pool (once, by the pool owner)
 
@@ -105,6 +104,20 @@ array for backwards compatibility, but multiple organization grants are
 deprecated because Hugging Face OAuth `orgIds` behaves like a required-org check
 rather than an any-of-orgs check. Setting a new organization replaces the
 previous one; add out-of-org friends as individual members.
+
+## Scheduled enrichment
+
+Production enrichment runs through the standalone `npm run enrich --workspace space`
+command, not the web server. [`.github/workflows/enrichment.yml`](.github/workflows/enrichment.yml)
+runs one bounded tick every six hours after `ENRICH_SCHEDULE_ENABLED=true` is
+set as a repository variable. Keep `XTAP_DATASET_WRITER_TOKEN` and
+`XTAP_INFERENCE_TOKEN` as separate purpose-scoped Actions secrets. Configure
+`XTAP_DATASET_REPO`, all cost and pricing variables, and the other bounded worker
+variables before enabling the schedule. Missing cost configuration fails before
+any provider call. Four scheduled runs make the daily scheduled maximum four
+times `ENRICH_MAX_COST_USD`. Scheduled and manually dispatched workflow runs
+share one non-cancelling concurrency group, and the web API exposes no writer.
+Do not launch an independent `enrich` command while a workflow run is active.
 
 ## Join a pool (each friend)
 

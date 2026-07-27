@@ -1,85 +1,76 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type { ConceptGraphData, ConceptSummary } from "../lib/api.js";
-import { fetchConceptGraph, fetchConcepts } from "../lib/api.js";
+import type { FreeLabelGraphData, FreeLabelSummary } from "../lib/api.js";
+import { fetchFreeLabelGraph, fetchFreeLabels } from "../lib/api.js";
 import { formatCount } from "../lib/format.js";
 import { navigate } from "../lib/router.js";
 import { AppLink } from "./AppLink.js";
-import { ConceptGraph } from "./ui/ConceptGraph.js";
+import { FreeLabelGraph } from "./ui/FreeLabelGraph.js";
 
-/** Node budget for the co-occurrence subgraph request. */
 const GRAPH_TOP = 300;
 
-type GraphPageState =
+type State =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; graph: ConceptGraphData; concepts: readonly ConceptSummary[] };
+  | { status: "ready"; graph: FreeLabelGraphData; labels: readonly FreeLabelSummary[] };
 
-function ConceptIndex({ concepts }: { concepts: readonly ConceptSummary[] }): React.JSX.Element {
-  const sorted = [...concepts].sort((a, b) => b.post_count - a.post_count);
-  return (
-    <ul className="columns-2 gap-6 text-sm md:columns-3">
-      {sorted.map((concept) => (
-        <li key={concept.slug} className="flex items-baseline gap-2">
-          <AppLink href={`/graph/${concept.slug}`} className="truncate text-(--x-accent)">
-            {concept.name}
-          </AppLink>
-          <span className="text-(--x-muted)">{formatCount(concept.post_count)}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** /graph: force-directed concept map plus a text index with post counts. */
+/** Approved free-label co-occurrence view. */
 export function GraphPage(): React.JSX.Element {
-  const [state, setState] = useState<GraphPageState>({ status: "loading" });
-
+  const [state, setState] = useState<State>({ status: "loading" });
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([fetchConceptGraph(GRAPH_TOP), fetchConcepts()]).then(
-      ([graph, concepts]) => {
-        if (!cancelled) setState({ status: "ready", graph, concepts });
+    void Promise.all([fetchFreeLabelGraph(GRAPH_TOP), fetchFreeLabels()]).then(
+      ([graph, labels]) => {
+        if (!cancelled) setState({ status: "ready", graph, labels });
       },
       (error: unknown) => {
-        const message = error instanceof Error ? error.message : "failed to load";
-        if (!cancelled) setState({ status: "error", message });
+        if (!cancelled)
+          setState({
+            status: "error",
+            message: error instanceof Error ? error.message : "failed to load",
+          });
       },
     );
     return (): void => {
       cancelled = true;
     };
   }, []);
-
-  const openConcept = useCallback((id: string) => {
-    navigate(`/graph/${id}`);
+  const openFreeLabel = useCallback((name: string): void => {
+    navigate(`/graph/${encodeURIComponent(name)}`);
   }, []);
-
-  if (state.status === "loading") {
-    return <p className="p-4 text-sm text-(--x-muted)">Loading…</p>;
-  }
-  if (state.status === "error") {
-    return <p className="p-4 text-sm text-red-500">{state.message}</p>;
-  }
-  if (state.concepts.length === 0) {
-    return (
-      <p className="p-4 text-sm text-(--x-muted)">
-        No concepts yet. They appear once pooled posts have been enriched.
-      </p>
-    );
-  }
+  if (state.status === "loading") return <p className="p-4 text-sm text-(--x-muted)">Loading…</p>;
+  if (state.status === "error") return <p className="p-4 text-sm text-red-500">{state.message}</p>;
+  if (state.labels.length === 0)
+    return <p className="p-4 text-sm text-(--x-muted)">No approved free labels yet.</p>;
   return (
     <section className="flex flex-col gap-4 p-4">
       <header className="border-b border-(--x-border) pb-4">
-        <h2 className="text-lg font-bold">Concept graph</h2>
+        <h2 className="text-lg font-bold">Free-label graph</h2>
         <p className="mt-1 text-sm text-(--x-muted)">
-          Concepts extracted from pooled posts, linked when they appear in the same conversation.
-          Click a node to open its page.
+          Approved labels linked by unit co-occurrence.
         </p>
       </header>
-      <ConceptGraph nodes={state.graph.nodes} links={state.graph.links} onNavigate={openConcept} />
-      <h3 className="font-bold">All concepts</h3>
-      <ConceptIndex concepts={state.concepts} />
+      <p className="text-sm text-(--x-muted)">
+        {state.graph.links.length.toLocaleString()} co-occurrence edges
+      </p>
+      <FreeLabelGraph
+        nodes={state.graph.nodes}
+        links={state.graph.links}
+        onNavigate={openFreeLabel}
+      />
+      <h3 className="font-bold">All approved free labels</h3>
+      <ul className="columns-2 gap-6 text-sm md:columns-3">
+        {[...state.labels]
+          .sort((a, b) => b.post_count - a.post_count || a.name.localeCompare(b.name))
+          .map((label) => (
+            <li key={label.name} className="flex items-baseline gap-2">
+              <AppLink href={`/graph/${label.name}`} className="truncate text-(--x-accent)">
+                {label.name}
+              </AppLink>
+              <span className="text-(--x-muted)">{formatCount(label.post_count)}</span>
+            </li>
+          ))}
+      </ul>
     </section>
   );
 }
