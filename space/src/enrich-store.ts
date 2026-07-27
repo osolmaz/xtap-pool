@@ -504,7 +504,7 @@ export class EnrichStore {
                     contract_hash, first_queued_at, latest_activity_at, next_retry_at,
                     lease_owner, lease_expires_at
              FROM enrich_queue
-             WHERE status IN ('pending', 'retrying')
+             WHERE status IN ('pending', 'retrying', 'blocked')
                AND (next_retry_at IS NULL OR next_retry_at <= ?)
                ${excludeSql}
              ORDER BY ${orderBy} LIMIT ?`,
@@ -1087,6 +1087,10 @@ export class EnrichStore {
    * the current durable evidence.
    */
   promotionSignals(name: string): { units: number; authors: number; days: number } {
+    const eligible = eligibleUnits({
+      taxonomyVersion: this.taxonomyVersion,
+      contractHash: this.contractHash,
+    });
     const row = this.db
       .prepare(
         `SELECT COUNT(DISTINCT a.unit_id) AS units,
@@ -1095,9 +1099,10 @@ export class EnrichStore {
          FROM label_assignments a
          JOIN unit_members um ON um.unit_id = a.unit_id
          JOIN tweets tw ON tw.id = um.tweet_id
-         WHERE a.kind = 'free' AND a.name = ?`,
+         WHERE a.kind = 'free' AND a.name = ?
+           AND a.unit_id IN (${eligible.sql})`,
       )
-      .get(name) as { units: number; authors: number; days: number };
+      .get(name, ...eligible.params) as { units: number; authors: number; days: number };
     return { units: row.units, authors: row.authors, days: row.days };
   }
 

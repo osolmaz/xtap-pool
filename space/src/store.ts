@@ -351,6 +351,9 @@ function labelFilters(query: TweetQuery): Filter[] {
           sql: `EXISTS (
                   SELECT 1 FROM label_assignments la
                   JOIN unit_members um ON um.unit_id = la.unit_id
+                  JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+                  JOIN enrichment e ON e.unit_id = eq.unit_id
+                    AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
                   WHERE um.tweet_id = tweets.id AND la.kind = 'preset' AND la.name = ?
                 )`,
           values: [label],
@@ -361,6 +364,9 @@ function labelFilters(query: TweetQuery): Filter[] {
         sql: `tweets.id IN (
                 SELECT um.tweet_id FROM unit_members um
                 JOIN label_assignments la ON la.unit_id = um.unit_id
+                JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+                JOIN enrichment e ON e.unit_id = eq.unit_id
+                  AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
                 WHERE la.kind = 'preset' AND la.name IN (${query.labels.map(() => "?").join(",")})
               )`,
         values: query.labels,
@@ -372,6 +378,9 @@ function labelFilters(query: TweetQuery): Filter[] {
       sql: `tweets.id NOT IN (
               SELECT um.tweet_id FROM unit_members um
               JOIN label_assignments la ON la.unit_id = um.unit_id
+              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+              JOIN enrichment e ON e.unit_id = eq.unit_id
+                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
               WHERE la.kind = 'preset'
             )`,
       values: [],
@@ -387,6 +396,9 @@ function freeLabelFilters(query: TweetQuery): Filter[] {
       sql: `tweets.id IN (
               SELECT um.tweet_id FROM unit_members um
               JOIN label_assignments la ON la.unit_id = um.unit_id
+              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
+              JOIN enrichment e ON e.unit_id = eq.unit_id
+                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
               JOIN free_label_registry r ON r.name = la.name AND r.status = 'approved'
               WHERE la.kind = 'free' AND la.name = ?
             )`,

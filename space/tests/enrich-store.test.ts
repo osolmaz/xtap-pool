@@ -174,6 +174,16 @@ describe("queue state machine", () => {
     expect(enrich.claimQueued(10)).toHaveLength(0);
   });
 
+  it("reclaims blocked units for their infrequent scheduled retry", () => {
+    insertAndRegister([{ id: "100" }]);
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+      enrich.markTransientFailure("100:someone", "boom", "timeout", NOW);
+    }
+    expect(enrich.queueEntry("100:someone")?.status).toBe("blocked");
+    expect(enrich.claimQueued(10)).toHaveLength(1);
+    expect(enrich.queueEntry("100:someone")?.status).toBe("running");
+  });
+
   it("does not settle the queue for rows from another taxonomy version", () => {
     insertAndRegister([{ id: "100" }]);
     enrich.applyEnrichment(row({ taxonomy_version: 2 }));
@@ -366,6 +376,22 @@ describe("assignments and evidence", () => {
     expect(enrich.approvedFreeLabels()).toEqual([]);
     const visible = enrich.visibleAssignments(["100:someone"]).get("100:someone");
     expect(visible?.free_labels).toEqual([]);
+  });
+
+  it("excludes stale assignments from registry promotion signals", () => {
+    insertAndRegister([{ id: "100", text: "vLLM ships fp8" }]);
+    enrich.applyEnrichment(
+      row({
+        free_labels: [{ name: "fp8", evidence: [{ tweet_id: "100", quote: "fp8" }] }],
+      }),
+    );
+    expect(enrich.promotionSignals("fp8").units).toBe(1);
+
+    insertAndRegister([
+      { id: "101", conversation_id: "100", in_reply_to_status_id: "100", text: "new reply" },
+    ]);
+    expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
+    expect(enrich.promotionSignals("fp8")).toEqual({ units: 0, authors: 0, days: 0 });
   });
 });
 

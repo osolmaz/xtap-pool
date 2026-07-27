@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { computeInputHash } from "@xtap-pool/shared";
+
+import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore, decodeCursor, encodeCursor, ftsMatchQuery } from "../src/store.js";
 import { makePooled } from "./helpers.js";
 
@@ -149,6 +152,59 @@ describe("query", () => {
       (record) => `${record.tweet.id}:${record.tweet.contributed_by}`,
     );
     expect(all).toEqual(["3:alice", "2:osolmaz", "2:alice", "1:osolmaz"]);
+  });
+});
+
+describe("current enrichment filters", () => {
+  it("does not expose stale preset or free-label assignments after unit membership changes", () => {
+    const now = new Date("2026-07-06T12:00:00.000Z");
+    const contractHash = "current-contract";
+    const enrich = new EnrichStore(store.database, 1, () => now, contractHash);
+    const first = makePooled({
+      id: "10",
+      conversation_id: "10",
+      text: "vllm is fast",
+    });
+    store.insert([first]);
+    enrich.registerTweets([first]);
+    const unitId = "10:someone";
+    const members = enrich.unitSemanticMembers(unitId);
+    enrich.applyEnrichment({
+      unit_id: unitId,
+      tweet_ids: ["10"],
+      input_hash: computeInputHash(unitId, members),
+      contract_hash: contractHash,
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "10", quote: "vllm" }] }],
+      free_labels: [{ name: "vllm", evidence: [{ tweet_id: "10", quote: "vllm" }] }],
+      model: "test-model",
+      taxonomy_version: 1,
+      enriched_at: now.toISOString(),
+    });
+    enrich.recordCandidateIfNew("vllm");
+    enrich.promoteName("vllm", "test");
+
+    expect(store.query({ labels: ["ai"] }).records.map((entry) => entry.tweet.id)).toEqual(["10"]);
+    expect(store.query({ freeLabel: "vllm" }).records.map((entry) => entry.tweet.id)).toEqual([
+      "10",
+    ]);
+
+    const reply = makePooled({
+      id: "11",
+      conversation_id: "10",
+      in_reply_to_status_id: "10",
+      text: "new member",
+    });
+    store.insert([reply]);
+    enrich.registerTweets([reply]);
+
+    expect(store.query({ labels: ["ai"] }).records).toEqual([]);
+    expect(store.query({ freeLabel: "vllm" }).records).toEqual([]);
+    expect(
+      store
+        .query({ unlabeled: true, dedup: false })
+        .records.map((entry) => entry.tweet.id)
+        .sort(),
+    ).toEqual(["10", "11"]);
   });
 });
 

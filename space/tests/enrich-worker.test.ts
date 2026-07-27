@@ -237,7 +237,9 @@ describe("runEnrichTick", () => {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const receipt = await runEnrichTick(deps(failing));
       expect(receipt.calls).toBe(1);
-      store.database.prepare("UPDATE enrich_queue SET next_retry_at = NULL").run();
+      if (attempt < MAX_ATTEMPTS) {
+        store.database.prepare("UPDATE enrich_queue SET next_retry_at = NULL").run();
+      }
     }
     const entry = enrichStore.queueEntry(unitId);
     expect(entry?.status).toBe("blocked");
