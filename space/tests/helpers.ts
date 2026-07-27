@@ -51,6 +51,7 @@ export class FakeHub implements HubClient {
   files = new Map<string, string>();
   commits: { paths: string[]; title: string }[] = [];
   failNextCommit = false;
+  failDownloadAttempts = 0;
 
   listJsonlFiles(prefix: string): Promise<string[]> {
     return Promise.resolve(
@@ -61,6 +62,10 @@ export class FakeHub implements HubClient {
   }
 
   downloadFile(path: string): Promise<string> {
+    if (this.failDownloadAttempts > 0) {
+      this.failDownloadAttempts -= 1;
+      return Promise.reject(new Error("hub unavailable"));
+    }
     const content = this.files.get(path);
     if (content === undefined) return Promise.reject(new Error(`missing: ${path}`));
     return Promise.resolve(content);

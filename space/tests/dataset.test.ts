@@ -10,6 +10,26 @@ import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 import { FakeHub, makePooled, makeTweet } from "./helpers.js";
 
+function receipt(finishedAt: string): Record<string, unknown> {
+  return {
+    started_at: "2026-07-06T00:00:00.000Z",
+    finished_at: finishedAt,
+    units: 1,
+    calls: 1,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    failures: 0,
+    retries: 0,
+    blocked: 0,
+    contract_hash: "external-contract",
+    worker_id: "external-worker",
+    discarded_assignments: 0,
+    new_candidates: 0,
+    new_approvals: 0,
+    new_rejections: 0,
+  };
+}
+
 let dir: string;
 let hub: FakeHub;
 let mirror: DatasetMirror;
@@ -134,6 +154,101 @@ describe("DatasetMirror enrichment rebuild", () => {
     expect(enrich.registrySnapshot()).toEqual([]);
     // No preset assignments materialize either.
     expect(enrich.approvedFreeLabels()).toEqual([]);
+  });
+});
+
+describe("DatasetMirror external enrichment refresh", () => {
+  it("replays changed durable shards and keeps the newest valid receipt", async () => {
+    hub.files.set(
+      "data/osolmaz/2026/05/tweets-2026-05-21.jsonl",
+      `${JSON.stringify(makePooled({ id: "1" }))}\n${JSON.stringify(makePooled({ id: "2", author: { username: "other" } }))}\n`,
+    );
+    const enrich = new EnrichStore(store.database, 1);
+    await mirror.rebuild(store, enrich);
+    await mirror.rebuildEnrichment(enrich);
+    const queued = enrich.claimQueued(10);
+    enrich.releaseClaims();
+    const first = queued.find((item) => item.unitId === "1:someone");
+    const second = queued.find((item) => item.unitId === "2:other");
+    if (first === undefined || second === undefined) throw new Error("expected queued units");
+
+    hub.files.set(
+      "enrichment/2026/07/enrichment-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: first.unitId,
+        tweet_ids: ["1"],
+        input_hash: first.inputHash,
+        contract_hash: first.contractHash,
+        preset_labels: [{ name: "ai", evidence: [{ tweet_id: "1", quote: "hello world" }] }],
+        free_labels: [],
+        model: "m",
+        taxonomy_version: 1,
+        enriched_at: "2026-07-06T00:00:00.000Z",
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/attempts/2026/07/attempts-2026-07-06.jsonl",
+      `${JSON.stringify({
+        unit_id: second.unitId,
+        input_hash: second.inputHash,
+        contract_hash: second.contractHash,
+        attempt: 1,
+        outcome: "transient_failure",
+        error_class: "timeout",
+        at: "2026-07-06T00:00:00.000Z",
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/registry/2026/07/registry-2026-07-06.jsonl",
+      `${JSON.stringify({
+        name: "external-label",
+        status: "candidate",
+        at: "2026-07-06T00:00:00.000Z",
+        actor: "worker",
+        contract_hash: first.contractHash,
+        registry_revision: 2,
+      })}\n`,
+    );
+    hub.files.set(
+      "enrichment/receipts/2026-07-06.jsonl",
+      [
+        '{"finished_at":"2026-07-06T00:00:00.000Z"}',
+        JSON.stringify(receipt("2026-07-06T00:01:00.000Z")),
+        JSON.stringify(receipt("2026-07-06T00:02:00.000Z")),
+      ]
+        .join("\n")
+        .concat("\n"),
+    );
+
+    const refreshed = await mirror.refreshEnrichment(enrich);
+    expect(refreshed).toMatchObject({ files: 4, rows: 1, attempts: 1, registryEvents: 1 });
+    expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
+    expect(enrich.queueEntry(second.unitId)?.status).toBe("retrying");
+    expect(enrich.registryStatus("external-label")).toBe("candidate");
+    expect(mirror.latestReceipt()?.finished_at).toBe("2026-07-06T00:02:00.000Z");
+
+    hub.files.set(
+      "enrichment/receipts/2026-07-06.jsonl",
+      `${JSON.stringify(receipt("2026-07-06T00:03:00.000Z"))}\n`,
+    );
+    hub.failDownloadAttempts = 2;
+    await expect(mirror.refreshEnrichment(enrich)).rejects.toThrow("hub unavailable");
+    expect(mirror.latestReceipt()?.finished_at).toBe("2026-07-06T00:02:00.000Z");
+    expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
+  });
+
+  it("eventually replays every missing shard while keeping each poll bounded", async () => {
+    const enrich = new EnrichStore(store.database, 1);
+    for (let day = 1; day <= 6; day += 1) {
+      const date = `2026-08-${String(day).padStart(2, "0")}`;
+      hub.files.set(`enrichment/2026/08/enrichment-${date}.jsonl`, "");
+    }
+
+    await expect(mirror.refreshEnrichment(enrich)).resolves.toMatchObject({ files: 4 });
+    await expect(mirror.refreshEnrichment(enrich)).resolves.toMatchObject({ files: 2 });
+    for (const path of hub.files.keys()) {
+      expect(existsSync(join(dir, path))).toBe(true);
+    }
   });
 });
 

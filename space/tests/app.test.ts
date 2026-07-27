@@ -596,6 +596,16 @@ describe("enrichment endpoints", () => {
     expect(stale.status).toBe(409);
   });
 
+  it("uses the newest durable receipt for the worker activity signal", async () => {
+    enrich.lastReceipt = () => EMPTY_RECEIPT;
+    const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
+    const response = await app.request("/api/enrichment/status", {
+      headers: { authorization: `Bearer ${issued.token}` },
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ worker_active: true });
+  });
+
   it("applies a cutoff to /api/free-labels", async () => {
     await seedEnrichedTweets();
     // The seeded unit's tweet was captured at 2026-05-21; a cutoff before

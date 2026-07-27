@@ -761,7 +761,8 @@ function buildEnrichmentSurface(
   const recent = deps.enrich.store.recentErrorClasses();
   const workerReceipt = deps.enrich.lastReceipt?.();
   const workerActive =
-    workerReceipt !== undefined && Date.now() - Date.parse(workerReceipt.finished_at) < 15 * 60_000;
+    workerReceipt !== undefined &&
+    now().getTime() - Date.parse(workerReceipt.finished_at) < 15 * 60_000;
   const freshnessLagSeconds = freshnessLag(now(), counts.newestCompletedAt);
   return {
     contract_hash: deps.enrich.store.currentContractHash(),

@@ -21,6 +21,8 @@ export {
   attemptEventPathFor,
   registryEventPathFor,
   receiptPathFor,
+  enrichReceiptSchema,
+  parseEnrichReceipt,
   attemptEventSchema,
   attemptOutcomeSchema,
   errorClassSchema,

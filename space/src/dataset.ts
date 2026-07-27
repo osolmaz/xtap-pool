@@ -6,11 +6,12 @@ import { commit, downloadFile, listFiles } from "@huggingface/hub";
 import {
   attemptEventSchema,
   freeLabelEventSchema,
+  parseEnrichReceipt,
   parseEnrichmentRow,
   datasetPathFor,
   validateTweet,
 } from "@xtap-pool/shared";
-import type { AttemptEvent, FreeLabelEvent, PooledTweet } from "@xtap-pool/shared";
+import type { AttemptEvent, EnrichReceipt, FreeLabelEvent, PooledTweet } from "@xtap-pool/shared";
 
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
@@ -21,6 +22,25 @@ export type HubClient = {
   downloadFile(path: string): Promise<string>;
   commitFiles(files: readonly { path: string; content: string }[], title: string): Promise<void>;
 };
+
+export type EnrichmentRefresh = {
+  files: number;
+  rows: number;
+  attempts: number;
+  registryEvents: number;
+  receipt?: EnrichReceipt;
+};
+
+type EnrichmentShardUpdate = {
+  path: string;
+  content: string;
+  kind: EnrichmentShardKind;
+};
+
+type EnrichmentReplayCounts = Pick<EnrichmentRefresh, "rows" | "attempts" | "registryEvents">;
+
+const REFRESH_SHARDS_PER_KIND = 4;
+const REFRESH_ATTEMPTS = 2;
 
 function isNotFound(error: unknown): boolean {
   return (
@@ -111,6 +131,8 @@ export function createHubClient(datasetRepo: string, accessToken: string): HubCl
  * ingest commits to the Hub before anything is persisted locally.
  */
 export class DatasetMirror {
+  private lastReceipt: EnrichReceipt | undefined;
+
   constructor(
     private readonly hub: HubClient,
     private readonly rootDir: string,
@@ -162,6 +184,7 @@ export class DatasetMirror {
   async rebuildEnrichment(
     enrich: EnrichStore,
   ): Promise<{ files: number; rows: number; attempts: number; registryEvents: number }> {
+    this.lastReceipt = undefined;
     const allPaths = (await this.hub.listJsonlFiles("enrichment")).sort();
     const attemptPaths: string[] = [];
     const registryPaths: string[] = [];
@@ -170,7 +193,10 @@ export class DatasetMirror {
     for (const path of allPaths) {
       const content = await this.downloadAndMirror(path);
       const kind = classifyEnrichmentPath(path);
-      if (kind === "receipt") continue;
+      if (kind === "receipt") {
+        this.recordLatestReceipt(content);
+        continue;
+      }
       if (kind === "attempt") {
         attemptPaths.push(path);
         continue;
@@ -191,12 +217,118 @@ export class DatasetMirror {
     return { files, rows, attempts, registryEvents };
   }
 
+  /** The newest valid durable worker receipt observed while reading the Hub. */
+  latestReceipt(): EnrichReceipt | undefined {
+    return this.lastReceipt;
+  }
+
+  /**
+   * Reload only a bounded set of recent durable enrichment shards. The Hub
+   * reads are staged before changing the mirror or SQLite projection, so a
+   * transient failure leaves the last known-good reader state intact.
+   */
+  async refreshEnrichment(enrich: EnrichStore): Promise<EnrichmentRefresh> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < REFRESH_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.refreshEnrichmentOnce(enrich);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  private async refreshEnrichmentOnce(enrich: EnrichStore): Promise<EnrichmentRefresh> {
+    const selected = selectEnrichmentRefreshShards(
+      await this.hub.listJsonlFiles("enrichment"),
+      (path) => existsSync(this.localPath(path)),
+    );
+    const updates: EnrichmentShardUpdate[] = [];
+    for (const path of selected) {
+      const content = await this.hub.downloadFile(path);
+      const local = this.localPath(path);
+      if (!existsSync(local) || readFileSync(local, "utf8") !== content) {
+        updates.push({ path, content, kind: classifyEnrichmentPath(path) });
+      }
+    }
+
+    const counts: EnrichmentReplayCounts = { rows: 0, attempts: 0, registryEvents: 0 };
+    let latestReceipt = this.lastReceipt;
+    for (const update of updates) {
+      if (update.kind === "receipt") {
+        latestReceipt = this.latestReceiptIn(update.content, latestReceipt);
+      } else {
+        this.applyRefreshUpdate(enrich, update, counts);
+      }
+    }
+    for (const update of updates) {
+      const local = this.localPath(update.path);
+      mkdirSync(dirname(local), { recursive: true });
+      writeFileSync(local, update.content);
+    }
+    this.lastReceipt = latestReceipt;
+    return {
+      files: updates.length,
+      ...counts,
+      ...(this.lastReceipt === undefined ? {} : { receipt: this.lastReceipt }),
+    };
+  }
+
+  private applyRefreshUpdate(
+    enrich: EnrichStore,
+    update: EnrichmentShardUpdate,
+    counts: EnrichmentReplayCounts,
+  ): void {
+    switch (update.kind) {
+      case "row":
+        counts.rows += applyEnrichmentLines(enrich, update.content);
+        return;
+      case "registry":
+        counts.registryEvents += replayRegistryLines(enrich, update.content);
+        return;
+      case "attempt":
+        counts.attempts += replayAttemptLines(enrich, update.content);
+        return;
+      case "receipt":
+        return;
+    }
+  }
+
   private async downloadAndMirror(path: string): Promise<string> {
     const content = await this.hub.downloadFile(path);
     const local = this.localPath(path);
     mkdirSync(dirname(local), { recursive: true });
     writeFileSync(local, content);
     return content;
+  }
+
+  private recordLatestReceipt(content: string): void {
+    this.lastReceipt = this.latestReceiptIn(content, this.lastReceipt);
+  }
+
+  private latestReceiptIn(
+    content: string,
+    current: EnrichReceipt | undefined,
+  ): EnrichReceipt | undefined {
+    let latest = current;
+    for (const line of content.split("\n")) {
+      if (line.trim() === "") continue;
+      let candidate: unknown;
+      try {
+        candidate = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const receipt = parseEnrichReceipt(candidate);
+      if (
+        receipt !== undefined &&
+        (latest === undefined || receipt.finished_at > latest.finished_at)
+      ) {
+        latest = receipt;
+      }
+    }
+    return latest;
   }
 
   private async replayShards(
@@ -285,11 +417,29 @@ export class DatasetMirror {
  * schema flow through `applyEnrichment` as normal. Previous output-contract
  * rows are ignored, so the queue stays pending until durable reprocessing.
  */
-function classifyEnrichmentPath(path: string): "receipt" | "attempt" | "registry" | "row" {
+type EnrichmentShardKind = "receipt" | "attempt" | "registry" | "row";
+
+function classifyEnrichmentPath(path: string): EnrichmentShardKind {
   if (path.startsWith("enrichment/receipts/")) return "receipt";
   if (path.startsWith("enrichment/attempts/")) return "attempt";
   if (path.startsWith("enrichment/registry/")) return "registry";
   return "row";
+}
+
+function selectEnrichmentRefreshShards(
+  paths: readonly string[],
+  isMirrored: (path: string) => boolean,
+): string[] {
+  const selected = new Set<string>();
+  for (const kind of ["row", "attempt", "registry", "receipt"] as const) {
+    const matching = paths.filter((path) => classifyEnrichmentPath(path) === kind).sort();
+    const oldestMissing = matching
+      .filter((path) => !isMirrored(path))
+      .slice(0, Math.floor(REFRESH_SHARDS_PER_KIND / 2));
+    const recent = matching.slice(-Math.ceil(REFRESH_SHARDS_PER_KIND / 2));
+    for (const path of [...oldestMissing, ...recent]) selected.add(path);
+  }
+  return [...selected].sort();
 }
 
 function applyEnrichmentLines(enrich: EnrichStore, content: string): number {

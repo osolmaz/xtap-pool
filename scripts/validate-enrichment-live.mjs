@@ -75,13 +75,17 @@ console.log("receipt:", JSON.stringify(receipt));
 const db = store.database;
 const labelCounts = db
   .prepare(
-    "SELECT label, COUNT(*) AS n FROM tweet_labels WHERE kind='preset' GROUP BY label ORDER BY n DESC",
+    "SELECT name AS label, COUNT(*) AS n FROM label_assignments WHERE kind='preset' GROUP BY name ORDER BY n DESC",
   )
   .all();
 console.log("preset label counts:", JSON.stringify(labelCounts));
 const freeTop = db
   .prepare(
-    "SELECT label, COUNT(*) AS n FROM tweet_labels WHERE kind='free' GROUP BY label ORDER BY n DESC LIMIT 10",
+    `SELECT a.name AS label, COUNT(*) AS n
+     FROM label_assignments a
+     JOIN free_label_registry r ON r.name = a.name AND r.status = 'approved'
+     WHERE a.kind = 'free'
+     GROUP BY a.name ORDER BY n DESC LIMIT 10`,
   )
   .all();
 console.log("top free labels:", JSON.stringify(freeTop));

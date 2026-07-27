@@ -46,8 +46,10 @@ describe("ServiceAccountRegistry", () => {
     expect(registry.authorize(issued.token, "taxonomy:read")).toBeDefined();
 
     const durable = hub.files.get(SERVICE_ACCOUNTS_PATH) ?? "";
+    const secret = /^xtap_sa_[^_]+_[^_]+_(.+)$/.exec(issued.token)?.[1];
+    if (secret === undefined) throw new Error("issued token is malformed");
     expect(durable).not.toContain(issued.token);
-    expect(durable).not.toContain(issued.token.split("_").at(-1));
+    expect(durable).not.toContain(secret);
     expect(durable).toContain("token_hash");
   });
 

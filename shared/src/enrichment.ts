@@ -196,26 +196,43 @@ export type EnrichmentStatus = {
   recent_errors: readonly ErrorClassBreakdown[];
 };
 
-/** One enrichment run receipt, appended to `enrichment/receipts/<date>.jsonl`. */
-export type EnrichReceipt = {
-  started_at: string;
-  finished_at: string;
-  units: number;
-  calls: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cost_usd?: number | undefined;
-  failures: number;
-  retries: number;
-  blocked: number;
-  contract_hash: string;
-  worker_id: string;
-  discarded_assignments: number;
-  new_candidates: number;
-  new_approvals: number;
-  new_rejections: number;
-  stopped_by?: string;
-};
+/**
+ * One current enrichment run receipt, appended to
+ * `enrichment/receipts/<date>.jsonl`.
+ *
+ * Reader processes use this strict schema before reporting a durable worker
+ * heartbeat. Older receipt shapes are intentionally not coerced into the
+ * current admin signal.
+ */
+export const enrichReceiptSchema = z
+  .object({
+    started_at: z.iso.datetime({ offset: true }),
+    finished_at: z.iso.datetime({ offset: true }),
+    units: z.number().int().nonnegative(),
+    calls: z.number().int().nonnegative(),
+    prompt_tokens: z.number().int().nonnegative(),
+    completion_tokens: z.number().int().nonnegative(),
+    cost_usd: z.number().nonnegative().optional(),
+    failures: z.number().int().nonnegative(),
+    retries: z.number().int().nonnegative(),
+    blocked: z.number().int().nonnegative(),
+    contract_hash: z.string().min(1),
+    worker_id: z.string().min(1),
+    discarded_assignments: z.number().int().nonnegative(),
+    new_candidates: z.number().int().nonnegative(),
+    new_approvals: z.number().int().nonnegative(),
+    new_rejections: z.number().int().nonnegative(),
+    stopped_by: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type EnrichReceipt = z.infer<typeof enrichReceiptSchema>;
+
+/** Parse a current durable receipt, rejecting legacy or malformed rows. */
+export function parseEnrichReceipt(candidate: unknown): EnrichReceipt | undefined {
+  const parsed = enrichReceiptSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : undefined;
+}
 
 // --- Derivations shared by ingest, worker and explorer ---
 

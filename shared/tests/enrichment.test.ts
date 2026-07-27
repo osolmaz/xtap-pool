@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   attemptEventPathFor,
   attemptEventSchema,
+  enrichReceiptSchema,
   enrichmentPathFor,
   enrichmentRowSchema,
   isCurrentEnrichmentRow,
@@ -116,6 +117,35 @@ describe("dataset paths", () => {
     expect(registryEventPathFor("2026-07-06T12:34:56.000Z")).toBe(
       "enrichment/registry/2026/07/registry-2026-07-06.jsonl",
     );
+  });
+});
+
+describe("enrichReceiptSchema", () => {
+  const receipt = {
+    started_at: "2026-07-06T00:00:00.000Z",
+    finished_at: "2026-07-06T00:01:00.000Z",
+    units: 1,
+    calls: 1,
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    failures: 0,
+    retries: 0,
+    blocked: 0,
+    contract_hash: "contract",
+    worker_id: "worker",
+    discarded_assignments: 0,
+    new_candidates: 0,
+    new_approvals: 0,
+    new_rejections: 0,
+  };
+
+  it("accepts only the current durable receipt contract", () => {
+    expect(enrichReceiptSchema.safeParse(receipt).success).toBe(true);
+    expect(enrichReceiptSchema.safeParse({ ...receipt, unexpected: true }).success).toBe(false);
+    expect(enrichReceiptSchema.safeParse({ ...receipt, finished_at: "not-a-date" }).success).toBe(
+      false,
+    );
+    expect(enrichReceiptSchema.safeParse({ finished_at: receipt.finished_at }).success).toBe(false);
   });
 });
 

@@ -55,6 +55,7 @@ let inferenceCredential: InferenceCredentialReadiness = config.enrichEnabled
   : { credential: "not_required" };
 let readiness: AppReadiness;
 let credentialRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let enrichmentRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 [datasetCredential, inferenceCredential] = await Promise.all([
   checkDatasetCredential({ token: config.hfToken, datasetRepo: config.datasetRepo }),
@@ -77,10 +78,16 @@ let taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
 enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
 readiness = buildReadiness();
 let lastReceipt: import("@xtap-pool/shared").EnrichReceipt | undefined;
+function recordLastReceipt(receipt: import("@xtap-pool/shared").EnrichReceipt | undefined): void {
+  if (receipt?.contract_hash !== enrichStore.currentContractHash()) return;
+  if (lastReceipt === undefined || receipt.finished_at > lastReceipt.finished_at) {
+    lastReceipt = receipt;
+  }
+}
 const drainRaw = createEnrichmentDrain();
 const drainOnce = async (): Promise<import("@xtap-pool/shared").EnrichReceipt> => {
   const receipt = await drainRaw();
-  lastReceipt = receipt;
+  recordLastReceipt(receipt);
   return receipt;
 };
 
@@ -144,6 +151,7 @@ if (config.enrichEnabled) {
   );
 }
 startCredentialRetryIfNeeded();
+startEnrichmentRefresh();
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`[xtap-pool] listening on :${String(info.port)}`);
@@ -222,6 +230,7 @@ async function rebuildDatasetIndexIfReady(): Promise<void> {
   try {
     rebuilt = await mirror.rebuild(store, enrichStore);
     enrichment = await mirror.rebuildEnrichment(enrichStore);
+    recordLastReceipt(mirror.latestReceipt());
     enrichStore.releaseClaims();
     datasetState = { state: "ready" };
   } catch (error) {
@@ -233,6 +242,37 @@ async function rebuildDatasetIndexIfReady(): Promise<void> {
       datasetState = datasetStateFromRebuildError(error);
     }
   }
+}
+
+/**
+ * The enrichment worker is intentionally external. This reader loop only
+ * replays recently changed durable shards so a long-running Space observes
+ * scheduled-worker commits without starting a provider client or worker.
+ */
+function startEnrichmentRefresh(): void {
+  if (enrichmentRefreshTimer !== undefined) return;
+  enrichmentRefreshTimer = setTimeout(() => {
+    enrichmentRefreshTimer = undefined;
+    void refreshExternalEnrichment()
+      .catch((error: unknown) => {
+        console.error(`[xtap-pool] enrichment refresh failed: ${errorMessage(error)}`);
+      })
+      .finally(startEnrichmentRefresh);
+  }, enrichmentRefreshMs());
+}
+
+async function refreshExternalEnrichment(): Promise<void> {
+  if (!datasetCredentialOk(datasetCredential) || datasetState.state !== "ready") return;
+  await mutex.run(async () => {
+    // A rebuild may have changed readiness while this refresh was waiting.
+    if (!datasetCredentialOk(datasetCredential) || datasetState.state !== "ready") return;
+    const refreshed = await mirror.refreshEnrichment(enrichStore);
+    recordLastReceipt(refreshed.receipt);
+  });
+}
+
+function enrichmentRefreshMs(): number {
+  return Math.min(Math.max(config.enrichIntervalMs, 5000), 60000);
 }
 
 function buildReadiness(): AppReadiness {
