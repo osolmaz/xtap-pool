@@ -115,7 +115,9 @@ set as a repository variable. Keep `XTAP_DATASET_WRITER_TOKEN` and
 `XTAP_DATASET_REPO`, all cost and pricing variables, and the other bounded worker
 variables before enabling the schedule. Missing cost configuration fails before
 any provider call. Four scheduled runs make the daily scheduled maximum four
-times `ENRICH_MAX_COST_USD`; manual runs remain explicit.
+times `ENRICH_MAX_COST_USD`. Scheduled and manually dispatched workflow runs
+share one non-cancelling concurrency group, and the web API exposes no writer.
+Do not launch an independent `enrich` command while a workflow run is active.
 
 ## Join a pool (each friend)
 

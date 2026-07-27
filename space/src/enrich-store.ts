@@ -488,7 +488,7 @@ export class EnrichStore {
   claimBatch(options: { limit: number; workerId: string; leaseMs: number }): QueueItem[] {
     const nowIso = this.now().toISOString();
     const leaseUntil = new Date(this.now().getTime() + options.leaseMs).toISOString();
-    const half = Math.max(1, Math.floor(options.limit / 2));
+    const newestLimit = options.limit === 1 ? 0 : Math.max(1, Math.floor(options.limit / 2));
     const claim = this.db.transaction((): QueueEntryRow[] => {
       const claimed: QueueEntryRow[] = [];
       const eligible = (
@@ -512,7 +512,7 @@ export class EnrichStore {
           )
           .all(nowIso, ...exclude, limit) as QueueEntryRow[];
       };
-      const newest = eligible("latest_activity_at DESC, unit_id ASC", [], half);
+      const newest = eligible("latest_activity_at DESC, unit_id ASC", [], newestLimit);
       claimed.push(...newest);
       const usedIds = claimed.map((row) => row.unit_id);
       const oldest = eligible(

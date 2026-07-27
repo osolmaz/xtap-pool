@@ -220,7 +220,11 @@ describe("DatasetMirror external enrichment refresh", () => {
         .concat("\n"),
     );
 
-    const refreshed = await mirror.refreshEnrichment(enrich);
+    let beforeApplyCalls = 0;
+    const refreshed = await mirror.refreshEnrichment(enrich, () => {
+      beforeApplyCalls += 1;
+    });
+    expect(beforeApplyCalls).toBe(1);
     expect(refreshed).toMatchObject({ files: 4, rows: 1, attempts: 1, registryEvents: 1 });
     expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
     expect(enrich.queueEntry(second.unitId)?.status).toBe("retrying");
@@ -232,7 +236,12 @@ describe("DatasetMirror external enrichment refresh", () => {
       `${JSON.stringify(receipt("2026-07-06T00:03:00.000Z"))}\n`,
     );
     hub.failDownloadAttempts = 2;
-    await expect(mirror.refreshEnrichment(enrich)).rejects.toThrow("hub unavailable");
+    await expect(
+      mirror.refreshEnrichment(enrich, () => {
+        beforeApplyCalls += 1;
+      }),
+    ).rejects.toThrow("hub unavailable");
+    expect(beforeApplyCalls).toBe(1);
     expect(mirror.latestReceipt()?.finished_at).toBe("2026-07-06T00:02:00.000Z");
     expect(enrich.queueEntry(first.unitId)?.status).toBe("done");
   });

@@ -37,8 +37,6 @@ const ORG_GRANT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export type EnrichDeps = {
   store: EnrichStore;
   taxonomy: EnrichTaxonomy;
-  /** Drain one enrichment tick synchronously (manual runs). */
-  run: () => Promise<EnrichReceipt>;
   /** Most recent worker receipt, when known. Backs the admin worker signal. */
   lastReceipt?: () => EnrichReceipt | undefined;
 };
@@ -520,19 +518,6 @@ export function createApp(deps: AppDeps): Hono {
         publication: parsed.data.publication,
       }),
     });
-  });
-
-  app.post("/api/enrich/run", async (c) => {
-    // Manual drains: any valid pool token, or an admin session.
-    if (bearerIdentity(c) === undefined) {
-      const admin = adminUser(c);
-      if (admin instanceof Response) return admin;
-    }
-    try {
-      return c.json(await deps.enrich.run());
-    } catch (error) {
-      return c.json({ error: errorMessage(error) }, 500);
-    }
   });
 
   app.get("/api/admin/pool", (c) => {

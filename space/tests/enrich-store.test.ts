@@ -278,6 +278,22 @@ describe("queue state machine", () => {
     const ids = claimed.map((c) => c.unitId).sort();
     expect(ids).toEqual(["a:someone", "c:c"]);
   });
+
+  it("claims the oldest work when the batch limit is one", () => {
+    const tweets = [
+      makePooled({ id: "old", captured_at: "2026-07-01T00:00:00.000Z" }),
+      makePooled({
+        id: "new",
+        captured_at: "2026-07-03T00:00:00.000Z",
+        author: { username: "new" },
+      }),
+    ];
+    store.insert(tweets);
+    enrich.registerTweets(tweets);
+    expect(enrich.claimBatch({ limit: 1, workerId: "w1", leaseMs: 60_000 })[0]?.unitId).toBe(
+      "old:someone",
+    );
+  });
 });
 
 describe("recent error surface", () => {

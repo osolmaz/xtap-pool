@@ -104,7 +104,6 @@ beforeEach(async () => {
   enrich = {
     store: new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH),
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
-    run: () => Promise.resolve(EMPTY_RECEIPT),
   };
   unitStore = new UnitStore(store.database, 1);
   app = createApp({
@@ -516,37 +515,8 @@ describe("enrichment endpoints", () => {
     expect((await app.request("/api/graph?top=5000", { headers })).status).toBe(400);
   });
 
-  it("gates manual enrichment runs to pool tokens and admin sessions", async () => {
-    const run = async (init: RequestInit = {}): Promise<Response> =>
-      app.request("/api/enrich/run", { method: "POST", ...init });
-    expect((await run()).status).toBe(401);
-    expect((await run({ headers: { cookie: sessionCookie("alice") } })).status).toBe(403);
-
-    const viaAdmin = await run({ headers: { cookie: sessionCookie("osolmaz") } });
-    expect(viaAdmin.status).toBe(200);
-    await expect(viaAdmin.json()).resolves.toEqual(EMPTY_RECEIPT);
-
-    const viaToken = await run({ headers: { authorization: bearer("alice") } });
-    expect(viaToken.status).toBe(200);
-  });
-
-  it("returns 500 with the error message when a manual run fails", async () => {
-    const failingApp = createApp({
-      config: testConfig,
-      store,
-      membership,
-      serviceAccounts,
-      unitStore,
-      enrich: { ...enrich, run: () => Promise.reject(new Error("router down")) },
-      now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
-    });
-    const response = await failingApp.request("/api/enrich/run", {
-      method: "POST",
-      headers: { cookie: sessionCookie("osolmaz") },
-    });
-    expect(response.status).toBe(500);
-    await expect(response.json()).resolves.toEqual({ error: "router down" });
+  it("does not expose an in-process enrichment writer", async () => {
+    expect((await app.request("/api/enrich/run", { method: "POST" })).status).toBe(404);
   });
 
   it("serves /api/enrichment/status with author-filtered counts", async () => {

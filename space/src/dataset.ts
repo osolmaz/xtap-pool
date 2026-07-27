@@ -227,11 +227,14 @@ export class DatasetMirror {
    * reads are staged before changing the mirror or SQLite projection, so a
    * transient failure leaves the last known-good reader state intact.
    */
-  async refreshEnrichment(enrich: EnrichStore): Promise<EnrichmentRefresh> {
+  async refreshEnrichment(
+    enrich: EnrichStore,
+    beforeApply?: () => void,
+  ): Promise<EnrichmentRefresh> {
     let lastError: unknown;
     for (let attempt = 0; attempt < REFRESH_ATTEMPTS; attempt += 1) {
       try {
-        return await this.refreshEnrichmentOnce(enrich);
+        return await this.refreshEnrichmentOnce(enrich, beforeApply);
       } catch (error) {
         lastError = error;
       }
@@ -239,7 +242,11 @@ export class DatasetMirror {
     throw lastError;
   }
 
-  private async refreshEnrichmentOnce(enrich: EnrichStore): Promise<EnrichmentRefresh> {
+  // eslint-disable-next-line complexity -- Staging all shard kinds before replay keeps Hub failures from mutating reader state.
+  private async refreshEnrichmentOnce(
+    enrich: EnrichStore,
+    beforeApply?: () => void,
+  ): Promise<EnrichmentRefresh> {
     const selected = selectEnrichmentRefreshShards(
       await this.hub.listJsonlFiles("enrichment"),
       (path) => existsSync(this.localPath(path)),
@@ -253,6 +260,7 @@ export class DatasetMirror {
       }
     }
 
+    beforeApply?.();
     const counts: EnrichmentReplayCounts = { rows: 0, attempts: 0, registryEvents: 0 };
     let latestReceipt = this.lastReceipt;
     for (const update of updates) {
