@@ -297,8 +297,16 @@ describe("enrichment endpoints", () => {
       headers: { "content-type": "application/json", authorization: bearer("alice") },
       body: JSON.stringify({
         tweets: [
-          makeTweet({ id: "1", text: "vllm ships fp8" }),
-          makeTweet({ id: "2", text: "agents!", author: { username: "swyx" } }),
+          makeTweet({
+            id: "1",
+            text: "vllm ships fp8",
+            author: { id: "author-allowed", username: "someone" },
+          }),
+          makeTweet({
+            id: "2",
+            text: "agents!",
+            author: { id: "author-excluded", username: "swyx" },
+          }),
         ],
       }),
     });
@@ -336,6 +344,7 @@ describe("enrichment endpoints", () => {
     await expect(ids("labels=ai,inference-performance&label_mode=all")).resolves.toEqual(["1"]);
     await expect(ids("free_label=fp8")).resolves.toEqual(["1"]);
     await expect(ids("concept=vllm")).resolves.toEqual(["1"]);
+    await expect(ids("author_ids=author-allowed")).resolves.toEqual(["1"]);
     await expect(ids("unlabeled=true")).resolves.toEqual(["2"]);
     await expect(ids("labels=ai&q=vllm")).resolves.toEqual(["1"]);
   });
@@ -356,6 +365,16 @@ describe("enrichment endpoints", () => {
     expect(page.units).toEqual([
       expect.objectContaining({ id: "1:someone", posts: [expect.objectContaining({ id: "1" })] }),
     ]);
+    const excluded = await app.request("/api/units?author_ids=author-excluded", {
+      headers: authorization,
+    });
+    await expect(excluded.json()).resolves.toMatchObject({ units: [] });
+    const allowed = await app.request("/api/units?author_ids=author-allowed", {
+      headers: authorization,
+    });
+    await expect(allowed.json()).resolves.toMatchObject({
+      units: [expect.objectContaining({ id: "1:someone" })],
+    });
 
     expect((await app.request("/api/concepts", { headers: authorization })).status).toBe(401);
     expect(
@@ -379,13 +398,17 @@ describe("enrichment endpoints", () => {
     await seedEnrichedTweets();
     const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
     const headers = { authorization: `Bearer ${issued.token}` };
-    const concepts = await app.request("/api/concepts", { headers });
+    const concepts = await app.request("/api/concepts?author_ids=author-allowed", { headers });
     expect(concepts.status).toBe(200);
-    const body = (await concepts.json()) as { revision: string };
-    expect(
-      (await app.request(`/api/graph?revision=${encodeURIComponent(body.revision)}`, { headers }))
-        .status,
-    ).toBe(200);
+    const body = (await concepts.json()) as { revision: string; concepts: { slug: string }[] };
+    expect(body.concepts.map((concept) => concept.slug)).toEqual(["fp8", "vllm"]);
+    const graph = await app.request(
+      `/api/graph?author_ids=author-allowed&revision=${encodeURIComponent(body.revision)}`,
+      { headers },
+    );
+    expect(graph.status).toBe(200);
+    const excluded = await app.request("/api/concepts?author_ids=author-excluded", { headers });
+    await expect(excluded.json()).resolves.toMatchObject({ concepts: [] });
     expect((await app.request("/api/units", { headers })).status).toBe(401);
   });
 

@@ -660,6 +660,7 @@ export class EnrichStore {
 }
 
 type UnitSelection = {
+  authorIds?: readonly string[] | undefined;
   labels?: readonly string[] | undefined;
   labelMode?: "any" | "all" | undefined;
   publication?: "public-original" | undefined;
@@ -669,17 +670,21 @@ type EligibleUnitOptions = UnitSelection & { taxonomyVersion: number };
 
 function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unknown[] } {
   const labels = options.labels ?? [];
-  const placeholders = labels.map(() => "?").join(",");
+  const labelPlaceholders = labels.map(() => "?").join(",");
   const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ?
             JOIN enrich_queue q ON q.unit_id = um.unit_id
               AND q.taxonomy_version = ? AND q.status = 'done'`;
-  const publication = publicationWhere(options.publication, "um.unit_id");
+  const selection = `${publicationWhere(options.publication, "um.unit_id")}${authorWhere(
+    options.authorIds,
+    "um.unit_id",
+  )}`;
+  const authorParams = options.authorIds ?? [];
   if (labels.length === 0) {
     return {
       sql: `SELECT DISTINCT um.unit_id FROM unit_members um
             ${finalizedJoins}
-            WHERE 1 = 1${publication}`,
-      params: [options.taxonomyVersion, options.taxonomyVersion],
+            WHERE 1 = 1${selection}`,
+      params: [options.taxonomyVersion, options.taxonomyVersion, ...authorParams],
     };
   }
   if (options.labelMode !== "all") {
@@ -687,18 +692,36 @@ function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unk
       sql: `SELECT DISTINCT um.unit_id FROM unit_members um
             ${finalizedJoins}
             JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
-            WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})${publication}`,
-      params: [options.taxonomyVersion, options.taxonomyVersion, ...labels],
+            WHERE tl.kind = 'preset' AND tl.label IN (${labelPlaceholders})${selection}`,
+      params: [options.taxonomyVersion, options.taxonomyVersion, ...labels, ...authorParams],
     };
   }
   return {
     sql: `SELECT um.unit_id FROM unit_members um
           ${finalizedJoins}
           JOIN tweet_labels tl ON tl.tweet_id = um.tweet_id
-          WHERE tl.kind = 'preset' AND tl.label IN (${placeholders})${publication}
+          WHERE tl.kind = 'preset' AND tl.label IN (${labelPlaceholders})${selection}
           GROUP BY um.unit_id HAVING COUNT(DISTINCT tl.label) = ?`,
-    params: [options.taxonomyVersion, options.taxonomyVersion, ...labels, labels.length],
+    params: [
+      options.taxonomyVersion,
+      options.taxonomyVersion,
+      ...labels,
+      ...authorParams,
+      labels.length,
+    ],
   };
+}
+
+function authorWhere(authorIds: readonly string[] | undefined, unitIdSql: string): string {
+  if (authorIds === undefined || authorIds.length === 0) return "";
+  return ` AND EXISTS (
+             SELECT 1 FROM unit_members author_um
+             JOIN tweets author_tweet ON author_tweet.id = author_um.tweet_id
+             WHERE author_um.unit_id = ${unitIdSql}
+               AND json_extract(author_tweet.json, '$.author.id') IN (${authorIds
+                 .map(() => "?")
+                 .join(",")})
+           )`;
 }
 
 function publicationWhere(publication: UnitSelection["publication"], unitIdSql: string): string {
@@ -718,7 +741,11 @@ function publicationWhere(publication: UnitSelection["publication"], unitIdSql: 
 }
 
 function hasSelectionFilter(options: UnitSelection): boolean {
-  return (options.labels?.length ?? 0) > 0 || options.publication !== undefined;
+  return (
+    (options.authorIds?.length ?? 0) > 0 ||
+    (options.labels?.length ?? 0) > 0 ||
+    options.publication !== undefined
+  );
 }
 
 function toConceptCount(row: VocabularyRow): ConceptCount {

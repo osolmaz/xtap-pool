@@ -7,6 +7,7 @@ import type { EnrichedUnit, PooledTweet, UnitConcept, UnitPage } from "@xtap-poo
 export type UnitQuery = {
   contributors?: readonly string[];
   author?: string;
+  authorIds?: readonly string[];
   q?: string;
   since?: string;
   until?: string;
@@ -300,6 +301,12 @@ function identityFilters(query: UnitQuery): Filter[] {
   }
   if (query.author !== undefined) {
     filters.push({ sql: "tweets.author_username = ?", values: [query.author.toLowerCase()] });
+  }
+  if (query.authorIds !== undefined && query.authorIds.length > 0) {
+    filters.push({
+      sql: `json_extract(tweets.json, '$.author.id') IN (${query.authorIds.map(() => "?").join(",")})`,
+      values: query.authorIds,
+    });
   }
   if (query.q !== undefined && query.q.length > 0) {
     filters.push({

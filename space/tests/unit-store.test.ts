@@ -150,6 +150,30 @@ describe("UnitStore", () => {
     tweets.close();
   });
 
+  it("restricts units by exact author IDs", () => {
+    const tweets = new TweetStore();
+    const enrich = new EnrichStore(tweets.database, 1);
+    const units = new UnitStore(tweets.database, 1);
+    const allowed = pooled("1", {
+      conversation_id: "allowed",
+      author: { id: "author-allowed", username: "renamed-user" },
+    });
+    const excluded = pooled("2", {
+      conversation_id: "excluded",
+      author: { id: "author-excluded", username: "allowed-looking-handle" },
+    });
+    tweets.insert([allowed, excluded]);
+    enrich.registerTweets([allowed, excluded]);
+    enrich.applyEnrichment(enrichment(["1"], unitIdFor(allowed), ["ai"]));
+    enrich.applyEnrichment(enrichment(["2"], unitIdFor(excluded), ["ai"]));
+
+    expect(units.query({ labels: ["ai"], authorIds: ["author-allowed"] }).units).toEqual([
+      expect.objectContaining({ id: unitIdFor(allowed) }),
+    ]);
+    expect(units.query({ labels: ["ai"], authorIds: ["missing"] }).units).toEqual([]);
+    tweets.close();
+  });
+
   it("uses any and all label semantics explicitly", () => {
     const tweets = new TweetStore();
     const enrich = new EnrichStore(tweets.database, 1);

@@ -7,6 +7,7 @@ import { ensureEnrichmentTables } from "./enrich-store.js";
 export type TweetQuery = {
   contributors?: readonly string[];
   author?: string;
+  authorIds?: readonly string[];
   q?: string;
   since?: string;
   until?: string;
@@ -316,6 +317,12 @@ function textFilters(query: TweetQuery): Filter[] {
   }
   if (query.author !== undefined) {
     filters.push({ sql: "author_username = ?", values: [query.author.toLowerCase()] });
+  }
+  if (query.authorIds !== undefined && query.authorIds.length > 0) {
+    filters.push({
+      sql: `json_extract(json, '$.author.id') IN (${query.authorIds.map(() => "?").join(",")})`,
+      values: query.authorIds,
+    });
   }
   if (query.q !== undefined && query.q.length > 0) {
     filters.push(qFilter(query.q));
