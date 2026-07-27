@@ -641,6 +641,7 @@ async function failMissingUnit(
     error_class: "invalid_output",
     error_message: "unit missing from model response",
     at: deps.now().toISOString(),
+    first_queued_at: item.firstQueuedAt,
     next_retry_at: nextRetry.toISOString(),
   });
 }
@@ -779,6 +780,7 @@ async function persistAndApply(
     attempt: item.attempts + 1,
     outcome: "success",
     at: nowIso,
+    first_queued_at: item.firstQueuedAt,
   }));
   try {
     const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
@@ -802,6 +804,7 @@ async function persistAndApply(
         error_class: cls,
         error_message: errorText,
         at: nowIso,
+        first_queued_at: item.firstQueuedAt,
         next_retry_at: nextRetry.toISOString(),
       });
     }
@@ -853,6 +856,7 @@ async function failBatch(
       error_class: errorClass,
       error_message: error,
       at,
+      first_queued_at: item.firstQueuedAt,
       next_retry_at: nextRetry.toISOString(),
     });
     if (outcome === "blocked") receipt.blocked += 1;

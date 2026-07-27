@@ -167,6 +167,24 @@ describe("queue state machine", () => {
     expect(final?.lastError).toBe("final");
   });
 
+  it("persists source-derived queue age through attempt replay", () => {
+    insertAndRegister([{ id: "100", captured_at: "2026-05-21T03:04:35.954Z" }]);
+    const before = enrich.queueEntry("100:someone");
+    expect(before?.firstQueuedAt).toBe("2026-05-21T03:04:35.954Z");
+    enrich.replayAttemptEvent({
+      unit_id: "100:someone",
+      input_hash: before?.inputHash ?? "missing",
+      contract_hash: CONTRACT_HASH,
+      attempt: 1,
+      outcome: "transient_failure",
+      error_class: "timeout",
+      at: NOW.toISOString(),
+      first_queued_at: "2026-05-20T00:00:00.000Z",
+      next_retry_at: NOW.toISOString(),
+    });
+    expect(enrich.queueEntry("100:someone")?.firstQueuedAt).toBe("2026-05-20T00:00:00.000Z");
+  });
+
   it("skips claim until next_retry_at has passed", () => {
     insertAndRegister([{ id: "100" }]);
     const future = new Date(NOW.getTime() + 60_000);
@@ -429,11 +447,12 @@ describe("summaries", () => {
   });
 
   it("summarizes label counts, free labels, queue depth and coverage", () => {
-    const summary = enrich.labelsSummary([
+    const taxonomy = [
       { name: "ai", description: "d" },
       { name: "agents", description: "d" },
       { name: "quantization", description: "d" },
-    ]);
+    ];
+    const summary = enrich.labelsSummary(taxonomy);
     expect(summary.taxonomy_version).toBe(1);
     expect(summary.labels).toEqual([
       { name: "ai", description: "d", count: 2 },
@@ -449,6 +468,20 @@ describe("summaries", () => {
       done: 2,
     });
     expect(summary.coverage).toEqual({ units_total: 3, units_enriched: 2 });
+
+    const beforeWindow = enrich.labelsSummary(taxonomy, {
+      cutoff: "2026-01-01T00:00:00.000Z",
+    });
+    expect(beforeWindow.labels.every((label) => label.count === 0)).toBe(true);
+    expect(beforeWindow.free_labels).toEqual([]);
+    expect(beforeWindow.queue).toEqual({
+      pending: 0,
+      running: 0,
+      retrying: 0,
+      blocked: 0,
+      done: 0,
+    });
+    expect(beforeWindow.coverage).toEqual({ units_total: 0, units_enriched: 0 });
   });
 });
 

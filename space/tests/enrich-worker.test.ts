@@ -96,6 +96,12 @@ function withEvidence(unitIds: string[], texts: Map<string, string>, name = "ai"
   return JSON.stringify({ units });
 }
 
+function hubJson(path: string): unknown {
+  const content = hub.files.get(path);
+  if (content === undefined) throw new Error(`missing Hub fixture: ${path}`);
+  return JSON.parse(content.trim()) as unknown;
+}
+
 function deps(llm: LlmClient, overrides: Partial<EnrichWorkerDeps> = {}): EnrichWorkerDeps {
   return {
     enrichStore,
@@ -127,15 +133,16 @@ describe("runEnrichTick", () => {
   it("persists results, attempt events and registry events to the dataset", async () => {
     seedUnit("100", "vllm ships fp8 kernels");
     await runEnrichTick(deps(respondingClient(withEvidence)));
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
-    const row = JSON.parse(shard?.trim() ?? "{}") as {
+    const row = hubJson("enrichment/2026/07/enrichment-2026-07-06.jsonl") as {
       preset_labels: { name: string; evidence: unknown[] }[];
       free_labels: { name: string; evidence: unknown[] }[];
     };
     expect(row.preset_labels[0]?.name).toBe("ai");
     expect(row.preset_labels[0]?.evidence.length).toBeGreaterThan(0);
     expect(row.free_labels[0]?.name).toBe("dgx-spark");
-    expect(hub.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl")).toBeDefined();
+    expect(hubJson("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl")).toMatchObject({
+      first_queued_at: "2026-05-21T03:04:35.954Z",
+    });
     const registryShard = hub.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl");
     const registryNames = (registryShard?.trim().split("\n") ?? []).map(
       (line) => (JSON.parse(line) as { name: string }).name,

@@ -1,0 +1,57 @@
+name: Enrichment
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Four bounded runs per day. The maximum scheduled daily cost is therefore
+    # four times ENRICH_MAX_COST_USD.
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: xtap-pool-enrichment
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  enrich:
+    if: github.event_name == 'workflow_dispatch' || vars.ENRICH_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATA_DIR: ${{ runner.temp }}/xtap-pool-enrichment
+      DATASET_REPO: ${{ vars.XTAP_DATASET_REPO }}
+      HF_TOKEN: ${{ secrets.XTAP_DATASET_WRITER_TOKEN }}
+      INFERENCE_TOKEN: ${{ secrets.XTAP_INFERENCE_TOKEN }}
+      ENRICH_ENABLED: "true"
+      ENRICH_MAX_UNITS_PER_TICK: ${{ vars.ENRICH_MAX_UNITS_PER_TICK || '100' }}
+      ENRICH_MAX_TOKENS: ${{ vars.ENRICH_MAX_TOKENS || '1000000' }}
+      ENRICH_MAX_ELAPSED_MS: ${{ vars.ENRICH_MAX_ELAPSED_MS || '2400000' }}
+      ENRICH_MAX_ERROR_RATE: ${{ vars.ENRICH_MAX_ERROR_RATE || '0.25' }}
+      ENRICH_MAX_COST_USD: ${{ vars.ENRICH_MAX_COST_USD }}
+      ENRICH_MAX_COST_PER_CALL_USD: ${{ vars.ENRICH_MAX_COST_PER_CALL_USD }}
+      ENRICH_INPUT_TOKEN_USD: ${{ vars.ENRICH_INPUT_TOKEN_USD }}
+      ENRICH_OUTPUT_TOKEN_USD: ${{ vars.ENRICH_OUTPUT_TOKEN_USD }}
+      ENRICH_MAX_DISCARDED_ASSIGNMENTS: ${{ vars.ENRICH_MAX_DISCARDED_ASSIGNMENTS || '100' }}
+      LLM_MODEL: ${{ vars.ENRICH_LLM_MODEL || 'zai-org/GLM-5.2' }}
+      TAXONOMY_VERSION: ${{ vars.ENRICH_TAXONOMY_VERSION || '1' }}
+      # Required by the shared Space config parser but unused by this command.
+      POOL_SIGNING_SECRET: worker-not-used-000000000000000000000000
+      SESSION_SECRET: worker-not-used-0000000000000000000000000
+      ALLOWED_USERS: worker
+      POOL_ADMINS: worker
+      OAUTH_CLIENT_ID: worker-not-used
+      OAUTH_CLIENT_SECRET: worker-not-used
+      SPACE_HOST: worker.invalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace shared
+      - run: npm run build --workspace space
+      - name: Run one bounded enrichment tick
+        run: npm run enrich --workspace space

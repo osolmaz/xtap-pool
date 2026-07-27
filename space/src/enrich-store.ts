@@ -46,6 +46,7 @@ export type QueueItem = {
   attempts: number;
   inputHash: string;
   contractHash: string;
+  firstQueuedAt: string;
   leaseExpiresAt: string;
 };
 
@@ -305,7 +306,7 @@ export class EnrichStore {
           this.taxonomyVersion,
           inputHash,
           this.contractHash,
-          nowIso,
+          latestActivityAt,
           latestActivityAt,
           nowIso,
         );
@@ -550,6 +551,7 @@ export class EnrichStore {
       attempts: row.attempts,
       inputHash: row.input_hash,
       contractHash: row.contract_hash,
+      firstQueuedAt: row.first_queued_at,
       leaseExpiresAt: leaseUntil,
     }));
   }
@@ -771,6 +773,7 @@ export class EnrichStore {
     if (!this.isReplayable(event)) return;
     const nowIso = this.now().toISOString();
     const nextStatus: QueueStatus = event.outcome === "blocked" ? "blocked" : "retrying";
+    const firstQueuedAt = nullable(event.first_queued_at);
     this.db
       .prepare(
         `UPDATE enrich_queue SET
@@ -778,6 +781,10 @@ export class EnrichStore {
            status = CASE WHEN ? >= ? THEN 'blocked' ELSE ? END,
            last_error = ?,
            last_error_class = ?,
+           first_queued_at = CASE
+             WHEN ? IS NOT NULL AND ? < first_queued_at THEN ?
+             ELSE first_queued_at
+           END,
            next_retry_at = ?,
            lease_owner = NULL,
            lease_expires_at = NULL,
@@ -789,9 +796,12 @@ export class EnrichStore {
         event.attempt,
         MAX_ATTEMPTS,
         nextStatus,
-        event.error_message ?? null,
-        event.error_class ?? null,
-        event.next_retry_at ?? null,
+        nullable(event.error_message),
+        nullable(event.error_class),
+        firstQueuedAt,
+        firstQueuedAt,
+        firstQueuedAt,
+        nullable(event.next_retry_at),
         nowIso,
         event.unit_id,
       );
@@ -1383,6 +1393,10 @@ export class EnrichStore {
   }
 }
 
+function nullable<T>(value: T | undefined): T | null {
+  return value ?? null;
+}
+
 type UnitSelection = {
   authorIds?: readonly string[] | undefined;
   labels?: readonly string[] | undefined;
@@ -1457,13 +1471,15 @@ function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unk
 }
 
 function selectedUnits(options: UnitSelection): { sql: string; params: unknown[] } {
+  const cutoffSql = cutoffWhere(options.cutoff);
   const authorSql = authorWhere(options.authorIds, "um.unit_id");
   const publicationSql = publicationWhere(options.publication, "um.unit_id");
+  const cutoffParams = options.cutoff === undefined ? [] : [options.cutoff];
   const authorParams = options.authorIds ?? [];
   return {
     sql: `SELECT DISTINCT um.unit_id FROM unit_members um
-          WHERE 1 = 1${publicationSql}${authorSql}`,
-    params: [...authorParams],
+          WHERE 1 = 1${cutoffSql}${publicationSql}${authorSql}`,
+    params: [...cutoffParams, ...authorParams],
   };
 }
 

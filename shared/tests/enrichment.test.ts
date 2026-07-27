@@ -130,9 +130,13 @@ describe("attemptEventSchema", () => {
       error_class: "timeout",
       error_message: "router timed out",
       at: "2026-07-06T00:00:00.000Z",
+      first_queued_at: "2026-07-01T00:00:00.000Z",
       next_retry_at: "2026-07-06T00:05:00.000Z",
     });
-    expect(parsed.outcome).toBe("transient_failure");
+    expect(parsed).toMatchObject({
+      outcome: "transient_failure",
+      first_queued_at: "2026-07-01T00:00:00.000Z",
+    });
   });
 
   it("rejects invalid outcomes and error classes", () => {

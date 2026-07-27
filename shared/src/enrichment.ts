@@ -118,6 +118,7 @@ export const attemptEventSchema = z.object({
   error_class: errorClassSchema.optional(),
   error_message: z.string().optional(),
   at: z.string().min(1),
+  first_queued_at: z.string().min(1).optional(),
   next_retry_at: z.string().min(1).optional(),
 });
 
