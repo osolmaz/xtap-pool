@@ -197,6 +197,9 @@ async function refreshExternalEnrichment(): Promise<void> {
     const refreshed = await mirror.refreshEnrichment(enrichStore, () => {
       taxonomy = nextTaxonomy;
       enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
+      if (lastReceipt?.contract_hash !== enrichStore.currentContractHash()) {
+        lastReceipt = undefined;
+      }
     });
     recordLastReceipt(refreshed.receipt);
     readiness = buildReadiness();

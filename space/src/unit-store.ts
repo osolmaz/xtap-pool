@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
@@ -64,15 +64,18 @@ export class UnitStore {
     ensureResultRevision(db);
   }
 
-  currentRevision(): string {
+  currentRevision(cutoff?: string): string {
     const row = this.db
       .prepare("SELECT revision FROM result_revision WHERE singleton = 1")
       .get() as { revision: number };
-    return `${this.epoch}:${String(row.revision)}`;
+    const base = `${this.epoch}:${String(row.revision)}`;
+    if (cutoff === undefined) return base;
+    const cutoffHash = createHash("sha256").update(cutoff).digest("hex");
+    return `${base}:${cutoffHash}`;
   }
 
-  assertRevision(requested: string | undefined): string {
-    const current = this.currentRevision();
+  assertRevision(requested: string | undefined, cutoff?: string): string {
+    const current = this.currentRevision(cutoff);
     if (requested !== undefined && requested !== current) {
       throw new StaleUnitRevisionError(requested, current);
     }
@@ -80,7 +83,7 @@ export class UnitStore {
   }
 
   query(query: UnitQuery): UnitPage {
-    const revision = this.currentRevision();
+    const revision = this.currentRevision(query.cutoff);
     const cursor = requestedCursor(query.cursor, revision);
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);
     const { whereSql, params } = buildFilters(query);

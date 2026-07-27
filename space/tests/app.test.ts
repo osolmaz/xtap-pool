@@ -554,6 +554,19 @@ describe("enrichment endpoints", () => {
     expect(body.totals.completed).toBe(1);
     expect(body.worker_recently_completed).toBe(false);
     expect(Array.isArray(body.recent_errors)).toBe(true);
+    if (body.complete_through === undefined) throw new Error("missing complete_through");
+    const matchingCutoff = await app.request(
+      `/api/free-labels?cutoff=${encodeURIComponent(body.complete_through)}` +
+        `&revision=${encodeURIComponent(body.revision)}`,
+      { headers },
+    );
+    expect(matchingCutoff.status).toBe(200);
+    const mismatchedCutoff = await app.request(
+      `/api/free-labels?cutoff=${encodeURIComponent("2020-01-01T00:00:00.000Z")}` +
+        `&revision=${encodeURIComponent(body.revision)}`,
+      { headers },
+    );
+    expect(mismatchedCutoff.status).toBe(409);
     // No selection filter given → the endpoint sees the whole pool
     const wide = await app.request("/api/enrichment/status", { headers });
     const wideBody = (await wide.json()) as { totals: { total: number } };
@@ -566,14 +579,22 @@ describe("enrichment endpoints", () => {
     expect(stale.status).toBe(409);
   });
 
-  it("uses the newest durable receipt for the recent-completion signal", async () => {
+  it("uses only a current-contract durable receipt for the recent-completion signal", async () => {
     enrich.lastReceipt = () => EMPTY_RECEIPT;
     const issued = await serviceAccounts.issue("osolmaz", "taxonomy-reader", ["taxonomy:read"]);
-    const response = await app.request("/api/enrichment/status", {
-      headers: { authorization: `Bearer ${issued.token}` },
-    });
+    const headers = { authorization: `Bearer ${issued.token}` };
+    const response = await app.request("/api/enrichment/status", { headers });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ worker_recently_completed: true });
+
+    enrich.lastReceipt = () => ({ ...EMPTY_RECEIPT, contract_hash: "superseded-contract" });
+    const stale = await app.request("/api/enrichment/status", { headers });
+    await expect(stale.json()).resolves.toMatchObject({ worker_recently_completed: false });
+    const admin = await app.request("/api/admin/enrichment", {
+      headers: { cookie: sessionCookie("osolmaz") },
+    });
+    const adminBody = (await admin.json()) as Record<string, unknown>;
+    expect(adminBody["last_receipt"]).toBeUndefined();
   });
 
   it("applies a cutoff to /api/free-labels", async () => {

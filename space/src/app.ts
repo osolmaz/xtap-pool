@@ -261,7 +261,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = taxonomyQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    const revision = checkedRevision(parsed.data.revision, unitStore);
+    const revision = checkedRevision(parsed.data.revision, unitStore, parsed.data.cutoff);
     return revision instanceof Response ? revision : { revision, query: parsed.data };
   };
 
@@ -463,7 +463,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = taxonomyQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    const revision = checkedRevision(parsed.data.revision, unitStore);
+    const revision = checkedRevision(parsed.data.revision, unitStore, parsed.data.cutoff);
     if (revision instanceof Response) return revision;
     const detail = deps.enrich.store.freeLabelDetail(c.req.param("name"), {
       authorIds: parseCsv(parsed.data.author_ids),
@@ -485,7 +485,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = graphQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    const revision = checkedRevision(parsed.data.revision, unitStore);
+    const revision = checkedRevision(parsed.data.revision, unitStore, parsed.data.cutoff);
     if (revision instanceof Response) return revision;
     return c.json({
       revision,
@@ -506,17 +506,23 @@ export function createApp(deps: AppDeps): Hono {
     if (!readAuthorized(c, "taxonomy:read")) return c.json({ error: "unauthenticated" }, 401);
     const parsed = statusQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
-    const revision = checkedRevision(parsed.data.revision, unitStore);
-    if (revision instanceof Response) return revision;
     const authorIds = parseCsv(parsed.data.author_ids);
+    const surface = buildEnrichmentSurface(deps, now, {
+      authorIds,
+      publication: parsed.data.publication,
+    });
+    const completeThrough = surface["complete_through"];
+    const revision = checkedRevision(
+      parsed.data.revision,
+      unitStore,
+      typeof completeThrough === "string" ? completeThrough : undefined,
+    );
+    if (revision instanceof Response) return revision;
     return c.json({
       revision,
       author_ids: [...new Set(authorIds ?? [])].sort(),
       free_label_registry_revision: deps.enrich.store.registryRevision(),
-      ...buildEnrichmentSurface(deps, now, {
-        authorIds,
-        publication: parsed.data.publication,
-      }),
+      ...surface,
     });
   });
 
@@ -744,13 +750,16 @@ function buildEnrichmentSurface(
 ): Record<string, unknown> {
   const counts = deps.enrich.store.statusCounts(selection);
   const recent = deps.enrich.store.recentErrorClasses();
-  const workerReceipt = deps.enrich.lastReceipt?.();
+  const contractHash = deps.enrich.store.currentContractHash();
+  const receiptCandidate = deps.enrich.lastReceipt?.();
+  const workerReceipt =
+    receiptCandidate?.contract_hash === contractHash ? receiptCandidate : undefined;
   const workerRecentlyCompleted =
     workerReceipt !== undefined &&
     now().getTime() - Date.parse(workerReceipt.finished_at) < 15 * 60_000;
   const freshnessLagSeconds = freshnessLag(now(), counts.newestCompletedAt);
   return {
-    contract_hash: deps.enrich.store.currentContractHash(),
+    contract_hash: contractHash,
     taxonomy_version: deps.enrich.taxonomy.version,
     totals: counts.totals,
     ...maybe("oldest_pending_at", counts.oldestPendingAt),
@@ -782,9 +791,13 @@ function freshnessLag(now: Date, newestCompletedAt: string | undefined): number 
   return Math.max(0, Math.floor((now.getTime() - Date.parse(newestCompletedAt)) / 1000));
 }
 
-function checkedRevision(requested: string | undefined, unitStore: UnitStore): string | Response {
+function checkedRevision(
+  requested: string | undefined,
+  unitStore: UnitStore,
+  cutoff?: string,
+): string | Response {
   try {
-    return unitStore.assertRevision(requested);
+    return unitStore.assertRevision(requested, cutoff);
   } catch (error) {
     if (error instanceof StaleUnitRevisionError) {
       return Response.json(

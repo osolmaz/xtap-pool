@@ -260,9 +260,17 @@ describe("UnitStore", () => {
     enrich.applyEnrichment(enrichment([older], unitIdFor(older), ["ai"]));
     enrich.applyEnrichment(enrichment([newer], unitIdFor(newer), ["ai"]));
 
-    // Cutoff at older.captured_at excludes newer.
+    // Cutoff at older.captured_at excludes newer and produces a distinct
+    // snapshot identity from a later cutoff.
     const capped = units.query({ labels: ["ai"], cutoff: older.captured_at });
     expect(capped.units.map((unit) => unit.id)).toEqual([unitIdFor(older)]);
+    const later = units.query({ labels: ["ai"], cutoff: newer.captured_at, limit: 1 });
+    expect(later.revision).not.toBe(capped.revision);
+    const laterCursor = later.next_cursor;
+    if (laterCursor === undefined) throw new Error("missing later cursor");
+    expect(() =>
+      units.query({ labels: ["ai"], cutoff: older.captured_at, cursor: laterCursor }),
+    ).toThrow(StaleUnitRevisionError);
     tweets.close();
   });
 });
