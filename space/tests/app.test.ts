@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Hono } from "hono";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { computeContractHash, PROCESSOR_VERSION } from "@xtap-pool/shared";
 import type { EnrichReceipt } from "@xtap-pool/shared";
@@ -12,7 +12,7 @@ import { createApp } from "../src/app.js";
 import type { EnrichDeps } from "../src/app.js";
 import { DatasetMirror } from "../src/dataset.js";
 import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
-import { EnrichStore } from "../src/enrich-store.js";
+import { CompleteGraphLimitError, EnrichStore } from "../src/enrich-store.js";
 import {
   contractHashFor,
   NORMALIZATION_ID,
@@ -321,7 +321,7 @@ describe("session-guarded reads", () => {
 describe("enrichment endpoints", () => {
   const headers = { cookie: sessionCookie("osolmaz") };
 
-  async function seedEnrichedTweets(): Promise<void> {
+  async function seedEnrichedTweets(extraFreeLabels: readonly string[] = []): Promise<void> {
     await app.request("/api/ingest", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: bearer("alice") },
@@ -351,16 +351,21 @@ describe("enrichment endpoints", () => {
         { name: "ai", evidence: [{ tweet_id: "1", quote: "vllm ships fp8" }] },
         { name: "inference-performance", evidence: [{ tweet_id: "1", quote: "fp8" }] },
       ],
-      free_labels: [{ name: "fp8", evidence: [{ tweet_id: "1", quote: "fp8" }] }],
+      free_labels: ["fp8", ...extraFreeLabels].map((name) => ({
+        name,
+        evidence: [{ tweet_id: "1", quote: name }],
+      })),
       model: "m",
       taxonomy_version: 1,
       enriched_at: NOW.toISOString(),
     });
-    // Approve the seeded free label so consumer reads surface it.
-    const candidate = enrich.store.candidateEventIfNew("fp8").event;
-    if (candidate === undefined) throw new Error("expected fp8 candidate");
-    enrich.store.applyRegistryEvent(candidate);
-    enrich.store.promoteName("fp8", "test-approved");
+    // Approve the seeded free labels so consumer reads surface them.
+    for (const name of ["fp8", ...extraFreeLabels]) {
+      const candidate = enrich.store.candidateEventIfNew(name).event;
+      if (candidate === undefined) throw new Error(`expected ${name} candidate`);
+      enrich.store.applyRegistryEvent(candidate);
+      enrich.store.promoteName(name, "test-approved");
+    }
   }
 
   it("rejects unauthenticated enrichment reads", async () => {
@@ -490,14 +495,23 @@ describe("enrichment endpoints", () => {
     expect((await app.request("/api/free-labels/nope", { headers })).status).toBe(404);
   });
 
-  it("serves a bounded free-label graph with an optional label filter", async () => {
-    await seedEnrichedTweets();
+  it("serves bounded and complete free-label graphs with an optional label filter", async () => {
+    await seedEnrichedTweets(["vllm"]);
     const graph = (await (await app.request("/api/graph", { headers })).json()) as {
       nodes: { name: string }[];
       links: { source: string; target: string; weight: number }[];
     };
-    expect(graph.nodes.map((node) => node.name).sort()).toEqual(["fp8"]);
-    expect(graph.links).toEqual([]);
+    expect(graph.nodes.map((node) => node.name).sort()).toEqual(["fp8", "vllm"]);
+    expect(graph.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
+
+    const complete = (await (
+      await app.request("/api/graph?complete=true&top=1", { headers })
+    ).json()) as {
+      nodes: { name: string }[];
+      links: { source: string; target: string; weight: number }[];
+    };
+    expect(complete.nodes.map((node) => node.name).sort()).toEqual(["fp8", "vllm"]);
+    expect(complete.links).toEqual([{ source: "fp8", target: "vllm", weight: 1 }]);
 
     const bounded = (await (await app.request("/api/graph?top=1", { headers })).json()) as {
       nodes: unknown[];
@@ -513,6 +527,13 @@ describe("enrichment endpoints", () => {
 
     expect((await app.request("/api/graph?top=0", { headers })).status).toBe(400);
     expect((await app.request("/api/graph?top=5000", { headers })).status).toBe(400);
+    expect((await app.request("/api/graph?complete=false", { headers })).status).toBe(400);
+
+    const graphSpy = vi.spyOn(enrich.store, "graph").mockImplementationOnce(() => {
+      throw new CompleteGraphLimitError();
+    });
+    expect((await app.request("/api/graph?complete=true", { headers })).status).toBe(413);
+    graphSpy.mockRestore();
   });
 
   it("does not expose an in-process enrichment writer", async () => {

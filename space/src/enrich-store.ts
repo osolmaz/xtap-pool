@@ -38,6 +38,14 @@ export const RECENT_ERROR_WINDOW = 100;
 /** Query caps applied by consumer helpers. */
 const FREE_LABEL_LIMIT = 50;
 const RELATED_LIMIT = 50;
+const MAX_COMPLETE_GRAPH_NODES = 10_000;
+const MAX_COMPLETE_GRAPH_LINKS = 100_000;
+
+export class CompleteGraphLimitError extends Error {
+  constructor() {
+    super("complete free-label graph exceeds the export limit");
+  }
+}
 
 /** One unit ready for the worker; includes the hashes that produced it. */
 export type QueueItem = {
@@ -1272,34 +1280,18 @@ export class EnrichStore {
     return { name, unit_count: row.unit_count, tweet_count: tweetCount.n, related };
   }
 
-  graph(options: UnitSelection & { top: number }): { nodes: GraphNode[]; links: GraphLink[] } {
+  graph(options: UnitSelection & { top?: number }): { nodes: GraphNode[]; links: GraphLink[] } {
     const eligible = eligibleUnits({
       ...options,
       taxonomyVersion: this.taxonomyVersion,
       contractHash: this.contractHash,
     });
-    const nodes = this.db
-      .prepare(
-        `SELECT a.name AS name, COUNT(DISTINCT a.unit_id) AS unit_count
-         FROM label_assignments a
-         JOIN free_label_registry r ON r.name = a.name AND r.status = 'approved'
-         WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
-         GROUP BY a.name ORDER BY unit_count DESC, a.name LIMIT ?`,
-      )
-      .all(...eligible.params, options.top) as GraphNode[];
+    const nodes = graphNodes(this.db, eligible, options.top);
     if (nodes.length === 0) return { nodes: [], links: [] };
-    const names = nodes.map((node) => node.name);
-    const placeholders = names.map(() => "?").join(",");
-    const links = this.db
-      .prepare(
-        `SELECT a.name AS source, b.name AS target, COUNT(DISTINCT a.unit_id) AS weight
-         FROM label_assignments a
-         JOIN label_assignments b ON b.unit_id = a.unit_id AND a.name < b.name AND b.kind = 'free'
-         WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
-           AND a.name IN (${placeholders}) AND b.name IN (${placeholders})
-         GROUP BY a.name, b.name ORDER BY weight DESC, source, target LIMIT ?`,
-      )
-      .all(...eligible.params, ...names, ...names, options.top * 4) as GraphLink[];
+    const links =
+      options.top === undefined
+        ? completeGraphLinks(this.db, eligible)
+        : boundedGraphLinks(this.db, eligible, nodes, options.top);
     return { nodes, links };
   }
 
@@ -1414,6 +1406,65 @@ export class EnrichStore {
         row.enriched_at,
       );
   }
+}
+
+type EligibleQuery = { sql: string; params: unknown[] };
+
+function graphNodes(
+  db: Database.Database,
+  eligible: EligibleQuery,
+  top: number | undefined,
+): GraphNode[] {
+  const limit = top ?? MAX_COMPLETE_GRAPH_NODES + 1;
+  const nodes = db
+    .prepare(
+      `SELECT a.name AS name, COUNT(DISTINCT a.unit_id) AS unit_count
+       FROM label_assignments a
+       JOIN free_label_registry r ON r.name = a.name AND r.status = 'approved'
+       WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
+       GROUP BY a.name ORDER BY unit_count DESC, a.name LIMIT ?`,
+    )
+    .all(...eligible.params, limit) as GraphNode[];
+  if (top === undefined && nodes.length > MAX_COMPLETE_GRAPH_NODES) {
+    throw new CompleteGraphLimitError();
+  }
+  return nodes;
+}
+
+function completeGraphLinks(db: Database.Database, eligible: EligibleQuery): GraphLink[] {
+  const links = db
+    .prepare(
+      `SELECT a.name AS source, b.name AS target, COUNT(DISTINCT a.unit_id) AS weight
+       FROM label_assignments a
+       JOIN free_label_registry ra ON ra.name = a.name AND ra.status = 'approved'
+       JOIN label_assignments b ON b.unit_id = a.unit_id AND a.name < b.name AND b.kind = 'free'
+       JOIN free_label_registry rb ON rb.name = b.name AND rb.status = 'approved'
+       WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
+       GROUP BY a.name, b.name ORDER BY weight DESC, source, target LIMIT ?`,
+    )
+    .all(...eligible.params, MAX_COMPLETE_GRAPH_LINKS + 1) as GraphLink[];
+  if (links.length > MAX_COMPLETE_GRAPH_LINKS) throw new CompleteGraphLimitError();
+  return links;
+}
+
+function boundedGraphLinks(
+  db: Database.Database,
+  eligible: EligibleQuery,
+  nodes: readonly GraphNode[],
+  top: number,
+): GraphLink[] {
+  const names = nodes.map((node) => node.name);
+  const placeholders = names.map(() => "?").join(",");
+  return db
+    .prepare(
+      `SELECT a.name AS source, b.name AS target, COUNT(DISTINCT a.unit_id) AS weight
+       FROM label_assignments a
+       JOIN label_assignments b ON b.unit_id = a.unit_id AND a.name < b.name AND b.kind = 'free'
+       WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
+         AND a.name IN (${placeholders}) AND b.name IN (${placeholders})
+       GROUP BY a.name, b.name ORDER BY weight DESC, source, target LIMIT ?`,
+    )
+    .all(...eligible.params, ...names, ...names, top * 4) as GraphLink[];
 }
 
 function nullable<T>(value: T | undefined): T | null {
