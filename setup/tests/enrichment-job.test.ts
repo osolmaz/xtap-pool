@@ -66,12 +66,15 @@ describe("Hugging Face enrichment Job", () => {
       labels: {
         app: "xtap-pool",
         component: "enrichment",
-        space_repo: "alice/xtap-pool",
+        space_repo: "j2EoX9oQdUwRyuhnS-n4HnjY0ks_n-QXcB1evBGoqgE",
         source_revision: REVISION,
-        secret_names: "HF_TOKEN,INFERENCE_TOKEN",
+        secret_names: "HF_TOKEN.INFERENCE_TOKEN",
       },
     });
     expect(desiredEnrichmentJobHash(desired)).toMatch(/^[0-9a-f]{64}$/u);
+    expect(Object.values(desired.labels).every((value) => /^[a-zA-Z0-9._-]*$/u.test(value))).toBe(
+      true,
+    );
   });
 
   it("rejects a missing deployment manifest and invalid Space namespace", async () => {
