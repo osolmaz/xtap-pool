@@ -30,6 +30,7 @@ describe("setup CLI command parsing", () => {
         "--json",
         "--fix",
         "--canary",
+        "--resume-canary-job=job-1",
         "--enable-schedule",
       ]),
     ).toEqual({
@@ -38,6 +39,7 @@ describe("setup CLI command parsing", () => {
       json: true,
       fix: true,
       canary: true,
+      resumeCanaryJobId: "job-1",
       enableSchedule: true,
     });
   });
@@ -47,6 +49,12 @@ describe("setup CLI command parsing", () => {
     expect(() => parseSetupCommand(["update", "not-a-repo"])).toThrow("owner/name");
     expect(() => parseSetupCommand(["update", "alice/xtap-pool", "extra"])).toThrow("Usage");
     expect(() => parseSetupCommand(["doctor", "alice/xtap-pool", "extra"])).toThrow("Usage");
-    expect(() => parseSetupCommand(["doctor", "--enable-schedule"])).toThrow("requires --canary");
+    expect(() => parseSetupCommand(["doctor", "--enable-schedule"])).toThrow("require --canary");
+    expect(() => parseSetupCommand(["doctor", "--resume-canary-job=job-1"])).toThrow(
+      "require --canary",
+    );
+    expect(() => parseSetupCommand(["doctor", "--canary", "--resume-canary-job="])).toThrow(
+      "Invalid canary Job ID",
+    );
   });
 });

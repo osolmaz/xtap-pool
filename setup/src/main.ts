@@ -26,6 +26,9 @@ try {
       json: command.json,
       fix: command.fix,
       canary: command.canary,
+      ...(command.resumeCanaryJobId === undefined
+        ? {}
+        : { resumeCanaryJobId: command.resumeCanaryJobId }),
       enableSchedule: command.enableSchedule,
     });
     if (report.summary.fail > 0) process.exitCode = 1;

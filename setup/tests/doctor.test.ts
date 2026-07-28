@@ -801,6 +801,13 @@ describe("doctor", () => {
         activeJobs: [],
       });
     };
+    const runJobCanary = vi.fn().mockResolvedValue({
+      hardCeilingUsd: 4.0165,
+      runs: [
+        { jobId: "job-1", receipt: receiptFixture("job-1") },
+        { jobId: "job-2", receipt: receiptFixture("job-2") },
+      ],
+    });
 
     const report = await runDoctor(
       { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
@@ -810,19 +817,13 @@ describe("doctor", () => {
         json: true,
         fix: false,
         canary: true,
+        resumeCanaryJobId: "job-1",
         enableSchedule: true,
       },
       {
         fetchFn,
         inspectJob,
-        runJobCanary: () =>
-          Promise.resolve({
-            hardCeilingUsd: 4.0165,
-            runs: [
-              { jobId: "job-1", receipt: receiptFixture("job-1") },
-              { jobId: "job-2", receipt: receiptFixture("job-2") },
-            ],
-          }),
+        runJobCanary,
         confirmScheduleEnable: () => Promise.resolve(true),
         resumeJobSchedule,
       },
@@ -830,6 +831,12 @@ describe("doctor", () => {
 
     expect(report.checks).toContainEqual(
       expect.objectContaining({ code: "job.canary", status: "pass" }),
+    );
+    expect(runJobCanary).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "hf_owner" }),
+      expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
+      "alice/xtap-pool-data",
+      { resumeJobId: "job-1" },
     );
     expect(report.checks).toContainEqual(
       expect.objectContaining({ code: "job.schedule.approval", status: "pass" }),

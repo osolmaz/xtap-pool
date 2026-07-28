@@ -9,6 +9,7 @@ export type SetupCommand =
       json: boolean;
       fix: boolean;
       canary: boolean;
+      resumeCanaryJobId?: string;
       enableSchedule: boolean;
     };
 
@@ -35,21 +36,26 @@ function parseDoctor(args: readonly string[]): SetupCommand {
   let json = false;
   let fix = false;
   let canary = false;
+  let resumeCanaryJobId: string | undefined;
   let enableSchedule = false;
   for (const arg of args) {
     if (arg === "--json") json = true;
     else if (arg === "--fix") fix = true;
     else if (arg === "--canary") canary = true;
-    else if (arg === "--enable-schedule") enableSchedule = true;
+    else if (arg.startsWith("--resume-canary-job=")) {
+      const value = arg.slice("--resume-canary-job=".length);
+      if (!/^[a-zA-Z0-9._-]+$/u.test(value)) throw new Error("Invalid canary Job ID.");
+      resumeCanaryJobId = value;
+    } else if (arg === "--enable-schedule") enableSchedule = true;
     else if (spaceRepo === undefined) spaceRepo = arg;
     else {
       throw new Error(
-        "Usage: npm run doctor -- [owner/xtap-pool] [--json] [--fix] [--canary] [--enable-schedule]",
+        "Usage: npm run doctor -- [owner/xtap-pool] [--json] [--fix] [--canary] [--resume-canary-job=<id>] [--enable-schedule]",
       );
     }
   }
-  if (enableSchedule && !canary) {
-    throw new Error("--enable-schedule requires --canary in the same repair run.");
+  if ((enableSchedule || resumeCanaryJobId !== undefined) && !canary) {
+    throw new Error("--enable-schedule and --resume-canary-job require --canary.");
   }
   if (spaceRepo !== undefined) {
     const error = validateRepoId(spaceRepo);
@@ -61,6 +67,7 @@ function parseDoctor(args: readonly string[]): SetupCommand {
     json,
     fix,
     canary,
+    ...(resumeCanaryJobId === undefined ? {} : { resumeCanaryJobId }),
     enableSchedule,
   };
 }
