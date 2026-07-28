@@ -49,6 +49,7 @@ const JOB_SECRET_NAMES = ["HF_TOKEN", "INFERENCE_TOKEN"] as const;
 const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(".");
 const JOB_COMMAND = ["node", "space/dist/src/enrich-job-main.js"] as const;
 const ACTIVE_JOB_STAGES = new Set(["RUNNING", "PAUSED", "UPDATING"]);
+const SUCCESSFUL_JOB_STAGES = new Set(["STOPPED", "COMPLETED"]);
 // Rounded up from Hugging Face's current $0.000167/min cpu-basic rate.
 const CPU_BASIC_HOURLY_CEILING_USD = 0.011;
 
@@ -97,6 +98,19 @@ export function enrichmentJobVariableError(key: string, value: string): string |
 }
 
 const stringMapSchema = z.record(z.string(), z.string());
+const jobWireShape = {
+  spaceId: z.string().nullish(),
+  command: z.array(z.string()).nullish(),
+  environment: stringMapSchema.nullish(),
+  // The live Jobs wire response currently uses `timeout`; the published
+  // SDK type calls the same response field `timeoutSeconds`.
+  timeout: z.number().int().positive().nullish(),
+  timeoutSeconds: z.number().int().positive().nullish(),
+  attempts: z.number().int().positive().nullish(),
+  retry: z.number().int().nonnegative().nullish(),
+  secrets: z.array(z.string()).optional(),
+  labels: stringMapSchema.nullish(),
+} as const;
 const scheduledJobSchema = z
   .object({
     id: nonempty,
@@ -105,18 +119,8 @@ const scheduledJobSchema = z
     concurrency: z.boolean(),
     jobSpec: z
       .object({
-        spaceId: z.string().nullish(),
-        command: z.array(z.string()).nullish(),
-        environment: stringMapSchema.nullish(),
+        ...jobWireShape,
         flavor: nonempty,
-        // The live Jobs wire response currently uses `timeout`; the published
-        // SDK type calls the same response field `timeoutSeconds`.
-        timeout: z.number().int().positive().nullish(),
-        timeoutSeconds: z.number().int().positive().nullish(),
-        attempts: z.number().int().positive().nullish(),
-        retry: z.number().int().nonnegative().nullish(),
-        secrets: z.array(z.string()).optional(),
-        labels: stringMapSchema.nullish(),
       })
       .loose(),
   })
@@ -126,7 +130,8 @@ const physicalJobSchema = z
   .object({
     id: nonempty,
     status: z.object({ stage: nonempty }).loose(),
-    labels: stringMapSchema.nullish(),
+    ...jobWireShape,
+    flavor: z.string().nullish(),
   })
   .loose();
 
@@ -371,7 +376,11 @@ export async function runEnrichmentCanary(
   client: HubClient,
   desired: DesiredEnrichmentJob,
   datasetRepo: string,
-  options: { pollIntervalMs?: number; receiptTimeoutMs?: number } = {},
+  options: {
+    pollIntervalMs?: number;
+    receiptTimeoutMs?: number;
+    resumeJobId?: string;
+  } = {},
 ): Promise<EnrichmentCanaryResult> {
   const inspection = await inspectEnrichmentJob(client, desired);
   if (inspection.exactSchedules.length !== 1 || inspection.schedules.length !== 1) {
@@ -387,7 +396,13 @@ export async function runEnrichmentCanary(
       `The two-run canary hard ceiling is $${hardCeilingUsd.toFixed(2)}, which requires explicit paid-run approval.`,
     );
   }
-  const first = await runOneCanaryJob(client, desired, datasetRepo, schedule.id, options);
+  const first =
+    options.resumeJobId === undefined
+      ? await runOneCanaryJob(client, desired, datasetRepo, schedule.id, options)
+      : await recoverCanaryRun(client, desired, datasetRepo, options.resumeJobId);
+  if (options.resumeJobId !== undefined) {
+    assertCanaryContinuationBudget(first.receipt, desired, hardCeilingUsd);
+  }
   const second = await runOneCanaryJob(client, desired, datasetRepo, schedule.id, options);
   if (first.jobId === second.jobId) throw new Error("Hugging Face reused a physical Job ID.");
   if (first.receipt.contract_hash !== second.receipt.contract_hash) {
@@ -431,6 +446,29 @@ async function runOneCanaryJob(
   return { jobId: job.id, receipt };
 }
 
+async function recoverCanaryRun(
+  client: HubClient,
+  desired: DesiredEnrichmentJob,
+  datasetRepo: string,
+  jobId: string,
+): Promise<EnrichmentCanaryRun> {
+  const job = physicalJobSchema.parse(
+    await getJob({ namespace: desired.namespace, jobId, ...hubOptions(client) }),
+  );
+  if (!SUCCESSFUL_JOB_STAGES.has(job.status.stage)) {
+    throw new Error(`Cannot resume from Hugging Face Job ${jobId} in ${job.status.stage}.`);
+  }
+  if (!physicalJobMatches(job, desired)) {
+    throw new Error(`Cannot resume from Hugging Face Job ${jobId} with a different contract.`);
+  }
+  const receipt = await findJobReceipt(client, datasetRepo, jobId);
+  if (receipt === undefined) {
+    throw new Error(`No durable enrichment receipt was found for Hugging Face Job ${jobId}.`);
+  }
+  validateCanaryReceipt(receipt, desired);
+  return { jobId, receipt };
+}
+
 async function waitForJob(
   client: HubClient,
   namespace: string,
@@ -441,7 +479,7 @@ async function waitForJob(
   const deadline = Date.now() + timeoutSeconds * 1_000 + 120_000;
   while (Date.now() <= deadline) {
     const job = physicalJobSchema.parse(await getJob({ namespace, jobId, ...hubOptions(client) }));
-    if (job.status.stage === "STOPPED") return;
+    if (SUCCESSFUL_JOB_STAGES.has(job.status.stage)) return;
     if (job.status.stage === "ERROR" || job.status.stage === "DELETING") {
       throw new Error(`Hugging Face Job ${jobId} ended in ${job.status.stage}.`);
     }
@@ -504,6 +542,21 @@ async function findJobReceipt(
   return undefined;
 }
 
+function assertCanaryContinuationBudget(
+  receipt: EnrichReceipt,
+  desired: DesiredEnrichmentJob,
+  hardCeilingUsd: number,
+): void {
+  if (receipt.cost_usd === undefined) {
+    throw new Error("Cannot resume a canary without measured prior cost.");
+  }
+  const computePerRun = (desired.timeoutSeconds / 3600) * CPU_BASIC_HOURLY_CEILING_USD;
+  const nextRunCeiling = Number(desired.environment["ENRICH_MAX_COST_USD"]) + computePerRun;
+  if (receipt.cost_usd + computePerRun + nextRunCeiling > hardCeilingUsd + 1e-9) {
+    throw new Error("The resumed canary would exceed its cumulative cost ceiling.");
+  }
+}
+
 function validateCanaryReceipt(receipt: EnrichReceipt, desired: DesiredEnrichmentJob): void {
   const maxCost = Number(desired.environment["ENRICH_MAX_COST_USD"]);
   const maxTokens = Number(desired.environment["ENRICH_MAX_TOKENS"]);
@@ -562,14 +615,7 @@ function scheduleProjection(desired: DesiredEnrichmentJob): Record<string, unkno
   return {
     schedule: desired.schedule,
     concurrency: false,
-    spaceId: desired.spaceRepo,
-    command: [...JOB_COMMAND],
-    environment: desired.environment,
-    flavor: "cpu-basic",
-    timeout: desired.timeoutSeconds,
-    retries: 0,
-    secrets: [...JOB_SECRET_NAMES].sort(),
-    labels: desired.labels,
+    ...desiredPhysicalJobProjection(desired),
   };
 }
 
@@ -599,8 +645,15 @@ function scheduleRetries(job: ScheduledEnrichmentJob): number | undefined {
 }
 
 function scheduleSecretNames(job: ScheduledEnrichmentJob): readonly string[] {
-  if (job.jobSpec.secrets !== undefined) return [...job.jobSpec.secrets].sort();
-  const declared = job.jobSpec.labels?.["secret_names"];
+  return job.jobSpec.secrets === undefined
+    ? declaredSecretNames(job.jobSpec.labels)
+    : [...job.jobSpec.secrets].sort();
+}
+
+function declaredSecretNames(
+  labels: Readonly<Record<string, string>> | null | undefined,
+): readonly string[] {
+  const declared = labels?.["secret_names"];
   return declared === undefined ? [] : declared.split(".").sort();
 }
 
@@ -630,6 +683,57 @@ async function readDeploymentManifest(client: HubClient, spaceRepo: string) {
   }
   const candidate: unknown = JSON.parse(await blob.text());
   return deploymentManifestSchema.parse(candidate);
+}
+
+function physicalJobMatches(job: PhysicalEnrichmentJob, desired: DesiredEnrichmentJob): boolean {
+  return (
+    canonicalJson(actualPhysicalJobProjection(job)) ===
+    canonicalJson(physicalJobProjection(desired))
+  );
+}
+
+function physicalJobProjection(desired: DesiredEnrichmentJob): Record<string, unknown> {
+  return desiredPhysicalJobProjection(desired);
+}
+
+function desiredPhysicalJobProjection(desired: DesiredEnrichmentJob): Record<string, unknown> {
+  return {
+    spaceId: desired.spaceRepo,
+    command: [...JOB_COMMAND],
+    environment: desired.environment,
+    flavor: "cpu-basic",
+    timeout: desired.timeoutSeconds,
+    retries: 0,
+    secrets: [...JOB_SECRET_NAMES].sort(),
+    labels: desired.labels,
+  };
+}
+
+function actualPhysicalJobProjection(job: PhysicalEnrichmentJob): Record<string, unknown> {
+  return {
+    spaceId: job.spaceId ?? undefined,
+    command: job.command ?? undefined,
+    environment: job.environment ?? {},
+    flavor: job.flavor ?? undefined,
+    timeout: physicalJobTimeout(job),
+    retries: physicalJobRetries(job),
+    secrets: physicalJobSecrets(job),
+    labels: job.labels ?? {},
+  };
+}
+
+function physicalJobTimeout(job: PhysicalEnrichmentJob): number | undefined {
+  return job.timeout ?? job.timeoutSeconds ?? undefined;
+}
+
+function physicalJobRetries(job: PhysicalEnrichmentJob): number | undefined {
+  if (job.retry !== undefined && job.retry !== null) return job.retry;
+  if (job.attempts === undefined || job.attempts === null) return undefined;
+  return job.attempts - 1;
+}
+
+function physicalJobSecrets(job: PhysicalEnrichmentJob): readonly string[] {
+  return job.secrets === undefined ? declaredSecretNames(job.labels) : [...job.secrets].sort();
 }
 
 function ownsJob(

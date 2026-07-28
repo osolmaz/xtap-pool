@@ -278,7 +278,7 @@ describe("Hugging Face enrichment Job", () => {
       .mockResolvedValueOnce(physicalFixture(desired, "job-1", "RUNNING"))
       .mockResolvedValueOnce(physicalFixture(desired, "job-2", "RUNNING"));
     hubMocks.getJob
-      .mockResolvedValueOnce(physicalFixture(desired, "job-1", "STOPPED"))
+      .mockResolvedValueOnce(physicalFixture(desired, "job-1", "COMPLETED"))
       .mockResolvedValueOnce(physicalFixture(desired, "job-2", "STOPPED"));
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([{ type: "file", path: "enrichment/receipts/2026-07-28.jsonl" }]),
@@ -301,6 +301,58 @@ describe("Hugging Face enrichment Job", () => {
     expect(result.hardCeilingUsd).toBeCloseTo(4.0165);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
     expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
+  });
+
+  it("resumes a bounded canary from a matching completed Job and launches only its continuation", async () => {
+    const desired = await desiredFixture();
+    const exact = scheduleFixture(desired, "exact", true);
+    hubMocks.listScheduledJobs.mockResolvedValue([exact]);
+    hubMocks.runScheduledJob.mockResolvedValue(physicalFixture(desired, "job-2", "RUNNING"));
+    hubMocks.getJob
+      .mockResolvedValueOnce({
+        ...physicalFixture(desired, "job-1", "COMPLETED"),
+        secrets: undefined,
+      })
+      .mockResolvedValueOnce(physicalFixture(desired, "job-2", "COMPLETED"));
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "enrichment/receipts/2026-07-28.jsonl" }]),
+    );
+    hubMocks.downloadFile.mockImplementation((options: { path?: string }) =>
+      Promise.resolve(
+        options.path === ".xtap-deployment.json"
+          ? new Blob([JSON.stringify({ source_revision: REVISION })])
+          : new Blob([
+              [receiptFixture("job-1"), receiptFixture("job-2")]
+                .map((receipt) => JSON.stringify(receipt))
+                .join("\n"),
+            ]),
+      ),
+    );
+
+    const result = await runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
+      resumeJobId: "job-1",
+      pollIntervalMs: 0,
+      receiptTimeoutMs: 100,
+    });
+
+    expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
+    expect(hubMocks.runScheduledJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects unsafe canary continuation Jobs", async () => {
+    const desired = await desiredFixture();
+    hubMocks.listScheduledJobs.mockResolvedValue([scheduleFixture(desired, "exact", true)]);
+    hubMocks.getJob.mockResolvedValue({
+      ...physicalFixture(desired, "job-1", "COMPLETED"),
+      environment: { ...desired.environment, ENRICH_MAX_UNITS_PER_TICK: "25" },
+    });
+
+    await expect(
+      runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
+        resumeJobId: "job-1",
+        pollIntervalMs: 0,
+      }),
+    ).rejects.toThrow("different contract");
   });
 
   it("requires secrets for a missing schedule and rejects a replacement race", async () => {
@@ -625,5 +677,16 @@ function physicalFixture(
   id: string,
   stage: string,
 ): Record<string, unknown> {
-  return { id, status: { stage }, labels: desired.labels };
+  return {
+    id,
+    status: { stage },
+    spaceId: desired.spaceRepo,
+    command: ["node", "space/dist/src/enrich-job-main.js"],
+    environment: desired.environment,
+    flavor: "cpu-basic",
+    timeout: desired.timeoutSeconds,
+    retry: 0,
+    secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
+    labels: desired.labels,
+  };
 }

@@ -40,6 +40,7 @@ export type DoctorOptions = {
   json: boolean;
   fix: boolean;
   canary?: boolean;
+  resumeCanaryJobId?: string;
   enableSchedule?: boolean;
 };
 
@@ -180,6 +181,9 @@ async function runDoctorCanary(
     client,
     desired,
     manifest.datasetRepo,
+    options.resumeCanaryJobId === undefined
+      ? undefined
+      : { resumeJobId: options.resumeCanaryJobId },
   );
   const canaryCheck = pass(
     "job.canary",
