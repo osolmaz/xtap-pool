@@ -12,7 +12,7 @@ import type { EnrichReceipt, ServiceAccountScope } from "@xtap-pool/shared";
 import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
 import type { EnrichTaxonomy } from "./enrich-config.js";
-import type { EnrichStore } from "./enrich-store.js";
+import { CompleteGraphLimitError, type EnrichStore } from "./enrich-store.js";
 import { createHuggingFaceOrgResolver } from "./hf-orgs.js";
 import type { OrgResolver } from "./hf-orgs.js";
 import type { IngestOutcome } from "./ingest.js";
@@ -118,6 +118,7 @@ const taxonomyQuerySchema = z.object({
 
 const graphQuerySchema = taxonomyQuerySchema.extend({
   top: z.coerce.number().int().min(1).max(1000).default(300),
+  complete: z.enum(["true"]).optional(),
 });
 
 const statusQuerySchema = z.object({
@@ -487,19 +488,26 @@ export function createApp(deps: AppDeps): Hono {
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
     const revision = checkedRevision(parsed.data.revision, unitStore, parsed.data.cutoff);
     if (revision instanceof Response) return revision;
-    return c.json({
-      revision,
-      ...taxonomyMetadata(deps),
-      ...(parsed.data.cutoff === undefined ? {} : { cutoff: parsed.data.cutoff }),
-      ...deps.enrich.store.graph({
-        authorIds: parseCsv(parsed.data.author_ids),
-        labels: parseCsv(parsed.data.labels),
-        labelMode: parsed.data.label_mode,
-        publication: parsed.data.publication,
-        cutoff: parsed.data.cutoff,
-        top: parsed.data.top,
-      }),
-    });
+    try {
+      return c.json({
+        revision,
+        ...taxonomyMetadata(deps),
+        ...(parsed.data.cutoff === undefined ? {} : { cutoff: parsed.data.cutoff }),
+        ...deps.enrich.store.graph({
+          authorIds: parseCsv(parsed.data.author_ids),
+          labels: parseCsv(parsed.data.labels),
+          labelMode: parsed.data.label_mode,
+          publication: parsed.data.publication,
+          cutoff: parsed.data.cutoff,
+          ...(parsed.data.complete === "true" ? {} : { top: parsed.data.top }),
+        }),
+      });
+    } catch (error) {
+      if (error instanceof CompleteGraphLimitError) {
+        return c.json({ error: error.message }, 413);
+      }
+      throw error;
+    }
   });
 
   app.get("/api/enrichment/status", (c) => {
