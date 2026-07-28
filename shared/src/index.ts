@@ -57,6 +57,11 @@ export {
   type FreeLabelCandidateDetail,
 } from "./free-label-registry.js";
 export {
+  DEPLOYMENT_MANIFEST_PATH,
+  deploymentManifestSchema,
+  type DeploymentManifest,
+} from "./deployment.js";
+export {
   canonicalJson,
   computeContractHash,
   computeInputHash,

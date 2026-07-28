@@ -15,13 +15,30 @@ describe("setup CLI command parsing", () => {
     });
   });
 
-  it("parses doctor mode with optional output and fix flags", () => {
-    expect(parseSetupCommand(["doctor"])).toEqual({ kind: "doctor", json: false, fix: false });
-    expect(parseSetupCommand(["doctor", "alice/xtap-pool", "--json", "--fix"])).toEqual({
+  it("parses doctor repair, canary, and activation flags", () => {
+    expect(parseSetupCommand(["doctor"])).toEqual({
+      kind: "doctor",
+      json: false,
+      fix: false,
+      canary: false,
+      enableSchedule: false,
+    });
+    expect(
+      parseSetupCommand([
+        "doctor",
+        "alice/xtap-pool",
+        "--json",
+        "--fix",
+        "--canary",
+        "--enable-schedule",
+      ]),
+    ).toEqual({
       kind: "doctor",
       spaceRepo: "alice/xtap-pool",
       json: true,
       fix: true,
+      canary: true,
+      enableSchedule: true,
     });
   });
 
@@ -30,5 +47,6 @@ describe("setup CLI command parsing", () => {
     expect(() => parseSetupCommand(["update", "not-a-repo"])).toThrow("owner/name");
     expect(() => parseSetupCommand(["update", "alice/xtap-pool", "extra"])).toThrow("Usage");
     expect(() => parseSetupCommand(["doctor", "alice/xtap-pool", "extra"])).toThrow("Usage");
+    expect(() => parseSetupCommand(["doctor", "--enable-schedule"])).toThrow("requires --canary");
   });
 });

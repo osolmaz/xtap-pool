@@ -21,6 +21,7 @@
   "dependencies": {
     "@clack/prompts": "^0.11.0",
     "@huggingface/hub": "^2.13.2",
-    "@xtap-pool/shared": "*"
+    "@xtap-pool/shared": "*",
+    "zod": "^4.4.3"
   }
 }

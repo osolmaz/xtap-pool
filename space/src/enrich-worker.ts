@@ -316,6 +316,7 @@ export type EnrichWorkerDeps = {
   unitsPerCall?: number;
   now: () => Date;
   workerId?: string;
+  writeEmptyReceipt?: boolean;
   leaseMs?: number;
   ceilings?: WorkerCeilings;
   verifyHubLabel?: HubVerifier;
@@ -410,7 +411,7 @@ export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichRecei
       receipt.stopped_by = registryStopped;
     }
     receipt.finished_at = deps.now().toISOString();
-    if (hasReceiptActivity(receipt)) {
+    if (deps.writeEmptyReceipt === true || hasReceiptActivity(receipt)) {
       const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
       await lock(() => writeReceipt(deps, receipt));
     }

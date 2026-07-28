@@ -11,6 +11,7 @@ COPY setup/package.json setup/
 # binary explicitly so Tailwind/Vite can load lightningcss during the build.
 RUN npm ci && node -e "const fs=require('fs'); const {execFileSync}=require('child_process'); const version=JSON.parse(fs.readFileSync('node_modules/lightningcss/package.json','utf8')).version; const arch=process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : undefined; if (arch === undefined) throw new Error('unsupported arch: '+process.arch); execFileSync('npm',['install','--no-save','lightningcss-linux-'+arch+'-gnu@'+version],{stdio:'inherit'});"
 COPY tsconfig.base.json ./
+COPY .xtap-deployment.json ./
 COPY shared/ shared/
 COPY space/ space/
 COPY explorer/ explorer/
@@ -20,6 +21,7 @@ FROM node:22-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY .xtap-deployment.json ./
 COPY shared/package.json shared/
 COPY space/package.json space/
 COPY explorer/package.json explorer/

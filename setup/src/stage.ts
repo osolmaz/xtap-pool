@@ -2,6 +2,8 @@ import { Blob } from "node:buffer";
 import { promises as fs } from "node:fs";
 import { join, relative, sep } from "node:path";
 
+import { DEPLOYMENT_MANIFEST_PATH, deploymentManifestSchema } from "@xtap-pool/shared";
+
 import { captureCommand, inheritCommand } from "./process.js";
 
 export type UploadFile = {
@@ -17,6 +19,14 @@ export async function createSpaceStage(root: string, stageDir: string): Promise<
   await captureCommand("git", ["-C", root, "archive", "--format=tar", "-o", archivePath, "HEAD"]);
   await inheritCommand("tar", ["-xf", archivePath, "-C", stageDir]);
   await fs.rm(archivePath, { force: true });
+  const sourceRevision = (
+    await captureCommand("git", ["-C", root, "rev-parse", "HEAD"])
+  ).stdout.trim();
+  const deployment = deploymentManifestSchema.parse({ source_revision: sourceRevision });
+  await fs.writeFile(
+    join(stageDir, DEPLOYMENT_MANIFEST_PATH),
+    `${JSON.stringify(deployment, null, 2)}\n`,
+  );
   const setupPackageJson = await fs.readFile(join(stageDir, "setup", "package.json"));
   await fs.copyFile(join(root, "space", "hf-space-README.md"), join(stageDir, "README.md"));
   await Promise.all(

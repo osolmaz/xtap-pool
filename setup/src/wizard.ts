@@ -25,9 +25,15 @@ import {
   validateUserList,
 } from "./config.js";
 import { deployPool, updateExistingPool } from "./deploy.js";
+import {
+  desiredEnrichmentJob,
+  reconcileEnrichmentJob,
+  suspendMismatchedEnrichmentSchedules,
+} from "./enrichment-job.js";
 import { getSpaceVariables, setSpaceSecret } from "./hub-api.js";
 import { defaultTweetsDirectory, expandHomePath } from "./path.js";
 import { captureCommand, inheritCommand } from "./process.js";
+import { verifyInferenceToken } from "./inference-token.js";
 import { verifyDatasetWriteToken } from "./token.js";
 
 export async function runSetupWizard(root: string): Promise<void> {
@@ -43,7 +49,18 @@ export async function runSetupWizard(root: string): Promise<void> {
   const datasetToken = await promptDatasetToken(config.datasetRepo);
   await maybeSeed(root, config);
   await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", datasetToken);
-  outro(`Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`);
+  const inferenceToken = await promptInferenceToken();
+  const variables = await getSpaceVariables({ accessToken }, config.spaceRepo);
+  const desired = await desiredEnrichmentJob(
+    { accessToken },
+    config.spaceRepo,
+    config.datasetRepo,
+    variables,
+  );
+  await reconcileEnrichmentJob({ accessToken }, desired, { datasetToken, inferenceToken });
+  outro(
+    `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nEnrichment Job: created and suspended pending its recovery canary.`,
+  );
 }
 
 export async function runUpdateCommand(root: string, requestedSpaceRepo?: string): Promise<void> {
@@ -56,8 +73,20 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
   await updateExistingPool(root, { accessToken }, config);
+  const refreshedVariables = await getSpaceVariables({ accessToken }, spaceRepo);
+  const desired = await desiredEnrichmentJob(
+    { accessToken },
+    config.spaceRepo,
+    config.datasetRepo,
+    refreshedVariables,
+  );
+  const suspended = await suspendMismatchedEnrichmentSchedules({ accessToken }, desired);
   task.stop("Space updated");
-  outro(`Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`);
+  outro(
+    suspended === 0
+      ? `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`
+      : `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nSuspended ${String(suspended)} stale enrichment schedule(s). Run doctor --fix to replace them.`,
+  );
 }
 
 export async function activeHfToken(): Promise<string> {
@@ -121,6 +150,7 @@ async function promptDatasetToken(datasetRepo: string): Promise<string> {
     [
       `Create a fine-grained token scoped only to ${datasetRepo}.`,
       `Choose write access to contents/settings for that dataset.`,
+      "Setup will store it as HF_TOKEN on both the Space and its suspended enrichment Job.",
       tokenSettingsUrl(),
     ].join("\n"),
     "Dataset token",
@@ -132,6 +162,22 @@ async function promptDatasetToken(datasetRepo: string): Promise<string> {
       note(`${report.tokenName || "token"} on ${report.username || "unknown account"}`, "Verified");
       return token;
     }
+    note(report.errors.join("\n"), "Token refused");
+  }
+}
+
+async function promptInferenceToken(): Promise<string> {
+  note(
+    [
+      "Create a separate fine-grained token with `Make calls to Inference Providers`.",
+      tokenSettingsUrl(),
+    ].join("\n"),
+    "Inference token",
+  );
+  for (;;) {
+    const token = await promptPassword("Paste the inference-only INFERENCE_TOKEN");
+    const report = await verifyInferenceToken({ token });
+    if (report.ok) return token;
     note(report.errors.join("\n"), "Token refused");
   }
 }

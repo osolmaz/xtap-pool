@@ -40,15 +40,37 @@ npm run doctor -- osolmaz/xtap-pool
 npm run --silent doctor -- osolmaz/xtap-pool --json  # JSON only on stdout
 ```
 
-To repair missing or broken Space credentials, run the bounded repair flow. It
-prompts for replacement tokens, validates them for their intended role, writes
-the Space secrets, restarts once, waits, and verifies live health. `HF_TOKEN`
-must be scoped to the dataset repo; `INFERENCE_TOKEN` must be a separate
-fine-grained token with the `Make calls to Inference Providers` permission:
+To repair missing or broken deployment configuration, run the bounded repair
+flow. It owns both the Space and the scheduled Hugging Face enrichment Job. The
+flow prompts privately for replacement tokens, validates their intended roles,
+reconciles Space configuration, and creates or replaces the scheduled Job in a
+suspended state. `HF_TOKEN` must be scoped to the dataset repo;
+`INFERENCE_TOKEN` must be a separate fine-grained token with the `Make calls to
+Inference Providers` permission:
 
 ```sh
 npm run doctor -- osolmaz/xtap-pool --fix
 ```
+
+Run the two-Job recovery canary while keeping the schedule suspended. Its hard
+cumulative inference and CPU ceiling is below $5:
+
+```sh
+npm run doctor -- osolmaz/xtap-pool --fix --canary
+```
+
+Activating recurring paid work requires the canary and a separate explicit
+confirmation that shows the schedule and per-run ceiling:
+
+```sh
+npm run doctor -- osolmaz/xtap-pool --fix --canary --enable-schedule
+```
+
+Hugging Face stores scheduled Job secrets with the Job configuration. Existing
+Space secret values are write-only, so repair requires the original token values
+or purpose-scoped replacements when Job secrets must be created or rotated. It
+does not mint tokens, copy values out of the Space, print them, or save them
+locally. It stops with the missing input when safe reconciliation is impossible.
 
 To redeploy an existing pool without re-entering repo names, the dataset token,
 or import settings:
@@ -69,8 +91,8 @@ dataset repo and membership bootstrap settings, preserves all secrets, and only
 uploads the latest Space code plus any missing variables.
 It will not create or rotate generated signing/session secrets; run the setup
 flow if those were never initialized. Keep `HF_TOKEN` scoped to read/write the
-private dataset; if enrichment is enabled, use a separate fine-grained
-`INFERENCE_TOKEN` with the `Make calls to Inference Providers` permission.
+private dataset. The Space keeps `ENRICH_ENABLED=false`; doctor provisions the
+separate inference credential only on the Hugging Face enrichment Job.
 
 The lower-level scripts are still available when you want to do those steps
 manually:
@@ -107,17 +129,30 @@ previous one; add out-of-org friends as individual members.
 
 ## Scheduled enrichment
 
-Production enrichment runs through the standalone `npm run enrich --workspace space`
-command, not the web server. [`.github/workflows/enrichment.yml`](.github/workflows/enrichment.yml)
-runs one bounded tick every six hours after `ENRICH_SCHEDULE_ENABLED=true` is
-set as a repository variable. Keep `XTAP_DATASET_WRITER_TOKEN` and
-`XTAP_INFERENCE_TOKEN` as separate purpose-scoped Actions secrets. Configure
-`XTAP_DATASET_REPO`, all cost and pricing variables, and the other bounded worker
-variables before enabling the schedule. Missing cost configuration fails before
-any provider call. Four scheduled runs make the daily scheduled maximum four
-times `ENRICH_MAX_COST_USD`. Scheduled and manually dispatched workflow runs
-share one non-cancelling concurrency group, and the web API exposes no writer.
-Do not launch an independent `enrich` command while a workflow run is active.
+Production enrichment runs through the standalone enrichment command in a
+scheduled Hugging Face Job, not in the web Space:
+
+```sh
+npm run enrich --workspace space
+```
+
+The repair flow owns this schedule and uses `cpu-basic`, an explicit timeout,
+and disabled concurrency so two workers cannot overlap. New or replaced
+schedules start suspended. `--canary` triggers two bounded physical Jobs and
+verifies their durable receipts, continuation contract, source revision, and
+cost accounting. `--enable-schedule` resumes the schedule only after the canary
+passes and recurring paid work is explicitly approved.
+
+The Job receives separate purpose-scoped dataset-writer and inference secrets
+through Hugging Face Jobs. Its environment contains the dataset repo, model,
+taxonomy, pricing, and bounded unit, token, elapsed-time, error-rate,
+discarded-assignment, and cumulative-cost ceilings. Missing credentials or cost
+configuration fails before any provider call. The default is capped at $2 of
+inference and 400,000 total tokens per physical Job. Two canary Jobs plus their
+worst-case `cpu-basic` time have a cumulative hard ceiling below $4.02.
+Scheduled and manually triggered runs use the same non-concurrent Hugging Face
+schedule. The web API exposes no enrichment writer, and GitHub Actions remains
+CI-only.
 
 ## Join a pool (each friend)
 
