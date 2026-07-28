@@ -1,8 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hubMocks = vi.hoisted(() => ({
+  createScheduledJob: vi.fn(),
+  deleteScheduledJob: vi.fn(),
   downloadFile: vi.fn(),
+  getScheduledJob: vi.fn(),
   listFiles: vi.fn(),
+  listJobs: vi.fn(),
+  listScheduledJobs: vi.fn(),
+  resumeScheduledJob: vi.fn(),
+  runScheduledJob: vi.fn(),
+  suspendScheduledJob: vi.fn(),
   HUB_URL: "https://hub.test",
 }));
 
@@ -28,7 +36,9 @@ function asyncIterableOf(entries: { type: string; path: string }[]): AsyncIterab
 
 beforeEach(() => {
   vi.clearAllMocks();
-  hubMocks.downloadFile.mockResolvedValue(new Blob([`${JSON.stringify(sampleTweet())}\n`]));
+  mockDownloads(`${JSON.stringify(sampleTweet())}\n`);
+  hubMocks.listJobs.mockResolvedValue([]);
+  hubMocks.listScheduledJobs.mockResolvedValue([scheduledJobFixture()]);
 });
 
 describe("doctor", () => {
@@ -53,7 +63,7 @@ describe("doctor", () => {
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
     );
-    hubMocks.downloadFile.mockResolvedValue(new Blob(["not json\n{}\n"]));
+    mockDownloads("not json\n{}\n");
     const secretWrites: { key: string; value: string }[] = [];
     const fetchFn = fetchFixture({ tweets: 0, secretWrites });
     const promptDatasetToken = vi.fn<() => Promise<string>>();
@@ -325,10 +335,7 @@ describe("doctor", () => {
       },
     );
 
-    expect(secretWrites).toEqual([
-      { key: "HF_TOKEN", value: "hf_dataset" },
-      { key: "INFERENCE_TOKEN", value: "hf_inference" },
-    ]);
+    expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
     expect(restarts).toEqual(["alice/xtap-pool"]);
   });
 
@@ -364,11 +371,8 @@ describe("doctor", () => {
     );
 
     expect(promptDatasetToken).toHaveBeenCalledTimes(2);
-    expect(promptInferenceToken).toHaveBeenCalledTimes(2);
-    expect(secretWrites).toEqual([
-      { key: "HF_TOKEN", value: "hf_good_dataset" },
-      { key: "INFERENCE_TOKEN", value: "hf_good_inference" },
-    ]);
+    expect(promptInferenceToken).not.toHaveBeenCalled();
+    expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_good_dataset" }]);
   });
 
   it("repairs an existing dataset token reported invalid by the live Space", async () => {
@@ -408,7 +412,7 @@ describe("doctor", () => {
     expect(restarts).toEqual(["alice/xtap-pool"]);
   });
 
-  it("repairs an existing inference token reported invalid by the live Space", async () => {
+  it("does not repair the unused Space inference token", async () => {
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
     );
@@ -440,8 +444,8 @@ describe("doctor", () => {
     );
 
     expect(promptDatasetToken).not.toHaveBeenCalled();
-    expect(secretWrites).toEqual([{ key: "INFERENCE_TOKEN", value: "hf_inference" }]);
-    expect(restarts).toEqual(["alice/xtap-pool"]);
+    expect(secretWrites).toEqual([]);
+    expect(restarts).toEqual([]);
   });
 
   it("repairs missing generated secrets after explicit confirmation", async () => {
@@ -685,7 +689,176 @@ describe("doctor", () => {
     expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
     expect(restarts).toEqual(["alice/xtap-pool"]);
   });
+
+  it("creates a missing suspended Job schedule from separately validated hidden inputs", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const fetchFn = fetchFixture({ tweets: 12 });
+    const reconcileJob = vi.fn().mockResolvedValue(undefined);
+    const promptJobDatasetToken = vi.fn().mockResolvedValue("hf_job_dataset");
+    const promptJobInferenceToken = vi.fn().mockResolvedValue("hf_job_inference");
+
+    await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      {
+        fetchFn,
+        inspectJob: (_client, desired) =>
+          Promise.resolve({
+            desired,
+            schedules: [],
+            exactSchedules: [],
+            mismatchedSchedules: [],
+            activeJobs: [],
+          }),
+        reconcileJob,
+        promptJobDatasetToken,
+        promptJobInferenceToken,
+        validateDatasetToken: () => Promise.resolve([]),
+        validateInferenceToken: () => Promise.resolve([]),
+      },
+    );
+
+    expect(promptJobDatasetToken).toHaveBeenCalledWith("alice/xtap-pool-data");
+    expect(promptJobInferenceToken).toHaveBeenCalledTimes(1);
+    expect(reconcileJob).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "hf_owner" }),
+      expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
+      { datasetToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
+    );
+  });
+
+  it("runs the two-Job canary and activates only after explicit recurring-cost approval", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const fetchFn = fetchFixture({ tweets: 12 });
+    const resumeJobSchedule = vi.fn().mockResolvedValue(undefined);
+
+    const report = await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      {
+        spaceRepo: "alice/xtap-pool",
+        json: true,
+        fix: false,
+        canary: true,
+        enableSchedule: true,
+      },
+      {
+        fetchFn,
+        runJobCanary: () =>
+          Promise.resolve({
+            hardCeilingUsd: 4.015,
+            runs: [
+              { jobId: "job-1", receipt: receiptFixture("job-1") },
+              { jobId: "job-2", receipt: receiptFixture("job-2") },
+            ],
+          }),
+        confirmScheduleEnable: () => Promise.resolve(true),
+        resumeJobSchedule,
+      },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "job.canary", status: "pass" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "job.schedule.approval", status: "pass" }),
+    );
+    expect(resumeJobSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "hf_owner" }),
+      expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
+      "schedule-1",
+    );
+  });
 });
+
+const SOURCE_REVISION = "a".repeat(40);
+
+function mockDownloads(datasetContent: string): void {
+  hubMocks.downloadFile.mockImplementation((options: { repo?: { type?: string } }) =>
+    Promise.resolve(
+      options.repo?.type === "space"
+        ? new Blob([JSON.stringify({ source_revision: SOURCE_REVISION })])
+        : new Blob([datasetContent]),
+    ),
+  );
+}
+
+function scheduledJobFixture(): Record<string, unknown> {
+  return {
+    id: "schedule-1",
+    schedule: "17 */6 * * *",
+    suspend: true,
+    concurrency: false,
+    jobSpec: {
+      spaceId: "alice/xtap-pool",
+      command: ["node", "space/dist/src/enrich-job-main.js"],
+      environment: jobEnvironment(),
+      flavor: "cpu-basic",
+      timeout: 2700,
+      secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
+      labels: {
+        app: "xtap-pool",
+        component: "enrichment",
+        name: "xtap-pool-enrichment",
+        space_repo: "alice/xtap-pool",
+        source_revision: SOURCE_REVISION,
+      },
+    },
+  };
+}
+
+function jobEnvironment(): Record<string, string> {
+  return {
+    DATA_DIR: "/tmp/xtap-pool-enrichment",
+    DATASET_REPO: "alice/xtap-pool-data",
+    ENRICH_ENABLED: "true",
+    ENRICH_MAX_UNITS_PER_TICK: "50",
+    ENRICH_MAX_TOKENS: "400000",
+    ENRICH_MAX_ELAPSED_MS: "2400000",
+    ENRICH_MAX_ERROR_RATE: "0.25",
+    ENRICH_MAX_COST_USD: "2",
+    ENRICH_MAX_COST_PER_CALL_USD: "0.25",
+    ENRICH_INPUT_TOKEN_USD: "0.0000014",
+    ENRICH_OUTPUT_TOKEN_USD: "0.0000044",
+    ENRICH_MAX_DISCARDED_ASSIGNMENTS: "100",
+    LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
+    TAXONOMY_VERSION: "1",
+    XTAP_SOURCE_REVISION: SOURCE_REVISION,
+    POOL_SIGNING_SECRET: "job-not-used-0000000000000000000000000",
+    SESSION_SECRET: "job-not-used-00000000000000000000000000",
+    ALLOWED_USERS: "worker",
+    POOL_ADMINS: "worker",
+    OAUTH_CLIENT_ID: "job-not-used",
+    OAUTH_CLIENT_SECRET: "job-not-used",
+    SPACE_HOST: "worker.invalid",
+  };
+}
+
+function receiptFixture(workerId: string) {
+  return {
+    started_at: "2026-07-28T00:00:00.000Z",
+    finished_at: "2026-07-28T00:01:00.000Z",
+    units: 7,
+    calls: 2,
+    prompt_tokens: 1000,
+    completion_tokens: 100,
+    cost_usd: 0.00184,
+    failures: 0,
+    retries: 0,
+    blocked: 0,
+    contract_hash: "contract",
+    worker_id: workerId,
+    discarded_assignments: 0,
+    new_candidates: 0,
+    new_approvals: 0,
+    new_rejections: 0,
+  };
+}
 
 function sampleTweet(): Record<string, unknown> {
   return {
@@ -820,7 +993,20 @@ function variablesResponse(overrides: Record<string, string> | undefined): Respo
     DATASET_REPO: "alice/xtap-pool-data",
     ALLOWED_USERS: "alice",
     POOL_ADMINS: "alice",
-    ENRICH_ENABLED: "true",
+    ENRICH_ENABLED: "false",
+    ENRICH_JOB_SCHEDULE: "17 */6 * * *",
+    ENRICH_JOB_TIMEOUT_SECONDS: "2700",
+    ENRICH_MAX_UNITS_PER_TICK: "50",
+    ENRICH_MAX_TOKENS: "400000",
+    ENRICH_MAX_ELAPSED_MS: "2400000",
+    ENRICH_MAX_ERROR_RATE: "0.25",
+    ENRICH_MAX_COST_USD: "2",
+    ENRICH_MAX_COST_PER_CALL_USD: "0.25",
+    ENRICH_INPUT_TOKEN_USD: "0.0000014",
+    ENRICH_OUTPUT_TOKEN_USD: "0.0000044",
+    ENRICH_MAX_DISCARDED_ASSIGNMENTS: "100",
+    LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
+    TAXONOMY_VERSION: "1",
     ...overrides,
   };
   return Response.json(

@@ -25,6 +25,8 @@ try {
       spaceRepo: command.spaceRepo ?? repoInNamespace(account.name, "xtap-pool"),
       json: command.json,
       fix: command.fix,
+      canary: command.canary,
+      enableSchedule: command.enableSchedule,
     });
     if (report.summary.fail > 0) process.exitCode = 1;
   }

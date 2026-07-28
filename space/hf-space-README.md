@@ -22,18 +22,16 @@ Private tweet pool for a group of friends running the
 - `GET /healthz` and `GET /readyz` — machine-readable runtime health
 
 Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
-dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`. When enrichment is
-enabled, set `INFERENCE_TOKEN` separately as a fine-grained token with the
-`Make calls to Inference Providers` permission.
+dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`. Production
+classification does not run in the Space, and `ENRICH_ENABLED` must remain
+`false` there.
+
 Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
 comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
-(auto-injected by HF).
-
-If `ENRICH_MAX_COST_USD` is set, also set `ENRICH_MAX_COST_PER_CALL_USD` to a
-conservative upper bound for one classification or registry-review request,
-plus `ENRICH_INPUT_TOKEN_USD` and `ENRICH_OUTPUT_TOKEN_USD` in USD per token
-for the configured model. Cost-limited runs refuse to start without all three
-values and stop before a bounded request could exceed the run ceiling.
+(auto-injected by HF), and the bounded enrichment configuration reconciled by
+setup. Doctor creates a separate suspended Hugging Face Job with encrypted
+dataset-writer and inference secrets. The Job refuses missing pricing, cost
+ceilings, or a source revision that differs from the deployed Space image.
 
 After setup, admins manage individual members and one allowed member organization
 in the Space Admin tab. Durable membership is stored in the private dataset repo

@@ -7,10 +7,25 @@ import { validateTweet } from "@xtap-pool/shared";
 
 import { spacePublicUrl, validateUserList } from "./config.js";
 import {
+  desiredEnrichmentJob,
+  desiredEnrichmentJobHash,
+  ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  inspectEnrichmentJob,
+  reconcileEnrichmentJob,
+  resumeEnrichmentSchedule,
+  runEnrichmentCanary,
+} from "./enrichment-job.js";
+import type {
+  DesiredEnrichmentJob,
+  EnrichmentJobInspection,
+  EnrichmentJobSecrets,
+} from "./enrichment-job.js";
+import {
   getRepoPrivateState,
   getSpaceSecrets,
   getSpaceVariables,
   setSpaceSecret,
+  setSpaceVariable,
 } from "./hub-api.js";
 import type { HubClient } from "./hub-api.js";
 import { verifyInferenceToken } from "./inference-token.js";
@@ -23,6 +38,8 @@ export type DoctorOptions = {
   spaceRepo: string;
   json: boolean;
   fix: boolean;
+  canary?: boolean;
+  enableSchedule?: boolean;
 };
 
 export type DoctorStatus = "pass" | "warn" | "fail";
@@ -53,6 +70,23 @@ export type DoctorDeps = {
   validateDatasetToken?: (token: string, datasetRepo: string) => Promise<readonly string[]>;
   validateInferenceToken?: (token: string) => Promise<readonly string[]>;
   restartAndWait?: (spaceRepo: string) => Promise<void>;
+  inspectJob?: (
+    client: HubClient,
+    desired: DesiredEnrichmentJob,
+  ) => Promise<EnrichmentJobInspection>;
+  reconcileJob?: (
+    client: HubClient,
+    desired: DesiredEnrichmentJob,
+    secrets?: EnrichmentJobSecrets,
+  ) => Promise<unknown>;
+  promptJobDatasetToken?: (datasetRepo: string) => Promise<string>;
+  promptJobInferenceToken?: () => Promise<string>;
+  runJobCanary?: typeof runEnrichmentCanary;
+  resumeJobSchedule?: typeof resumeEnrichmentSchedule;
+  confirmScheduleEnable?: (
+    desired: DesiredEnrichmentJob,
+    hardCeilingUsd: number,
+  ) => Promise<boolean>;
 };
 
 type GeneratedSecretKey = "POOL_SIGNING_SECRET" | "SESSION_SECRET";
@@ -71,17 +105,17 @@ export async function runDoctor(
   options: DoctorOptions,
   deps: DoctorDeps = {},
 ): Promise<DoctorReport> {
-  const report = await collectDoctorReport(client, username, options.spaceRepo, deps);
-  if (options.fix && report.datasetRepo !== undefined) {
-    await repairDoctorFindings(client, report, deps);
-    const repaired = await collectDoctorReport(client, username, options.spaceRepo, deps);
-    if (options.json) printJson(repaired);
-    else printHuman(repaired);
-    return repaired;
+  let current = await collectDoctorReport(client, username, options.spaceRepo, deps);
+  if (options.fix && current.datasetRepo !== undefined) {
+    await repairDoctorFindings(client, username, current, deps);
+    current = await collectDoctorReport(client, username, options.spaceRepo, deps);
   }
-  if (options.json) printJson(report);
-  else printHuman(report);
-  return report;
+  if (options.canary === true) {
+    current = await runDoctorCanary(client, username, current, options, deps);
+  }
+  if (options.json) printJson(current);
+  else printHuman(current);
+  return current;
 }
 
 export async function collectDoctorReport(
@@ -115,14 +149,93 @@ export async function collectDoctorReport(
 
   await checkSecrets(client, manifest, checks);
   await checkDataset(client, manifest, checks);
+  await checkEnrichmentJob(client, manifest, variables, checks, deps);
   await checkLiveHealth(manifest, checks, deps.fetchFn ?? fetch);
 
   return report(spaceRepo, manifest.datasetRepo, checks);
 }
 
+// eslint-disable-next-line complexity -- This boundary keeps canary evidence, paid approval, and activation in one fail-closed transaction.
+async function runDoctorCanary(
+  client: HubClient,
+  username: string,
+  current: DoctorReport,
+  options: DoctorOptions,
+  deps: DoctorDeps,
+): Promise<DoctorReport> {
+  if (current.datasetRepo === undefined) throw new Error("Cannot run a canary without a dataset.");
+  if (current.summary.fail > 0) {
+    throw new Error("Refusing the paid recovery canary while doctor checks are failing.");
+  }
+  const variables = await getSpaceVariables(client, current.spaceRepo);
+  const manifest = manifestFromSpace(username, current.spaceRepo, variables);
+  const desired = await desiredEnrichmentJob(
+    client,
+    manifest.spaceRepo,
+    manifest.datasetRepo,
+    variables,
+  );
+  const canary = await (deps.runJobCanary ?? runEnrichmentCanary)(
+    client,
+    desired,
+    manifest.datasetRepo,
+  );
+  const canaryCheck = pass(
+    "job.canary",
+    "Two bounded Hugging Face Jobs produced verified durable receipts.",
+    {
+      firstJobId: canary.runs[0].jobId,
+      secondJobId: canary.runs[1].jobId,
+      hardCeilingUsd: canary.hardCeilingUsd,
+    },
+  );
+  const checks = [...current.checks, canaryCheck];
+  if (options.enableSchedule !== true) {
+    checks.push(
+      warn(
+        "job.schedule.approval",
+        "The recovery canary passed, but the recurring schedule remains suspended.",
+      ),
+    );
+    return report(current.spaceRepo, manifest.datasetRepo, checks);
+  }
+  const approved = await (deps.confirmScheduleEnable ?? confirmScheduleEnableDefault)(
+    desired,
+    canary.hardCeilingUsd,
+  );
+  if (!approved) {
+    checks.push(
+      warn(
+        "job.schedule.approval",
+        "Recurring paid enrichment was not approved; schedule remains suspended.",
+      ),
+    );
+    return report(current.spaceRepo, manifest.datasetRepo, checks);
+  }
+  const inspection = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
+  if (inspection.exactSchedules.length !== 1 || inspection.schedules.length !== 1) {
+    throw new Error("The schedule changed after the canary; refusing activation.");
+  }
+  const schedule = inspection.exactSchedules[0];
+  if (schedule === undefined) throw new Error("The exact schedule disappeared after the canary.");
+  await (deps.resumeJobSchedule ?? resumeEnrichmentSchedule)(client, desired, schedule.id);
+  const refreshed = await collectDoctorReport(client, username, current.spaceRepo, deps);
+  return report(current.spaceRepo, manifest.datasetRepo, [
+    ...refreshed.checks,
+    canaryCheck,
+    pass("job.schedule.approval", "The approved Hugging Face schedule is active."),
+  ]);
+}
+
 function variableCheck(key: string, value: string | undefined): DoctorCheck {
   if (value === undefined) return fail(`space.variable.${key}`, `${key} is missing.`);
   if (value.trim() === "") return fail(`space.variable.${key}`, `${key} is empty.`);
+  if (key === "ENRICH_ENABLED" && value !== "false") {
+    return fail(
+      `space.variable.${key}`,
+      "ENRICH_ENABLED must be false because production enrichment runs in Hugging Face Jobs.",
+    );
+  }
   if (key === "ALLOWED_USERS" || key === "POOL_ADMINS") {
     const error = validateUserList(value);
     if (error !== undefined) return fail(`space.variable.${key}`, `${key} is invalid: ${error}`);
@@ -189,6 +302,81 @@ async function checkDataset(
   } catch (error) {
     checks.push(fail("dataset.files", errorMessage(error)));
   }
+}
+
+async function checkEnrichmentJob(
+  client: HubClient,
+  manifest: PoolManifest,
+  variables: ReadonlyMap<string, string>,
+  checks: DoctorCheck[],
+  deps: DoctorDeps,
+): Promise<void> {
+  try {
+    const desired = await desiredEnrichmentJob(
+      client,
+      manifest.spaceRepo,
+      manifest.datasetRepo,
+      variables,
+    );
+    const inspection = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
+    checks.push(pass("job.schedules.read", `Read Hugging Face Jobs for ${manifest.namespace}.`));
+    recordEnrichmentJobChecks(inspection, checks);
+  } catch (error) {
+    checks.push(fail("job.schedules.read", errorMessage(error)));
+  }
+}
+
+function recordEnrichmentJobChecks(
+  inspection: EnrichmentJobInspection,
+  checks: DoctorCheck[],
+): void {
+  const expected = desiredEnrichmentJobHash(inspection.desired).slice(0, 16);
+  if (inspection.schedules.length === 0) {
+    checks.push(
+      fail("job.schedule", "The Hugging Face enrichment schedule is missing.", {
+        expectedContract: expected,
+      }),
+    );
+  } else if (inspection.exactSchedules.length !== 1 || inspection.mismatchedSchedules.length > 0) {
+    checks.push(
+      fail("job.schedule", "Hugging Face enrichment schedules do not match one exact contract.", {
+        schedules: inspection.schedules.length,
+        exact: inspection.exactSchedules.length,
+        mismatched: inspection.mismatchedSchedules.length,
+        expectedContract: expected,
+      }),
+    );
+  } else {
+    const schedule = inspection.exactSchedules[0];
+    if (schedule === undefined) throw new Error("exact schedule disappeared");
+    checks.push(
+      pass("job.schedule", "The Hugging Face enrichment schedule matches the deployed contract.", {
+        scheduleId: schedule.id,
+        expectedContract: expected,
+      }),
+    );
+    checks.push(
+      schedule.suspend
+        ? warn("job.schedule.state", "The Hugging Face enrichment schedule is suspended.")
+        : pass("job.schedule.state", "The Hugging Face enrichment schedule is active."),
+    );
+  }
+  checks.push(activeJobsCheck(inspection.activeJobs));
+}
+
+function activeJobsCheck(activeJobs: readonly { id: string }[]): DoctorCheck {
+  if (activeJobs.length > 1) {
+    return fail("job.concurrency", "Multiple xtap-pool enrichment Jobs are active.", {
+      activeJobs: activeJobs.length,
+    });
+  }
+  return pass(
+    "job.concurrency",
+    activeJobs.length === 0
+      ? "No xtap-pool enrichment Job is currently active."
+      : "One xtap-pool enrichment Job is active.",
+    { activeJobs: activeJobs.length },
+  );
 }
 
 async function checkLiveHealth(
@@ -394,42 +582,72 @@ function indexedDatasetCheck(
 
 async function repairDoctorFindings(
   client: HubClient,
+  username: string,
   report: DoctorReport,
   deps: DoctorDeps,
 ): Promise<void> {
   const datasetRepo = report.datasetRepo;
   if (datasetRepo === undefined) return;
   const repair = repairDependencies(deps);
+  const jobVariablesChanged = await maybeRepairJobVariables(client, report);
+  const webWorkerChanged = await maybeDisableSpaceEnrichment(client, report);
   const generatedChanged = await maybeRepairGeneratedSecrets(client, report, repair);
   const datasetRepairKind = datasetTokenRepairKind(report);
   const datasetChanged =
     generatedChanged && datasetRepairKind === "indeterminate"
       ? false
       : await maybeRepairDatasetToken(client, report, datasetRepo, repair, datasetRepairKind);
-  const inferenceChanged = await maybeRepairInferenceToken(client, report, repair);
-
-  if ([generatedChanged, datasetChanged, inferenceChanged].includes(true)) {
+  if ([webWorkerChanged, generatedChanged, datasetChanged].includes(true)) {
     await repair.restartAndWait(report.spaceRepo);
   }
+  await maybeRepairEnrichmentJob(client, username, report, repair, jobVariablesChanged);
 }
 
 type RepairDependencies = DatasetRepairDeps &
-  InferenceRepairDeps &
-  GeneratedSecretRepairDeps & {
+  GeneratedSecretRepairDeps &
+  JobRepairDeps & {
     restartAndWait: (spaceRepo: string) => Promise<void>;
   };
 
+// eslint-disable-next-line complexity -- Dependency defaults are centralized so every repair branch is injectable in tests.
 function repairDependencies(deps: DoctorDeps): RepairDependencies {
   return {
     promptDatasetToken: deps.promptDatasetToken ?? promptDatasetTokenDefault,
     confirmDatasetTokenRepair: deps.confirmDatasetTokenRepair ?? confirmDatasetTokenRepairDefault,
     validateDatasetToken: deps.validateDatasetToken ?? validateDatasetTokenDefault,
-    promptInferenceToken: deps.promptInferenceToken ?? promptInferenceTokenDefault,
     confirmGeneratedSecretRepair:
       deps.confirmGeneratedSecretRepair ?? confirmGeneratedSecretRepairDefault,
     validateInferenceToken: deps.validateInferenceToken ?? validateInferenceTokenDefault,
+    inspectJob: deps.inspectJob ?? inspectEnrichmentJob,
+    reconcileJob: deps.reconcileJob ?? reconcileEnrichmentJob,
+    promptJobDatasetToken: deps.promptJobDatasetToken ?? promptJobDatasetTokenDefault,
+    promptJobInferenceToken: deps.promptJobInferenceToken ?? promptJobInferenceTokenDefault,
     restartAndWait: deps.restartAndWait ?? restartAndWaitDefault,
   };
+}
+
+async function maybeRepairJobVariables(client: HubClient, report: DoctorReport): Promise<boolean> {
+  const missing = Object.entries(ENRICHMENT_JOB_DEFAULT_VARIABLES).filter(([key]) =>
+    report.checks.some(
+      (check) => check.code === `space.variable.${key}` && check.status === "fail",
+    ),
+  );
+  for (const [key, value] of missing) {
+    await setSpaceVariable(client, report.spaceRepo, key, value);
+  }
+  return missing.length > 0;
+}
+
+async function maybeDisableSpaceEnrichment(
+  client: HubClient,
+  report: DoctorReport,
+): Promise<boolean> {
+  const invalid = report.checks.some(
+    (check) => check.code === "space.variable.ENRICH_ENABLED" && check.status === "fail",
+  );
+  if (!invalid) return false;
+  await setSpaceVariable(client, report.spaceRepo, "ENRICH_ENABLED", "false");
+  return true;
 }
 
 type GeneratedSecretRepairDeps = {
@@ -487,24 +705,62 @@ async function maybeRepairDatasetToken(
   return true;
 }
 
-type InferenceRepairDeps = {
-  promptInferenceToken: () => Promise<string>;
+type JobRepairDeps = {
+  inspectJob: (
+    client: HubClient,
+    desired: DesiredEnrichmentJob,
+  ) => Promise<EnrichmentJobInspection>;
+  reconcileJob: (
+    client: HubClient,
+    desired: DesiredEnrichmentJob,
+    secrets?: EnrichmentJobSecrets,
+  ) => Promise<unknown>;
+  promptJobDatasetToken: (datasetRepo: string) => Promise<string>;
+  promptJobInferenceToken: () => Promise<string>;
+  validateDatasetToken: (token: string, datasetRepo: string) => Promise<readonly string[]>;
   validateInferenceToken: (token: string) => Promise<readonly string[]>;
 };
 
-async function maybeRepairInferenceToken(
+async function maybeRepairEnrichmentJob(
   client: HubClient,
+  username: string,
   report: DoctorReport,
-  deps: InferenceRepairDeps,
-): Promise<boolean> {
-  if (!needsInferenceToken(report)) return false;
-  const token = await promptForValidToken(
-    "Inference credential rejected",
-    deps.promptInferenceToken,
+  deps: JobRepairDeps,
+  variablesChanged: boolean,
+): Promise<void> {
+  if (
+    !variablesChanged &&
+    !report.checks.some((check) => check.code === "job.schedule" && check.status === "fail")
+  ) {
+    return;
+  }
+  const variables = await getSpaceVariables(client, report.spaceRepo);
+  const manifest = manifestFromSpace(username, report.spaceRepo, variables);
+  const desired = await desiredEnrichmentJob(
+    client,
+    manifest.spaceRepo,
+    manifest.datasetRepo,
+    variables,
+  );
+  const inspection = await deps.inspectJob(client, desired);
+  if (inspection.activeJobs.length > 0) {
+    throw new Error("Refusing Hugging Face schedule repair while an enrichment Job is active.");
+  }
+  if (inspection.exactSchedules.length > 0) {
+    await deps.reconcileJob(client, desired);
+    return;
+  }
+  const datasetToken = await promptForValidToken(
+    "Job dataset credential rejected",
+    () => deps.promptJobDatasetToken(manifest.datasetRepo),
+    (candidate) => deps.validateDatasetToken(candidate, manifest.datasetRepo),
+  );
+  const inferenceToken = await promptForValidToken(
+    "Job inference credential rejected",
+    deps.promptJobInferenceToken,
     deps.validateInferenceToken,
   );
-  await setSpaceSecret(client, report.spaceRepo, "INFERENCE_TOKEN", token);
-  return true;
+  await deps.reconcileJob(client, desired, { datasetToken, inferenceToken });
 }
 
 async function promptForValidToken(
@@ -552,14 +808,6 @@ function generatedSecretsWithPossibleMalformedValues(
     ),
   );
   return allSecretStatesKnown ? GENERATED_SECRET_KEYS : [];
-}
-
-function needsInferenceToken(report: DoctorReport): boolean {
-  return report.checks.some(
-    (check) =>
-      check.status === "fail" &&
-      (check.code === "space.secret.INFERENCE_TOKEN" || check.code === "live.enrichment"),
-  );
 }
 
 async function validateDatasetTokenDefault(
@@ -636,15 +884,53 @@ async function confirmGeneratedSecretRepairDefault(
   return ok;
 }
 
-async function promptInferenceTokenDefault(): Promise<string> {
+async function promptJobDatasetTokenDefault(datasetRepo: string): Promise<string> {
+  note(
+    [
+      `Paste a fine-grained token scoped to read/write ${datasetRepo}.`,
+      "Hugging Face will encrypt it as HF_TOKEN on the scheduled Job.",
+      "The value cannot be recovered from the existing Space secret.",
+    ].join("\n"),
+    "Job dataset credential",
+  );
+  return promptPassword("Scheduled Job dataset token");
+}
+
+async function promptJobInferenceTokenDefault(): Promise<string> {
   note(
     [
       "Paste a separate fine-grained token with the `Make calls to Inference Providers` permission.",
-      "It will be written to the Space as INFERENCE_TOKEN.",
+      "Hugging Face will encrypt it as INFERENCE_TOKEN on the scheduled Job.",
+      "The value cannot be recovered from the existing Space secret.",
     ].join("\n"),
-    "Inference credential",
+    "Job inference credential",
   );
-  return promptPassword("Inference Providers token");
+  return promptPassword("Scheduled Job inference token");
+}
+
+async function confirmScheduleEnableDefault(
+  desired: DesiredEnrichmentJob,
+  canaryHardCeilingUsd: number,
+): Promise<boolean> {
+  const perRun = Number(desired.environment["ENRICH_MAX_COST_USD"]);
+  note(
+    [
+      `Canary hard ceiling: $${canaryHardCeilingUsd.toFixed(2)} across two Jobs.`,
+      `Recurring inference ceiling: $${perRun.toFixed(2)} per scheduled run, plus cpu-basic time.`,
+      `Schedule: ${desired.schedule}.`,
+      "Recurring cumulative spend can exceed $5 and requires explicit approval.",
+    ].join("\n"),
+    "Paid enrichment schedule",
+  );
+  const approved = await confirm({
+    message: "Enable this recurring Hugging Face Job schedule?",
+    initialValue: false,
+  });
+  if (isCancel(approved)) {
+    cancel("Doctor cancelled.");
+    process.exit(130);
+  }
+  return approved;
 }
 
 async function promptPassword(message: string): Promise<string> {

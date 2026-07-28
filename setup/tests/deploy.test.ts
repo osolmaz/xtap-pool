@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { collectStaleSpaceDeletes, configureSpace } from "../src/deploy.js";
+import { ENRICHMENT_JOB_DEFAULT_VARIABLES } from "../src/enrichment-job.js";
 
 describe("setup deployment helpers", () => {
   it("builds delete operations for remote Space files missing from the staged upload", async () => {
@@ -50,20 +52,29 @@ describe("setup deployment helpers", () => {
       { initializeGeneratedSecrets: false },
     );
 
-    expect(requests.map((request) => [request.url, request.init.method])).toEqual([
-      ["https://hub.test/api/spaces/alice/xtap-pool/variables", "GET"],
-      ["https://hub.test/api/spaces/alice/xtap-pool/variables", "POST"],
-      ["https://hub.test/api/spaces/alice/xtap-pool/variables", "POST"],
-      ["https://hub.test/api/spaces/alice/xtap-pool/variables", "POST"],
-    ]);
-    expect(requests.map((request) => requestBody(request.init))).toEqual([
-      undefined,
-      JSON.stringify({ key: "DATASET_REPO", value: "alice/xtap-pool-data" }),
-      JSON.stringify({ key: "ALLOWED_USERS", value: "alice" }),
-      JSON.stringify({ key: "POOL_ADMINS", value: "alice" }),
-    ]);
+    expect(requests[0]).toMatchObject({
+      url: "https://hub.test/api/spaces/alice/xtap-pool/variables",
+      init: { method: "GET" },
+    });
+    const writes = requests
+      .slice(1)
+      .map((request) => requestBody(request.init))
+      .filter((body): body is string => body !== undefined)
+      .map(parseVariableWrite);
+    expect(Object.fromEntries(writes.map(({ key, value }) => [key, value]))).toEqual({
+      DATASET_REPO: "alice/xtap-pool-data",
+      ALLOWED_USERS: "alice",
+      POOL_ADMINS: "alice",
+      ENRICH_ENABLED: "false",
+      ...ENRICHMENT_JOB_DEFAULT_VARIABLES,
+    });
   });
 });
+
+function parseVariableWrite(body: string): { key: string; value: string } {
+  const candidate: unknown = JSON.parse(body);
+  return z.object({ key: z.string(), value: z.string() }).strict().parse(candidate);
+}
 
 function requestUrl(input: string | URL | Request): string {
   if (typeof input === "string") return input;

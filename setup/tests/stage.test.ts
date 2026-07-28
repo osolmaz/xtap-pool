@@ -66,6 +66,12 @@ describe("space staging helpers", () => {
       await expect(readFile(join(stage, "README.md"), "utf8")).resolves.toBe("space readme");
       await expect(readFile(join(stage, "space", "server.ts"), "utf8")).resolves.toBe("export {};");
       await expect(readFile(join(stage, "setup", "package.json"), "utf8")).resolves.toBe("{}");
+      const sourceRevision = (
+        await captureCommand("git", ["rev-parse", "HEAD"], { cwd: repo })
+      ).stdout.trim();
+      await expect(readFile(join(stage, ".xtap-deployment.json"), "utf8")).resolves.toBe(
+        `${JSON.stringify({ source_revision: sourceRevision }, null, 2)}\n`,
+      );
       await expect(readdir(join(stage, "docs"))).rejects.toThrow();
       await expect(readdir(join(stage, "extension"))).rejects.toThrow();
       await expect(readdir(join(stage, "setup", "src"))).rejects.toThrow();

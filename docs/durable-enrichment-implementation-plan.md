@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned. This replaces the current process-local queue and in-Space interval loop after the migration and recovery canary pass. The existing capture and membership contracts stay in place, along with service accounts and consumer authorization.
+Implemented. Production schedule activation remains gated on deployment, purpose-scoped Job credentials, the live two-Job recovery canary, and explicit approval for recurring paid work. The existing capture and membership contracts stay in place, along with service accounts and consumer authorization.
 
 ## Problem
 
@@ -107,6 +107,28 @@ One run follows this order:
 
 The first production version uses one worker. More workers require a durable shared lease implementation and a separate cost review.
 
+## Hugging Face deployment and repair
+
+Production execution stays on Hugging Face. The Docker Space serves capture, administration, and read APIs. A non-concurrent scheduled Hugging Face Job runs the standalone worker on `cpu-basic` with an explicit timeout. The private dataset remains the durable source of truth. GitHub Actions is limited to CI and cannot run, schedule, or hold credentials for production enrichment.
+
+The setup doctor and repair command owns the scheduled Job as part of deployment reconciliation. It must:
+
+1. inspect active and scheduled Jobs before changing state;
+2. validate the exact Space revision, dataset repository, worker command, model, taxonomy, pricing, ceilings, timeout, and schedule;
+3. accept dataset-writer and inference tokens only through hidden interactive input or explicitly named environment inputs;
+4. verify dataset read/write access and inference-provider permission before creating a Job;
+5. create or replace the schedule with concurrency disabled and the schedule suspended;
+6. attach the two purpose-scoped values as encrypted Hugging Face Job secrets without printing or persisting them locally;
+7. trigger the two-Job bounded recovery canary through that suspended schedule;
+8. verify durable outputs, strict `JOB_ID`-bound receipts, source revision, contract continuity, cost accounting, continuation in a second physical Job, and absence of overlap; and
+9. resume the schedule only after every canary check succeeds and recurring paid work is explicitly approved.
+
+Space secrets are scoped to the Space and their values are write-only. Repair cannot recover them by name, silently copy them into a Job, or mint access tokens. When Job secrets are missing or need rotation, the operator supplies the original values or purpose-scoped replacements. If required input is unavailable, capability validation fails, a transient Hub error prevents a trustworthy read, required approval is absent, or an active worker cannot be safely stopped at a durable boundary, repair leaves scheduling suspended and reports the blocker.
+
+Hugging Face Job configuration is immutable for a physical run. Repair suspends the existing schedule and verifies that no matching Job is active before replacing a mismatched schedule. It does not mutate unrelated Jobs. Manual canaries and automatic runs use the same schedule identity and non-concurrency policy.
+
+`doctor --fix` creates or repairs the suspended schedule. `doctor --fix --canary` runs two physical Jobs without resuming cron. `doctor --fix --canary --enable-schedule` presents the schedule and per-run ceiling, then requires explicit approval before recurring execution. The default ceiling is $2 of inference and 400,000 total tokens per physical Job. Including worst-case `cpu-basic` time, the two-Job canary has a cumulative hard ceiling below $4.02.
+
 ## Scheduling and retries
 
 Each claim reserves equal bounded capacity for recent and old work:
@@ -194,6 +216,9 @@ A deterministic shared defect pauses further claims until the worker code and af
 - Retry timing survives restart.
 - Blocked work stays visible and resets only under the stated rules.
 - Newest and oldest work both progress under continuous ingest.
+- Doctor reports missing, suspended, active, and mismatched Hugging Face Job schedules without exposing secrets.
+- Repair creates replacement schedules suspended and enables them only after a successful bounded canary.
+- Repair refuses missing credentials, invalid capabilities, transient Hub failures, overlapping workers, and changed paid-run assumptions.
 
 ### API and consumer consistency
 
@@ -217,11 +242,12 @@ The production canary processes representative old, recent, changed, failing, an
 5. Add leases, retry timing, fair claims, and the bounded worker command.
 6. Restrict consumer reads and graph materialization to approved free labels.
 7. Add the status endpoint, shared cutoff, registry metrics, and Admin UI reporting.
-8. Run the no-inference migration analysis, record the reuse and cost report, and configure the full-run ceiling.
-9. Run the bounded recovery canary, including the known loose-label regression fixtures.
-10. Deploy the new reader and worker together, remove the old queue and generated-concept paths, and continue automatically through the full backlog.
-11. Monitor until no units remain pending, running, or retrying and every blocked unit has a durable reason and scheduled retry.
-12. Verify freshness, registry replay, consumer revisions, dataset receipts, cost, and restart recovery in production.
+8. Add doctor and repair reconciliation for a non-concurrent suspended Hugging Face scheduled Job; remove production scheduling and credentials from GitHub Actions.
+9. Run the no-inference migration analysis, record the reuse and cost report, and configure the full-run ceiling.
+10. Run the bounded recovery canary through the suspended schedule, including the known loose-label regression fixtures.
+11. Deploy the new reader and worker together, remove the old queue and generated-concept paths, and resume the schedule only after the canary passes.
+12. Monitor until no units remain pending, running, or retrying and every blocked unit has a durable reason and scheduled retry.
+13. Verify freshness, registry replay, consumer revisions, dataset receipts, cost, Job receipts, and restart recovery in production.
 
 ## Completion criteria
 

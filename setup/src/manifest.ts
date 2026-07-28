@@ -1,5 +1,6 @@
 import { existingSpaceConfig } from "./config.js";
 import type { SetupConfig } from "./config.js";
+import { ENRICHMENT_JOB_DEFAULT_VARIABLES } from "./enrichment-job.js";
 
 export type PoolManifest = SetupConfig & {
   requiredVariables: readonly string[];
@@ -21,10 +22,14 @@ export function manifestFromSpace(
   const enrichmentEnabled = parseEnrichmentEnabled(variables.get("ENRICH_ENABLED"));
   return {
     ...config,
-    requiredVariables: ["DATASET_REPO", "ALLOWED_USERS", "POOL_ADMINS"],
-    requiredSecrets: enrichmentEnabled
-      ? ["HF_TOKEN", "INFERENCE_TOKEN", "POOL_SIGNING_SECRET", "SESSION_SECRET"]
-      : ["HF_TOKEN", "POOL_SIGNING_SECRET", "SESSION_SECRET"],
+    requiredVariables: [
+      "DATASET_REPO",
+      "ALLOWED_USERS",
+      "POOL_ADMINS",
+      "ENRICH_ENABLED",
+      ...Object.keys(ENRICHMENT_JOB_DEFAULT_VARIABLES),
+    ],
+    requiredSecrets: ["HF_TOKEN", "POOL_SIGNING_SECRET", "SESSION_SECRET"],
     credentialRoles: { dataset: "HF_TOKEN", inference: "INFERENCE_TOKEN" },
     enrichmentEnabled,
   };

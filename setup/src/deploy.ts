@@ -7,6 +7,7 @@ import { commit, createRepo, listFiles, repoExists } from "@huggingface/hub";
 
 import type { SetupConfig } from "./config.js";
 import { usersValue } from "./config.js";
+import { ENRICHMENT_JOB_DEFAULT_VARIABLES } from "./enrichment-job.js";
 import type { HubClient, HubRepo } from "./hub-api.js";
 import {
   getRepoPrivateState,
@@ -57,6 +58,10 @@ export async function configureSpace(
     usersValue(config.allowedUsers),
   );
   await setSpaceVariable(client, config.spaceRepo, "POOL_ADMINS", usersValue(config.poolAdmins));
+  await setSpaceVariable(client, config.spaceRepo, "ENRICH_ENABLED", "false");
+  for (const [key, value] of Object.entries(ENRICHMENT_JOB_DEFAULT_VARIABLES)) {
+    if (!variables.has(key)) await setSpaceVariable(client, config.spaceRepo, key, value);
+  }
   if (initializeGeneratedSecrets && !variables.has("SECRETS_INITIALIZED")) {
     await setSpaceSecret(client, config.spaceRepo, "POOL_SIGNING_SECRET", randomSecret());
     await setSpaceSecret(client, config.spaceRepo, "SESSION_SECRET", randomSecret());
