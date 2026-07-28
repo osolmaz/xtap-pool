@@ -46,7 +46,7 @@ export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> 
 };
 
 const JOB_SECRET_NAMES = ["HF_TOKEN", "INFERENCE_TOKEN"] as const;
-const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(",");
+const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(".");
 const JOB_COMMAND = ["node", "space/dist/src/enrich-job-main.js"] as const;
 const ACTIVE_JOB_STAGES = new Set(["RUNNING", "PAUSED", "UPDATING"]);
 // Rounded up from Hugging Face's current $0.000167/min cpu-basic rate.
@@ -206,7 +206,7 @@ export async function desiredEnrichmentJob(
     labels: {
       ...ENRICHMENT_JOB_LABELS,
       name: "xtap-pool-enrichment",
-      space_repo: spaceRepo,
+      space_repo: jobSpaceRepoLabel(spaceRepo),
       source_revision: deployment.source_revision,
       secret_names: JOB_SECRET_NAMES_LABEL,
     },
@@ -601,7 +601,7 @@ function scheduleRetries(job: ScheduledEnrichmentJob): number | undefined {
 function scheduleSecretNames(job: ScheduledEnrichmentJob): readonly string[] {
   if (job.jobSpec.secrets !== undefined) return [...job.jobSpec.secrets].sort();
   const declared = job.jobSpec.labels?.["secret_names"];
-  return declared === undefined ? [] : declared.split(",").sort();
+  return declared === undefined ? [] : declared.split(".").sort();
 }
 
 async function suspendAndDeleteExtras(
@@ -639,8 +639,12 @@ function ownsJob(
   return (
     labels?.["app"] === ENRICHMENT_JOB_LABELS.app &&
     labels["component"] === ENRICHMENT_JOB_LABELS.component &&
-    labels["space_repo"] === spaceRepo
+    labels["space_repo"] === jobSpaceRepoLabel(spaceRepo)
   );
+}
+
+function jobSpaceRepoLabel(spaceRepo: string): string {
+  return createHash("sha256").update(spaceRepo).digest("base64url");
 }
 
 const CRON_ALIASES = new Set(["@annually", "@yearly", "@monthly", "@weekly", "@daily", "@hourly"]);

@@ -917,9 +917,9 @@ function scheduledJobFixture(): ScheduledEnrichmentJob {
         app: "xtap-pool",
         component: "enrichment",
         name: "xtap-pool-enrichment",
-        space_repo: "alice/xtap-pool",
+        space_repo: "j2EoX9oQdUwRyuhnS-n4HnjY0ks_n-QXcB1evBGoqgE",
         source_revision: SOURCE_REVISION,
-        secret_names: "HF_TOKEN,INFERENCE_TOKEN",
+        secret_names: "HF_TOKEN.INFERENCE_TOKEN",
       },
     },
   };
