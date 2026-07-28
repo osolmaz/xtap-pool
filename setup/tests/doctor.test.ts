@@ -17,6 +17,7 @@ const hubMocks = vi.hoisted(() => ({
 vi.mock("@huggingface/hub", () => hubMocks);
 
 import { collectDoctorReport, runDoctor } from "../src/doctor.js";
+import type { DesiredEnrichmentJob, ScheduledEnrichmentJob } from "../src/enrichment-job.js";
 
 function asyncIterableOf(entries: { type: string; path: string }[]): AsyncIterable<unknown> {
   return {
@@ -746,7 +747,21 @@ describe("doctor", () => {
       asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
     );
     const fetchFn = fetchFixture({ tweets: 12 });
-    const resumeJobSchedule = vi.fn().mockResolvedValue(undefined);
+    let resumed = false;
+    const resumeJobSchedule = vi.fn().mockImplementation(() => {
+      resumed = true;
+      return Promise.resolve();
+    });
+    const inspectJob = (_client: unknown, desired: DesiredEnrichmentJob) => {
+      const schedule = { ...scheduledJobFixture(), suspend: !resumed };
+      return Promise.resolve({
+        desired,
+        schedules: [schedule],
+        exactSchedules: [schedule],
+        mismatchedSchedules: [],
+        activeJobs: [],
+      });
+    };
 
     const report = await runDoctor(
       { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
@@ -760,6 +775,7 @@ describe("doctor", () => {
       },
       {
         fetchFn,
+        inspectJob,
         runJobCanary: () =>
           Promise.resolve({
             hardCeilingUsd: 4.015,
@@ -785,6 +801,51 @@ describe("doctor", () => {
       "schedule-1",
     );
   });
+
+  it("refuses to report activation until Hugging Face confirms the schedule is active", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const fetchFn = fetchFixture({ tweets: 12 });
+    const inspectJob = (_client: unknown, desired: DesiredEnrichmentJob) => {
+      const schedule = scheduledJobFixture();
+      return Promise.resolve({
+        desired,
+        schedules: [schedule],
+        exactSchedules: [schedule],
+        mismatchedSchedules: [],
+        activeJobs: [],
+      });
+    };
+
+    await expect(
+      runDoctor(
+        { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+        "alice",
+        {
+          spaceRepo: "alice/xtap-pool",
+          json: true,
+          fix: false,
+          canary: true,
+          enableSchedule: true,
+        },
+        {
+          fetchFn,
+          inspectJob,
+          runJobCanary: () =>
+            Promise.resolve({
+              hardCeilingUsd: 4.015,
+              runs: [
+                { jobId: "job-1", receipt: receiptFixture("job-1") },
+                { jobId: "job-2", receipt: receiptFixture("job-2") },
+              ],
+            }),
+          confirmScheduleEnable: () => Promise.resolve(true),
+          resumeJobSchedule: () => Promise.resolve(),
+        },
+      ),
+    ).rejects.toThrow("did not confirm");
+  });
 });
 
 const SOURCE_REVISION = "a".repeat(40);
@@ -799,7 +860,7 @@ function mockDownloads(datasetContent: string): void {
   );
 }
 
-function scheduledJobFixture(): Record<string, unknown> {
+function scheduledJobFixture(): ScheduledEnrichmentJob {
   return {
     id: "schedule-1",
     schedule: "17 */6 * * *",

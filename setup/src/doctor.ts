@@ -219,6 +219,15 @@ async function runDoctorCanary(
   const schedule = inspection.exactSchedules[0];
   if (schedule === undefined) throw new Error("The exact schedule disappeared after the canary.");
   await (deps.resumeJobSchedule ?? resumeEnrichmentSchedule)(client, desired, schedule.id);
+  const activated = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
+  const activeSchedule = activated.exactSchedules[0];
+  if (
+    activated.exactSchedules.length !== 1 ||
+    activated.schedules.length !== 1 ||
+    activeSchedule?.suspend !== false
+  ) {
+    throw new Error("Hugging Face did not confirm the enrichment schedule as active.");
+  }
   const refreshed = await collectDoctorReport(client, username, current.spaceRepo, deps);
   return report(current.spaceRepo, manifest.datasetRepo, [
     ...refreshed.checks,
