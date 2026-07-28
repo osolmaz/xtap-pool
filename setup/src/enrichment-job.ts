@@ -579,17 +579,27 @@ function actualScheduleProjection(job: ScheduledEnrichmentJob): Record<string, u
     command: job.jobSpec.command ?? undefined,
     environment: job.jobSpec.environment ?? {},
     flavor: job.jobSpec.flavor,
-    timeout: job.jobSpec.timeout ?? job.jobSpec.timeoutSeconds ?? undefined,
-    retries:
-      job.jobSpec.retry ??
-      (job.jobSpec.attempts === undefined || job.jobSpec.attempts === null
-        ? undefined
-        : job.jobSpec.attempts - 1),
-    // The live scheduled-Jobs API returns names only. Missing metadata fails
-    // closed because doctor cannot prove that both required values are bound.
-    secrets: [...(job.jobSpec.secrets ?? [])].sort(),
+    timeout: scheduleTimeout(job),
+    retries: scheduleRetries(job),
+    secrets: scheduleSecretNames(job),
     labels: job.jobSpec.labels ?? {},
   };
+}
+
+function scheduleTimeout(job: ScheduledEnrichmentJob): number | undefined {
+  return job.jobSpec.timeout ?? job.jobSpec.timeoutSeconds ?? undefined;
+}
+
+function scheduleRetries(job: ScheduledEnrichmentJob): number | undefined {
+  if (job.jobSpec.retry !== undefined && job.jobSpec.retry !== null) return job.jobSpec.retry;
+  if (job.jobSpec.attempts === undefined || job.jobSpec.attempts === null) return undefined;
+  return job.jobSpec.attempts - 1;
+}
+
+function scheduleSecretNames(job: ScheduledEnrichmentJob): readonly string[] {
+  if (job.jobSpec.secrets !== undefined) return [...job.jobSpec.secrets].sort();
+  const declared = job.jobSpec.labels?.["secret_names"];
+  return declared === undefined ? [] : declared.split(",").sort();
 }
 
 async function suspendAndDeleteExtras(
@@ -653,20 +663,30 @@ function isSupportedCronSchedule(value: string): boolean {
 }
 
 function validCronField(field: string, minimum: number, maximum: number): boolean {
-  return field.split(",").every((part) => {
-    const [base, step, extra] = part.split("/");
-    if (base === undefined || extra !== undefined) return false;
-    if (step !== undefined && !integerInRange(step, 1, maximum - minimum + 1)) return false;
-    if (base === "*") return true;
-    const [start, end, extraRange] = base.split("-");
-    if (start === undefined || extraRange !== undefined) return false;
-    if (end === undefined) return integerInRange(start, minimum, maximum);
-    return (
-      integerInRange(start, minimum, maximum) &&
-      integerInRange(end, minimum, maximum) &&
-      Number(start) <= Number(end)
-    );
-  });
+  return field.split(",").every((part) => validCronPart(part, minimum, maximum));
+}
+
+function validCronPart(part: string, minimum: number, maximum: number): boolean {
+  const [base, step, extra] = part.split("/");
+  if (base === undefined || extra !== undefined) return false;
+  if (!validCronStep(step, maximum - minimum + 1)) return false;
+  if (base === "*") return true;
+  const [start, end, extraRange] = base.split("-");
+  if (start === undefined || extraRange !== undefined) return false;
+  if (end === undefined) return integerInRange(start, minimum, maximum);
+  return validCronRange(start, end, minimum, maximum);
+}
+
+function validCronStep(step: string | undefined, maximum: number): boolean {
+  return step === undefined || integerInRange(step, 1, maximum);
+}
+
+function validCronRange(start: string, end: string, minimum: number, maximum: number): boolean {
+  return (
+    integerInRange(start, minimum, maximum) &&
+    integerInRange(end, minimum, maximum) &&
+    Number(start) <= Number(end)
+  );
 }
 
 function integerInRange(value: string, minimum: number, maximum: number): boolean {

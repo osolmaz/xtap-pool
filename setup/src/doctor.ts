@@ -240,21 +240,22 @@ async function runDoctorCanary(
 function variableCheck(key: string, value: string | undefined): DoctorCheck {
   if (value === undefined) return fail(`space.variable.${key}`, `${key} is missing.`);
   if (value.trim() === "") return fail(`space.variable.${key}`, `${key} is empty.`);
+  const error = variableValueError(key, value);
+  return error === undefined
+    ? pass(`space.variable.${key}`, `${key} is set.`)
+    : fail(`space.variable.${key}`, error);
+}
+
+function variableValueError(key: string, value: string): string | undefined {
   if (key === "ENRICH_ENABLED" && value !== "false") {
-    return fail(
-      `space.variable.${key}`,
-      "ENRICH_ENABLED must be false because production enrichment runs in Hugging Face Jobs.",
-    );
+    return "ENRICH_ENABLED must be false because production enrichment runs in Hugging Face Jobs.";
   }
   if (key === "ALLOWED_USERS" || key === "POOL_ADMINS") {
     const error = validateUserList(value);
-    if (error !== undefined) return fail(`space.variable.${key}`, `${key} is invalid: ${error}`);
+    return error === undefined ? undefined : `${key} is invalid: ${error}`;
   }
   const enrichmentError = enrichmentJobVariableError(key, value);
-  if (enrichmentError !== undefined) {
-    return fail(`space.variable.${key}`, `${key} is invalid: ${enrichmentError}`);
-  }
-  return pass(`space.variable.${key}`, `${key} is set.`);
+  return enrichmentError === undefined ? undefined : `${key} is invalid: ${enrichmentError}`;
 }
 
 async function checkSecrets(

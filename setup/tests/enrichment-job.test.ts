@@ -163,7 +163,6 @@ describe("Hugging Face enrichment Job", () => {
         flavor: exact.jobSpec.flavor,
         timeoutSeconds: desired.timeoutSeconds,
         retry: 0,
-        secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
         labels: exact.jobSpec.labels,
       },
     };
