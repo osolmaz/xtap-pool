@@ -156,12 +156,38 @@ describe("Hugging Face enrichment Job", () => {
         environment: exact.jobSpec.environment,
         flavor: exact.jobSpec.flavor,
         timeoutSeconds: desired.timeoutSeconds,
+        retry: 0,
+        secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
         labels: exact.jobSpec.labels,
       },
     };
     hubMocks.listScheduledJobs.mockResolvedValue([sdkTimeout]);
     const compatible = await inspectEnrichmentJob(client, desired);
     expect(compatible.exactSchedules.map(({ id }) => id)).toEqual(["sdk-timeout"]);
+  });
+
+  it("rejects schedules with missing secrets or automatic retries", async () => {
+    const desired = await desiredFixture();
+    const exact = scheduleFixture(desired, "exact");
+    const missingSecret = {
+      ...exact,
+      id: "missing-secret",
+      jobSpec: { ...exact.jobSpec, secrets: ["HF_TOKEN"] },
+    };
+    const retrying = {
+      ...exact,
+      id: "retrying",
+      jobSpec: { ...exact.jobSpec, retry: 1 },
+    };
+    hubMocks.listScheduledJobs.mockResolvedValue([missingSecret, retrying]);
+
+    const inspection = await inspectEnrichmentJob(client, desired);
+
+    expect(inspection.exactSchedules).toEqual([]);
+    expect(inspection.mismatchedSchedules.map(({ id }) => id)).toEqual([
+      "missing-secret",
+      "retrying",
+    ]);
   });
 
   it("creates and verifies a suspended non-concurrent replacement before deleting old schedules", async () => {
@@ -563,6 +589,7 @@ function scheduleFixture(
     environment: Readonly<Record<string, string>>;
     flavor: string;
     timeout: number;
+    retry: number;
     secrets: string[];
     labels: Readonly<Record<string, string>>;
   };
@@ -578,6 +605,7 @@ function scheduleFixture(
       environment: desired.environment,
       flavor: "cpu-basic",
       timeout: desired.timeoutSeconds,
+      retry: 0,
       secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
       labels: desired.labels,
     },

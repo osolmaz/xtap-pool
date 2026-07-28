@@ -80,6 +80,17 @@ const jobVariablesSchema = z
   })
   .strict();
 
+export function enrichmentJobVariableError(key: string, value: string): string | undefined {
+  if (!Object.hasOwn(ENRICHMENT_JOB_DEFAULT_VARIABLES, key)) return undefined;
+  const parsed = jobVariablesSchema.safeParse({
+    ...ENRICHMENT_JOB_DEFAULT_VARIABLES,
+    [key]: value,
+  });
+  if (parsed.success) return undefined;
+  const issue = parsed.error.issues.find((candidate) => candidate.path[0] === key);
+  return issue?.message ?? "invalid bounded enrichment setting";
+}
+
 const stringMapSchema = z.record(z.string(), z.string());
 const scheduledJobSchema = z
   .object({
@@ -97,6 +108,8 @@ const scheduledJobSchema = z
         // SDK type calls the same response field `timeoutSeconds`.
         timeout: z.number().int().positive().nullish(),
         timeoutSeconds: z.number().int().positive().nullish(),
+        attempts: z.number().int().positive().nullish(),
+        retry: z.number().int().nonnegative().nullish(),
         secrets: z.array(z.string()).optional(),
         labels: stringMapSchema.nullish(),
       })
@@ -549,6 +562,8 @@ function scheduleProjection(desired: DesiredEnrichmentJob): Record<string, unkno
     environment: desired.environment,
     flavor: "cpu-basic",
     timeout: desired.timeoutSeconds,
+    retries: 0,
+    secrets: [...JOB_SECRET_NAMES].sort(),
     labels: desired.labels,
   };
 }
@@ -562,6 +577,14 @@ function actualScheduleProjection(job: ScheduledEnrichmentJob): Record<string, u
     environment: job.jobSpec.environment ?? {},
     flavor: job.jobSpec.flavor,
     timeout: job.jobSpec.timeout ?? job.jobSpec.timeoutSeconds ?? undefined,
+    retries:
+      job.jobSpec.retry ??
+      (job.jobSpec.attempts === undefined || job.jobSpec.attempts === null
+        ? undefined
+        : job.jobSpec.attempts - 1),
+    // The live scheduled-Jobs API returns names only. Missing metadata fails
+    // closed because doctor cannot prove that both required values are bound.
+    secrets: [...(job.jobSpec.secrets ?? [])].sort(),
     labels: job.jobSpec.labels ?? {},
   };
 }

@@ -171,6 +171,37 @@ describe("doctor", () => {
     );
   });
 
+  it("repairs malformed bounded enrichment variables to safe defaults", async () => {
+    hubMocks.listFiles.mockReturnValue(
+      asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
+    );
+    const variableWrites: { key: string; value: string }[] = [];
+    const fixtureOptions = {
+      tweets: 12,
+      variables: { ENRICH_MAX_COST_USD: "0", ENRICH_MAX_ERROR_RATE: "2" },
+      variableWrites,
+    };
+    const fetchFn = fetchFixture(fixtureOptions);
+
+    const report = await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      { fetchFn },
+    );
+
+    expect(variableWrites).toEqual([
+      { key: "ENRICH_MAX_ERROR_RATE", value: "0.25" },
+      { key: "ENRICH_MAX_COST_USD", value: "2" },
+    ]);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.ENRICH_MAX_COST_USD", status: "pass" }),
+    );
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.ENRICH_MAX_ERROR_RATE", status: "pass" }),
+    );
+  });
+
   it("fails required runtime variables that are present but empty", async () => {
     hubMocks.listFiles.mockReturnValue(
       asyncIterableOf([{ type: "file", path: "data/alice/2026/07/tweets.jsonl" }]),
@@ -872,6 +903,7 @@ function scheduledJobFixture(): ScheduledEnrichmentJob {
       environment: jobEnvironment(),
       flavor: "cpu-basic",
       timeout: 2700,
+      retry: 0,
       secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
       labels: {
         app: "xtap-pool",
@@ -946,6 +978,7 @@ function sampleTweet(): Record<string, unknown> {
 function fetchFixture(options: {
   tweets: unknown;
   secretWrites?: { key: string; value: string }[];
+  variableWrites?: { key: string; value: string }[];
   omitSecrets?: boolean;
   omitGeneratedSecrets?: boolean;
   generatedSecrets?: readonly ("POOL_SIGNING_SECRET" | "SESSION_SECRET")[];
@@ -971,7 +1004,15 @@ function routeFixtureRequest(
   init: RequestInit | undefined,
   options: FixtureOptions,
 ): Promise<Response> {
-  if (url.endsWith("/variables")) return Promise.resolve(variablesResponse(options.variables));
+  if (url.endsWith("/variables")) {
+    if (init?.method === "POST") {
+      const write = jsonBody(init);
+      options.variableWrites?.push(write);
+      options.variables = { ...options.variables, [write.key]: write.value };
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    return Promise.resolve(variablesResponse(options.variables));
+  }
   if (url.endsWith("/secrets")) return handleSecretsRequest(init, options);
   return handleReadRequest(url, options);
 }

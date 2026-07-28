@@ -10,6 +10,7 @@ import {
   desiredEnrichmentJob,
   desiredEnrichmentJobHash,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  enrichmentJobVariableError,
   inspectEnrichmentJob,
   reconcileEnrichmentJob,
   resumeEnrichmentSchedule,
@@ -248,6 +249,10 @@ function variableCheck(key: string, value: string | undefined): DoctorCheck {
   if (key === "ALLOWED_USERS" || key === "POOL_ADMINS") {
     const error = validateUserList(value);
     if (error !== undefined) return fail(`space.variable.${key}`, `${key} is invalid: ${error}`);
+  }
+  const enrichmentError = enrichmentJobVariableError(key, value);
+  if (enrichmentError !== undefined) {
+    return fail(`space.variable.${key}`, `${key} is invalid: ${enrichmentError}`);
   }
   return pass(`space.variable.${key}`, `${key} is set.`);
 }
