@@ -6,7 +6,7 @@ This document describes the target consumer contract in [Labels and Free Labels 
 
 ## Service accounts
 
-Admins issue service accounts from the explorer's **Admin** tab. A service account has a stable name, explicit read scopes, and one or more rotatable keys:
+Admins issue service accounts from the explorer's **Admin** tab. A service account has a stable name and explicit read scopes. One or more rotatable keys authenticate it:
 
 - `units:read` authorizes `GET /api/units`.
 - `taxonomy:read` authorizes `GET /api/labels` and `GET /api/free-labels/:name`. It also authorizes `GET /api/graph`.
@@ -76,7 +76,7 @@ Discard the partial result and restart from page one. Invalid cursors return `40
 
 The label, free-label detail, and graph responses also return `revision`, `contract_hash`, and numeric `free_label_registry_revision`. When supplied, they echo the shared `cutoff`. Pass the unit revision as their `revision` query parameter. Free-label and graph reads accept the same `author_ids=<csv>`, `labels=<csv>`, `label_mode=any|all`, and `publication=public-original` selection. They return only approved free-label data from matching publishable units. A revision mismatch returns `409`, preventing one publication from mixing source states or counting authors outside the selected boundary.
 
-`GET /api/enrichment/status` returns the same revision and contract metadata, the normalized exact `author_ids` selection, queue totals, and `complete_through` when a complete selected window exists. Consumers must use that exact cutoff and revision for every subsequent unit, label, free-label, and graph read.
+`GET /api/enrichment/status` returns the same revision and contract metadata, the normalized exact `author_ids` selection, queue totals, and the latest `complete_through` cutoff. Consumers must use that exact cutoff and revision for every subsequent unit or taxonomy read. They do not need to wait for queue totals to reach zero. The totals and cutoff age show how far the projection has caught up.
 
 ## Static publication
 
@@ -84,10 +84,11 @@ A static downstream application should:
 
 1. Require `GET /readyz` to be ready.
 2. Load and validate the consumer's exact author-ID allowlist.
-3. Download every unit page with that `author_ids` selection into a temporary local result.
-4. Fetch approved free-label and graph data at the same revision and with the same author IDs.
-5. Validate the complete response and reject any unit outside the allowlist.
-6. Upload an immutable snapshot.
-7. Replace a small current-manifest object only after the snapshot is uploaded and verified.
+3. Read enrichment status and choose its returned revision and `complete_through` cutoff even when backlog counts are nonzero.
+4. Download every unit page at that cutoff with the exact `author_ids` selection into a temporary local result.
+5. Fetch approved free-label and graph data at the same revision and cutoff with the same author IDs.
+6. Validate the complete response and reject any unit outside the allowlist.
+7. Upload an immutable snapshot.
+8. Replace a small current-manifest object only after the snapshot is uploaded and verified.
 
-On any error, leave the previous manifest unchanged. Never expose the service credential to browser code and do not silently fall back to raw dataset scanning.
+On any error, leave the previous manifest unchanged. A later successful run advances the cutoff as scheduled enrichment catches up. Never expose the service credential to browser code and do not silently fall back to raw dataset scanning.

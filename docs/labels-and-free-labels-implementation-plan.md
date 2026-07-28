@@ -144,7 +144,7 @@ All earlier model-generated free labels and concepts are discarded during migrat
 
 Known bad names such as `deixis`, `quality-philosophy`, and unsupported `manufacturing` assignments become rejection rules and regression fixtures. This prevents rediscovery without treating the old assignments as evidence.
 
-The changed schema and prompt plus the normalization rules and registry revision produce a new `contract_hash`. The durable worker reprocesses every source unit under the measured full-run ceiling. Labels enter the new registry only from evidence validated under this contract. Public consumers keep the last complete revision until the selected window has current rows under the new contract.
+The changed schema and prompt plus the normalization rules and registry revision produce a new `contract_hash`. The durable worker reprocesses every source unit under the measured full-run ceiling. Labels enter the new registry only from evidence validated under this contract. Public consumers may publish the completed prefix under the new contract while the worker continues through later units. Each replacement snapshot uses one revision and cutoff.
 
 ## Tests
 
@@ -164,8 +164,8 @@ Recovery tests prove that evidence-bearing rows and registry events survive inte
 6. Remove model-generated concepts and their vocabulary path.
 7. Integrate the new contract with durable hashes and queue recovery, including receipts and freshness reads.
 8. Run a no-inference migration report, then the bounded pause-resume canary.
-9. Reprocess the backlog under the recorded cost ceiling and publish only after the selected window is complete.
+9. Reprocess the backlog under the recorded cost ceiling, publish the current completed cutoff, and let scheduled runs advance it as more work finishes.
 
 ## Completion criteria
 
-The work is complete when every current unit has a durable result containing only preset and free-label assignments with validated evidence. No legacy model-generated label or concept assignment may contribute to the new registry, consumer reads, counts, filters, or graph. The model must accept empty arrays, and candidate or rejected free labels cannot enter public reads. Registry replay must be deterministic. The old generated-concept path must be absent. All local and production checks, including recovery, must pass.
+The work is complete when every current unit is either backed by a durable evidence-bearing result or remains visible in the durable queue, and consumers can read a complete prefix at one revision and cutoff. No legacy model-generated label or concept assignment may contribute to the new registry, consumer reads, counts, filters, or graph. The model must accept empty arrays, and candidate or rejected free labels cannot enter public reads. Registry replay must be deterministic. The old generated-concept path must be absent. All local and production checks, including recovery, must pass.
