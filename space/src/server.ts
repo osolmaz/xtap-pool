@@ -202,6 +202,7 @@ async function refreshExternalEnrichment(): Promise<void> {
       }
     });
     recordLastReceipt(refreshed.receipt);
+    enrichment = { ...enrichment, rows: enrichStore.enrichmentRowCount() };
     readiness = buildReadiness();
   });
 }
