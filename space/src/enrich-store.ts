@@ -587,6 +587,11 @@ export class EnrichStore {
     }));
   }
 
+  enrichmentRowCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM enrichment").get() as { n: number };
+    return row.n;
+  }
+
   recoverExpiredLeases(): number {
     const nowIso = this.now().toISOString();
     const rows = this.db

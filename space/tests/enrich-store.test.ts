@@ -106,6 +106,17 @@ describe("unit derivation and enqueue", () => {
     expect(karpathy?.contractHash).toBe(CONTRACT_HASH);
   });
 
+  it("reports the current unique durable enrichment row count", () => {
+    insertAndRegister([{ id: "100" }, { id: "101" }]);
+    enrich.applyEnrichment(row());
+    enrich.applyEnrichment(row({ unit_id: "101:someone", tweet_ids: ["101"] }));
+    enrich.applyEnrichment(row());
+
+    expect(enrich.enrichmentRowCount()).toBe(2);
+    enrich.clearForRebuild();
+    expect(enrich.enrichmentRowCount()).toBe(0);
+  });
+
   it("does not re-enqueue an enriched unit on duplicate re-capture", () => {
     insertAndRegister([{ id: "100" }]);
     enrich.applyEnrichment(row());
