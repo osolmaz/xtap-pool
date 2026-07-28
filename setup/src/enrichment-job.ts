@@ -49,6 +49,8 @@ const JOB_SECRET_NAMES = ["HF_TOKEN", "INFERENCE_TOKEN"] as const;
 const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(",");
 const JOB_COMMAND = ["node", "space/dist/src/enrich-job-main.js"] as const;
 const ACTIVE_JOB_STAGES = new Set(["RUNNING", "PAUSED", "UPDATING"]);
+// Rounded up from Hugging Face's current $0.000167/min cpu-basic rate.
+const CPU_BASIC_HOURLY_CEILING_USD = 0.011;
 
 const nonempty = z.string().min(1);
 const positiveInteger = z.string().regex(/^[1-9][0-9]*$/u);
@@ -399,7 +401,7 @@ export function canaryHardCeilingUsd(desired: DesiredEnrichmentJob): number {
   if (!Number.isFinite(inferencePerRun) || inferencePerRun <= 0) {
     throw new Error("ENRICH_MAX_COST_USD must be a measurable positive canary ceiling.");
   }
-  const cpuPerRun = (desired.timeoutSeconds / 3600) * 0.01;
+  const cpuPerRun = (desired.timeoutSeconds / 3600) * CPU_BASIC_HOURLY_CEILING_USD;
   return 2 * (inferencePerRun + cpuPerRun);
 }
 

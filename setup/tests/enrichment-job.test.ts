@@ -295,7 +295,7 @@ describe("Hugging Face enrichment Job", () => {
       receiptTimeoutMs: 100,
     });
 
-    expect(result.hardCeilingUsd).toBeCloseTo(4.015);
+    expect(result.hardCeilingUsd).toBeCloseTo(4.0165);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
     expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
   });

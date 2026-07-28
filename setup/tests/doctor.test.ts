@@ -817,7 +817,7 @@ describe("doctor", () => {
         inspectJob,
         runJobCanary: () =>
           Promise.resolve({
-            hardCeilingUsd: 4.015,
+            hardCeilingUsd: 4.0165,
             runs: [
               { jobId: "job-1", receipt: receiptFixture("job-1") },
               { jobId: "job-2", receipt: receiptFixture("job-2") },
@@ -873,7 +873,7 @@ describe("doctor", () => {
           inspectJob,
           runJobCanary: () =>
             Promise.resolve({
-              hardCeilingUsd: 4.015,
+              hardCeilingUsd: 4.0165,
               runs: [
                 { jobId: "job-1", receipt: receiptFixture("job-1") },
                 { jobId: "job-2", receipt: receiptFixture("job-2") },
