@@ -61,10 +61,13 @@ const rate = z.string().refine((value) => {
   const parsed = finiteNumber(value);
   return parsed >= 0 && parsed <= 1;
 }, "must be between 0 and 1");
+const cronSchedule = z
+  .string()
+  .refine(isSupportedCronSchedule, "must be a supported alias or five-field cron expression");
 
 const jobVariablesSchema = z
   .object({
-    ENRICH_JOB_SCHEDULE: nonempty,
+    ENRICH_JOB_SCHEDULE: cronSchedule,
     ENRICH_JOB_TIMEOUT_SECONDS: positiveInteger,
     ENRICH_MAX_UNITS_PER_TICK: positiveInteger,
     ENRICH_MAX_TOKENS: positiveInteger,
@@ -626,6 +629,50 @@ function ownsJob(
     labels["component"] === ENRICHMENT_JOB_LABELS.component &&
     labels["space_repo"] === spaceRepo
   );
+}
+
+const CRON_ALIASES = new Set(["@annually", "@yearly", "@monthly", "@weekly", "@daily", "@hourly"]);
+const CRON_BOUNDS = [
+  [0, 59],
+  [0, 23],
+  [1, 31],
+  [1, 12],
+  [0, 7],
+] as const;
+
+function isSupportedCronSchedule(value: string): boolean {
+  if (CRON_ALIASES.has(value)) return true;
+  const fields = value.trim().split(/\s+/u);
+  return (
+    fields.length === CRON_BOUNDS.length &&
+    fields.every((field, index) => {
+      const bounds = CRON_BOUNDS[index];
+      return bounds !== undefined && validCronField(field, bounds[0], bounds[1]);
+    })
+  );
+}
+
+function validCronField(field: string, minimum: number, maximum: number): boolean {
+  return field.split(",").every((part) => {
+    const [base, step, extra] = part.split("/");
+    if (base === undefined || extra !== undefined) return false;
+    if (step !== undefined && !integerInRange(step, 1, maximum - minimum + 1)) return false;
+    if (base === "*") return true;
+    const [start, end, extraRange] = base.split("-");
+    if (start === undefined || extraRange !== undefined) return false;
+    if (end === undefined) return integerInRange(start, minimum, maximum);
+    return (
+      integerInRange(start, minimum, maximum) &&
+      integerInRange(end, minimum, maximum) &&
+      Number(start) <= Number(end)
+    );
+  });
+}
+
+function integerInRange(value: string, minimum: number, maximum: number): boolean {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) return false;
+  const parsed = Number(value);
+  return parsed >= minimum && parsed <= maximum;
 }
 
 function finiteNumber(value: string): number {

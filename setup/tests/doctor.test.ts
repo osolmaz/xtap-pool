@@ -178,7 +178,11 @@ describe("doctor", () => {
     const variableWrites: { key: string; value: string }[] = [];
     const fixtureOptions = {
       tweets: 12,
-      variables: { ENRICH_MAX_COST_USD: "0", ENRICH_MAX_ERROR_RATE: "2" },
+      variables: {
+        ENRICH_JOB_SCHEDULE: "every few minutes",
+        ENRICH_MAX_COST_USD: "0",
+        ENRICH_MAX_ERROR_RATE: "2",
+      },
       variableWrites,
     };
     const fetchFn = fetchFixture(fixtureOptions);
@@ -191,9 +195,13 @@ describe("doctor", () => {
     );
 
     expect(variableWrites).toEqual([
+      { key: "ENRICH_JOB_SCHEDULE", value: "17 */6 * * *" },
       { key: "ENRICH_MAX_ERROR_RATE", value: "0.25" },
       { key: "ENRICH_MAX_COST_USD", value: "2" },
     ]);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "space.variable.ENRICH_JOB_SCHEDULE", status: "pass" }),
+    );
     expect(report.checks).toContainEqual(
       expect.objectContaining({ code: "space.variable.ENRICH_MAX_COST_USD", status: "pass" }),
     );

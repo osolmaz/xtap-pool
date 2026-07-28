@@ -95,6 +95,12 @@ describe("Hugging Face enrichment Job", () => {
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow();
+
+    invalid.set("ENRICH_MAX_ERROR_RATE", "0.25");
+    invalid.set("ENRICH_JOB_SCHEDULE", "every few minutes");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow("five-field cron");
   });
 
   it("classifies exact, stale, unrelated, and active Jobs", async () => {
