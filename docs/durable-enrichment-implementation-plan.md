@@ -159,7 +159,7 @@ The response reports:
 
 `author_ids` uses the same exact immutable-ID semantics as unit and taxonomy reads. The endpoint cannot filter by enrichment labels because pending units do not have current labels yet.
 
-Unit, label, free-label detail, and graph reads gain a shared activity cutoff so a consumer can request one complete window ending at `complete_through`. The cutoff participates in the revision and must be applied identically to every response.
+Unit, label, free-label detail, and graph reads gain a shared activity cutoff so a consumer can request one complete window ending at `complete_through`. The cutoff participates in the revision and must be applied identically to every response. Consumers may publish that completed window while queue totals remain nonzero. Backlog size and cutoff age describe staleness; they do not invalidate the window.
 
 ## Existing-result migration
 
@@ -177,11 +177,11 @@ All earlier model-generated free labels and concepts are discarded from the acti
 
 The migration appends a current row with both hashes. Every other result is queued for processing. After migration, runtime reads do not accept rows without the new hashes.
 
-Before reprocessing any unverifiable rows, record their count, measured throughput, projected inference cost, the configured full-run ceiling, and the outputs that will be reused. The full backlog drain is part of this rollout. Once the implementation checks and recovery canary pass, the worker continues through all queued units instead of stopping at a pilot-only spending boundary.
+Before reprocessing any unverifiable rows, record their count, measured throughput, projected inference cost, the configured full-run ceiling, and the outputs that will be reused. Once the implementation checks and recovery canary pass, the worker continues through all queued units instead of stopping at a pilot-only spending boundary. Consumers can roll out against the current completed cutoff while this background convergence continues.
 
 ## Observability and controls
 
-Run receipts record successful units, retries, blocked units, provider calls, tokens, elapsed time, and cost when the provider reports it. They also record emitted assignments, labels discarded for missing evidence or rejected names, new candidates, and registry decisions. The Admin UI shows queue counts, freshness lag, the active contract hash, recent error classes, whether a worker is active, and the candidate, approved, and rejected free-label counts.
+Run receipts record successful units, retries, blocked units, provider calls, tokens, elapsed time, and cost when the provider reports it. They also record emitted assignments, labels discarded for missing evidence or rejected names, new candidates, and registry decisions. The Admin UI shows queue counts, cutoff age, the active contract hash, recent error classes, whether a worker is active, and the candidate, approved, and rejected free-label counts. Queue counts and cutoff age are operational signals rather than publication gates.
 
 The worker stops automatically when:
 
@@ -226,12 +226,13 @@ A deterministic shared defect pauses further claims until the worker code and af
 - Mixed-author and missing-author-ID units fail the selection.
 - `complete_through` never passes pending or blocked selected work.
 - Unit, label, free-label detail, and graph reads apply the same cutoff and revision.
+- A consumer can publish the completed cutoff while selected pending, retrying, or blocked work remains after it.
 - Candidate and rejected free labels cannot affect consumer units, counts, filters, nodes, or edges.
 - A stale cutoff or revision returns `409` instead of mixed data.
 
 ### Live canary
 
-The production canary processes representative old, recent, changed, failing, and multilingual units. It must persist at least two batches, survive an interruption, resume without duplicates, and prove checksums and receipts. When it passes, the same worker resumes and processes the entire remaining backlog under the recorded full-run ceiling.
+The production canary processes representative old, recent, changed, failing, and multilingual units. It must persist at least two batches, survive an interruption, resume without duplicates, and prove checksums and receipts. When it passes, the same worker resumes and processes the remaining backlog under the recorded full-run ceiling. Consumer publication may start from the current completed cutoff during that work.
 
 ## Delivery order
 
@@ -246,11 +247,11 @@ The production canary processes representative old, recent, changed, failing, an
 9. Run the no-inference migration analysis, record the reuse and cost report, and configure the full-run ceiling.
 10. Run the bounded recovery canary through the suspended schedule, including the known loose-label regression fixtures.
 11. Deploy the new reader and worker together, remove the old queue and generated-concept paths, and resume the schedule only after the canary passes.
-12. Monitor until no units remain pending, running, or retrying and every blocked unit has a durable reason and scheduled retry.
-13. Verify freshness, registry replay, consumer revisions, dataset receipts, cost, Job receipts, and restart recovery in production.
+12. Publish and verify a consumer snapshot at the current completed cutoff without waiting for the backlog to drain.
+13. Monitor queue convergence, cutoff advancement, registry replay, consumer revisions, dataset receipts, cost, Job receipts, and restart recovery in production.
 
 ## Completion criteria
 
-The work is complete when the pre-migration backlog has been fully drained. Every captured unit must have a verified current result containing only evidence-bearing preset and free-label assignments, or be blocked with a durable reason and scheduled retry. No earlier model-generated label or concept assignment may enter the replacement registry or consumer projection. Candidate and rejected labels cannot enter public reads. Registry replay must be deterministic, and restarts or deployments cannot lose work. Recent and historical queues must both advance. Consumer snapshots must name a complete revision and cutoff. The full repository checks and live recovery canary must pass.
+The work is complete when every captured unit is either backed by a verified current result or remains visible as pending, retrying, or blocked work, and consumers can publish an internally complete revision and cutoff. No earlier model-generated label or concept assignment may enter the replacement registry or consumer projection. Candidate and rejected labels cannot enter public reads. Registry replay must be deterministic, and restarts or deployments cannot lose work. Recent and historical queues must both advance. The full repository checks and live recovery canary must pass.
 
-If a durable lease, resumable output, or defensible full-run ceiling cannot be established, the implementation is not complete. Report the blocker instead of claiming readiness. Once those safeguards pass, process the entire backlog as part of the rollout.
+If a durable lease, resumable output, defensible per-run ceiling, or consistent consumer cutoff cannot be established, the implementation is not complete. Report that blocker instead of claiming readiness. Once those safeguards pass, scheduled Jobs continue the historical backlog after rollout.
