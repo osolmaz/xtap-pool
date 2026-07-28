@@ -239,6 +239,19 @@ describe("runEnrichTick", () => {
     expect(hub.commits).toHaveLength(0);
   });
 
+  it("persists an explicit idle receipt for a scheduled Job canary", async () => {
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), { workerId: "job-1", writeEmptyReceipt: true }),
+    );
+
+    expect(receipt).toMatchObject({ units: 0, calls: 0, failures: 0, worker_id: "job-1" });
+    expect(hubJson("enrichment/receipts/2026-07-06.jsonl")).toMatchObject({
+      units: 0,
+      calls: 0,
+      worker_id: "job-1",
+    });
+  });
+
   it("blocks a unit after MAX_ATTEMPTS transient failures", async () => {
     const unitId = seedUnit("100", "hello vLLM is fast");
     const failing: LlmClient = () => Promise.reject(new Error("router down"));

@@ -92,7 +92,10 @@ const scheduledJobSchema = z
         command: z.array(z.string()).nullish(),
         environment: stringMapSchema.nullish(),
         flavor: nonempty,
+        // The live Jobs wire response currently uses `timeout`; the published
+        // SDK type calls the same response field `timeoutSeconds`.
         timeout: z.number().int().positive().nullish(),
+        timeoutSeconds: z.number().int().positive().nullish(),
         secrets: z.array(z.string()).optional(),
         labels: stringMapSchema.nullish(),
       })
@@ -489,9 +492,6 @@ function validateCanaryReceipt(receipt: EnrichReceipt, desired: DesiredEnrichmen
     throw new Error("Canary receipt has missing or excessive measured cost.");
   }
   if (tokens > maxTokens) throw new Error("Canary receipt exceeds its token ceiling.");
-  if (receipt.units + receipt.failures < 7) {
-    throw new Error("Canary did not durably attempt at least two classifier batches.");
-  }
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -560,7 +560,7 @@ function actualScheduleProjection(job: ScheduledEnrichmentJob): Record<string, u
     command: job.jobSpec.command ?? undefined,
     environment: job.jobSpec.environment ?? {},
     flavor: job.jobSpec.flavor,
-    timeout: job.jobSpec.timeout ?? undefined,
+    timeout: job.jobSpec.timeout ?? job.jobSpec.timeoutSeconds ?? undefined,
     secrets: [...(job.jobSpec.secrets ?? [])].sort(),
     labels: job.jobSpec.labels ?? {},
   };

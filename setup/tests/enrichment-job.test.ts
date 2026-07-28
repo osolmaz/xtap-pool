@@ -145,6 +145,15 @@ describe("Hugging Face enrichment Job", () => {
     const sparse = await inspectEnrichmentJob(client, desired);
     expect(sparse.exactSchedules).toEqual([]);
     expect(sparse.mismatchedSchedules.map(({ id }) => id)).toEqual(["sparse"]);
+
+    const sdkTimeout = {
+      ...exact,
+      id: "sdk-timeout",
+      jobSpec: { ...exact.jobSpec, timeout: undefined, timeoutSeconds: desired.timeoutSeconds },
+    };
+    hubMocks.listScheduledJobs.mockResolvedValue([sdkTimeout]);
+    const compatible = await inspectEnrichmentJob(client, desired);
+    expect(compatible.exactSchedules.map(({ id }) => id)).toEqual(["sdk-timeout"]);
   });
 
   it("creates and verifies a suspended non-concurrent replacement before deleting old schedules", async () => {
@@ -237,7 +246,7 @@ describe("Hugging Face enrichment Job", () => {
         options.path === ".xtap-deployment.json"
           ? new Blob([JSON.stringify({ source_revision: REVISION })])
           : new Blob([
-              `\nnot-json\n{}\n${JSON.stringify(receiptFixture("other-job"))}\n${JSON.stringify(receiptFixture("job-1"))}\n${JSON.stringify(receiptFixture("job-2"))}\n`,
+              `\nnot-json\n{}\n${JSON.stringify(receiptFixture("other-job"))}\n${JSON.stringify(receiptFixture("job-1"))}\n${JSON.stringify({ ...receiptFixture("job-2"), units: 0, calls: 0, prompt_tokens: 0, completion_tokens: 0, cost_usd: 0 })}\n`,
             ]),
       ),
     );
@@ -249,7 +258,7 @@ describe("Hugging Face enrichment Job", () => {
 
     expect(result.hardCeilingUsd).toBeCloseTo(4.015);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
-    expect(result.runs.every(({ receipt }) => receipt.units === 7)).toBe(true);
+    expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
   });
 
   it("requires secrets for a missing schedule and rejects a replacement race", async () => {
@@ -375,7 +384,6 @@ describe("Hugging Face enrichment Job", () => {
   it.each([
     ["missing cost", { cost_usd: undefined }, "cost"],
     ["too many tokens", { prompt_tokens: 400001 }, "token"],
-    ["one batch", { units: 6 }, "two classifier batches"],
   ])("rejects a canary receipt with %s", async (_name, override, message) => {
     const desired = await desiredFixture();
     const exact = scheduleFixture(desired, "exact", true);

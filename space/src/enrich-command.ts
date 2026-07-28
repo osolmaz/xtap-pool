@@ -89,7 +89,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     verifyHubLabel: createExactHubVerifier(),
     judgeFreeLabel: createFreeLabelJudge(llm),
     maxUnitsPerTick: config.enrichMaxUnitsPerTick,
-    ...(env["JOB_ID"] === undefined ? {} : { workerId: env["JOB_ID"] }),
+    ...(env["JOB_ID"] === undefined ? {} : { workerId: env["JOB_ID"], writeEmptyReceipt: true }),
     leaseMs: DEFAULT_LEASE_MS,
     now: (): Date => new Date(),
     ceilings,
