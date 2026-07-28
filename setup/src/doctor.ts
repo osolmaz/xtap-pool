@@ -600,7 +600,14 @@ async function repairDoctorFindings(
   if ([webWorkerChanged, generatedChanged, datasetChanged].includes(true)) {
     await repair.restartAndWait(report.spaceRepo);
   }
-  await maybeRepairEnrichmentJob(client, username, report, repair, jobVariablesChanged);
+  await maybeRepairEnrichmentJob(
+    client,
+    username,
+    report,
+    repair,
+    jobVariablesChanged,
+    datasetChanged,
+  );
 }
 
 type RepairDependencies = DatasetRepairDeps &
@@ -727,9 +734,11 @@ async function maybeRepairEnrichmentJob(
   report: DoctorReport,
   deps: JobRepairDeps,
   variablesChanged: boolean,
+  datasetCredentialChanged: boolean,
 ): Promise<void> {
   if (
     !variablesChanged &&
+    !datasetCredentialChanged &&
     !report.checks.some((check) => check.code === "job.schedule" && check.status === "fail")
   ) {
     return;
@@ -746,7 +755,7 @@ async function maybeRepairEnrichmentJob(
   if (inspection.activeJobs.length > 0) {
     throw new Error("Refusing Hugging Face schedule repair while an enrichment Job is active.");
   }
-  if (inspection.exactSchedules.length > 0) {
+  if (inspection.exactSchedules.length > 0 && !datasetCredentialChanged) {
     await deps.reconcileJob(client, desired);
     return;
   }

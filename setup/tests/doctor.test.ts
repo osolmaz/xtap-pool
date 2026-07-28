@@ -324,8 +324,8 @@ describe("doctor", () => {
       { spaceRepo: "alice/xtap-pool", json: true, fix: true },
       {
         fetchFn,
+        ...jobCredentialRepairDeps(),
         promptDatasetToken: () => Promise.resolve("hf_dataset"),
-        promptInferenceToken: () => Promise.resolve("hf_inference"),
         validateDatasetToken: () => Promise.resolve([]),
         validateInferenceToken: () => Promise.resolve([]),
         restartAndWait: (spaceRepo) => {
@@ -360,6 +360,7 @@ describe("doctor", () => {
       { spaceRepo: "alice/xtap-pool", json: true, fix: true },
       {
         fetchFn,
+        ...jobCredentialRepairDeps("hf_good_dataset", "hf_good_inference"),
         promptDatasetToken,
         promptInferenceToken,
         validateDatasetToken: (token) =>
@@ -387,7 +388,9 @@ describe("doctor", () => {
       datasetError:
         "HF_TOKEN must include repo.content.write or repo.write on alice/xtap-pool-data.",
     });
-    const promptInferenceToken = vi.fn<() => Promise<string>>();
+    const promptJobDatasetToken = vi.fn().mockResolvedValue("hf_job_dataset");
+    const promptJobInferenceToken = vi.fn().mockResolvedValue("hf_job_inference");
+    const reconcileJob = vi.fn().mockResolvedValue(undefined);
     const restarts: string[] = [];
 
     await runDoctor(
@@ -397,7 +400,9 @@ describe("doctor", () => {
       {
         fetchFn,
         promptDatasetToken: () => Promise.resolve("hf_dataset"),
-        promptInferenceToken,
+        promptJobDatasetToken,
+        promptJobInferenceToken,
+        reconcileJob,
         validateDatasetToken: () => Promise.resolve([]),
         validateInferenceToken: () => Promise.resolve([]),
         restartAndWait: (spaceRepo) => {
@@ -407,7 +412,13 @@ describe("doctor", () => {
       },
     );
 
-    expect(promptInferenceToken).not.toHaveBeenCalled();
+    expect(promptJobDatasetToken).toHaveBeenCalledWith("alice/xtap-pool-data");
+    expect(promptJobInferenceToken).toHaveBeenCalledTimes(1);
+    expect(reconcileJob).toHaveBeenCalledWith(
+      expect.objectContaining({ accessToken: "hf_owner" }),
+      expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
+      { datasetToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
+    );
     expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
     expect(restarts).toEqual(["alice/xtap-pool"]);
   });
@@ -571,10 +582,10 @@ describe("doctor", () => {
       { spaceRepo: "alice/xtap-pool", json: true, fix: true },
       {
         fetchFn,
+        ...jobCredentialRepairDeps(),
         promptDatasetToken: () => Promise.resolve("hf_dataset"),
         confirmGeneratedSecretRepair: () => Promise.resolve(false),
         confirmDatasetTokenRepair: () => Promise.resolve(true),
-        promptInferenceToken: () => Promise.resolve("hf_inference"),
         validateDatasetToken: () => Promise.resolve([]),
         validateInferenceToken: () => Promise.resolve([]),
         restartAndWait: (spaceRepo) => {
@@ -673,10 +684,10 @@ describe("doctor", () => {
       { spaceRepo: "alice/xtap-pool", json: true, fix: true },
       {
         fetchFn,
+        ...jobCredentialRepairDeps(),
         promptDatasetToken: () => Promise.resolve("hf_dataset"),
         confirmGeneratedSecretRepair: () => Promise.resolve(false),
         confirmDatasetTokenRepair: () => Promise.resolve(true),
-        promptInferenceToken: () => Promise.resolve("hf_inference"),
         validateDatasetToken: () => Promise.resolve([]),
         validateInferenceToken: () => Promise.resolve([]),
         restartAndWait: (spaceRepo) => {
@@ -807,6 +818,7 @@ function scheduledJobFixture(): Record<string, unknown> {
         name: "xtap-pool-enrichment",
         space_repo: "alice/xtap-pool",
         source_revision: SOURCE_REVISION,
+        secret_names: "HF_TOKEN,INFERENCE_TOKEN",
       },
     },
   };
@@ -1031,6 +1043,17 @@ function secretsResponse(options: {
     ).map((key) => ({ key })),
   ];
   return Response.json(secrets);
+}
+
+function jobCredentialRepairDeps(
+  datasetToken = "hf_job_dataset",
+  inferenceToken = "hf_job_inference",
+) {
+  return {
+    promptJobDatasetToken: () => Promise.resolve(datasetToken),
+    promptJobInferenceToken: () => Promise.resolve(inferenceToken),
+    reconcileJob: () => Promise.resolve(undefined),
+  };
 }
 
 function jsonBody(init: RequestInit): { key: string; value: string } {

@@ -46,6 +46,7 @@ export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> 
 };
 
 const JOB_SECRET_NAMES = ["HF_TOKEN", "INFERENCE_TOKEN"] as const;
+const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(",");
 const JOB_COMMAND = ["node", "space/dist/src/enrich-job-main.js"] as const;
 const ACTIVE_JOB_STAGES = new Set(["RUNNING", "PAUSED", "UPDATING"]);
 
@@ -189,6 +190,7 @@ export async function desiredEnrichmentJob(
       name: "xtap-pool-enrichment",
       space_repo: spaceRepo,
       source_revision: deployment.source_revision,
+      secret_names: JOB_SECRET_NAMES_LABEL,
     },
   };
 }
@@ -547,7 +549,6 @@ function scheduleProjection(desired: DesiredEnrichmentJob): Record<string, unkno
     environment: desired.environment,
     flavor: "cpu-basic",
     timeout: desired.timeoutSeconds,
-    secrets: [...JOB_SECRET_NAMES].sort(),
     labels: desired.labels,
   };
 }
@@ -561,7 +562,6 @@ function actualScheduleProjection(job: ScheduledEnrichmentJob): Record<string, u
     environment: job.jobSpec.environment ?? {},
     flavor: job.jobSpec.flavor,
     timeout: job.jobSpec.timeout ?? job.jobSpec.timeoutSeconds ?? undefined,
-    secrets: [...(job.jobSpec.secrets ?? [])].sort(),
     labels: job.jobSpec.labels ?? {},
   };
 }

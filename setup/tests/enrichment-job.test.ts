@@ -68,6 +68,7 @@ describe("Hugging Face enrichment Job", () => {
         component: "enrichment",
         space_repo: "alice/xtap-pool",
         source_revision: REVISION,
+        secret_names: "HF_TOKEN,INFERENCE_TOKEN",
       },
     });
     expect(desiredEnrichmentJobHash(desired)).toMatch(/^[0-9a-f]{64}$/u);
@@ -149,7 +150,14 @@ describe("Hugging Face enrichment Job", () => {
     const sdkTimeout = {
       ...exact,
       id: "sdk-timeout",
-      jobSpec: { ...exact.jobSpec, timeout: undefined, timeoutSeconds: desired.timeoutSeconds },
+      jobSpec: {
+        spaceId: exact.jobSpec.spaceId,
+        command: exact.jobSpec.command,
+        environment: exact.jobSpec.environment,
+        flavor: exact.jobSpec.flavor,
+        timeoutSeconds: desired.timeoutSeconds,
+        labels: exact.jobSpec.labels,
+      },
     };
     hubMocks.listScheduledJobs.mockResolvedValue([sdkTimeout]);
     const compatible = await inspectEnrichmentJob(client, desired);
