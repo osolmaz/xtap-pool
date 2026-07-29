@@ -204,6 +204,27 @@ describe("runEnrichTick", () => {
     });
   });
 
+  it("charges failed concurrent requests at their conservative reservation", async () => {
+    seedUnit("100", "first unit");
+    seedUnit("101", "second unit");
+    const model: LlmClient = () => Promise.reject(new RouterError("timed out", "timeout"));
+
+    const receipt = await runEnrichTick(
+      deps(model, {
+        maxUnitsPerTick: 2,
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        ceilings: { maxCostUsd: 0.5, maxCostPerCallUsd: 0.25 },
+      }),
+    );
+    expect(receipt).toMatchObject({
+      calls: 2,
+      failures: 2,
+      cost_usd: 0.5,
+      stopped_by: "max_cost_usd",
+    });
+  });
+
   it("persists results, attempt events and registry events to the dataset", async () => {
     seedUnit("100", "vllm ships fp8 kernels");
     await runEnrichTick(deps(respondingClient(withEvidence)));

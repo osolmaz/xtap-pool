@@ -906,13 +906,25 @@ async function persistDispatchReservations(
 }
 
 /** Apply observed provider accounting only in durable commit order. */
+// eslint-disable-next-line complexity -- Success, missing-cost, and conservative-failure accounting share one ordered boundary.
 function recordLlmOutcome(
   receipt: EnrichReceipt,
   outcome: LlmOutcome,
   ceilings: WorkerCeilings,
 ): LlmOutcome {
   receipt.calls += 1;
-  if (!outcome.ok) return outcome;
+  if (!outcome.ok) {
+    if (ceilings.maxCostUsd !== undefined) {
+      if (receipt.cost_usd === undefined || ceilings.maxCostPerCallUsd === undefined) {
+        receipt.cost_usd = undefined;
+      } else {
+        // The provider may have accepted work before a timeout or 5xx response.
+        // Charge the reservation so later waves cannot spend it again.
+        receipt.cost_usd += ceilings.maxCostPerCallUsd;
+      }
+    }
+    return outcome;
+  }
   receipt.prompt_tokens += outcome.usage.prompt_tokens;
   receipt.completion_tokens += outcome.usage.completion_tokens;
   if (outcome.usage.cost_usd === undefined && ceilings.maxCostUsd !== undefined) {
