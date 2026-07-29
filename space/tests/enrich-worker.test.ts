@@ -568,6 +568,31 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry("100:someone")?.status).toBe("retrying");
   });
 
+  it("keeps an unmeasured concurrent cost fail-closed for later waves", async () => {
+    seedUnit("100", "first");
+    seedUnit("101", "second");
+    seedUnit("102", "third");
+    let calls = 0;
+    const immediate = respondingClient(withEvidence);
+    const model: LlmClient = async (messages) => {
+      const call = ++calls;
+      const result = await immediate(messages);
+      return call === 2 ? { ...result, usage: { ...result.usage, cost_usd: 0.1 } } : result;
+    };
+
+    const receipt = await runEnrichTick(
+      deps(model, {
+        maxUnitsPerTick: 3,
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        ceilings: { maxCostUsd: 1, maxCostPerCallUsd: 0.25 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({ calls: 2, cost_usd: undefined, stopped_by: "cost_unmeasured" });
+    expect(enrichStore.queueEntry("102:someone")?.status).toBe("pending");
+  });
+
   it("honors zero-valued token and elapsed ceilings before leasing provider work", async () => {
     seedUnit("100", "vllm");
     const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));

@@ -972,6 +972,9 @@ function recordLlmOutcome(
     receipt.cost_usd = undefined;
     return { ok: false, error: "provider cost could not be measured", errorClass: "other" };
   }
+  // A concurrent earlier outcome may already have made the run's cost
+  // unmeasurable. Never turn that fail-closed sentinel back into a number.
+  if (ceilings.maxCostUsd !== undefined && receipt.cost_usd === undefined) return outcome;
   receipt.cost_usd = (receipt.cost_usd ?? 0) + (outcome.usage.cost_usd ?? 0);
   return outcome;
 }
