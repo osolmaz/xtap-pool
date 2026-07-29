@@ -542,7 +542,9 @@ async function drainClaimedConcurrent(
     while (wave.length < activeLimit && start + reservedUnits < claimed.length) {
       const costStopped = costCallPreflight(receipt, ceilings, reservedCostUsd);
       if (costStopped !== undefined) {
-        stoppedBy = costStopped;
+        // Settle an affordable partial wave before declaring the run exhausted.
+        // A full wave may not fit even though one or more calls still do.
+        if (wave.length === 0) stoppedBy = costStopped;
         break;
       }
       const remainingUnits =

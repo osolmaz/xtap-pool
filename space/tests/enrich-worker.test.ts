@@ -299,6 +299,30 @@ describe("runEnrichTick", () => {
     });
   });
 
+  it("continues after an affordable partial cost wave", async () => {
+    seedUnit("100", "first unit");
+    seedUnit("101", "second unit");
+    seedUnit("102", "third unit");
+    seedUnit("103", "fourth unit");
+    const immediate = respondingClient(withEvidence);
+    const lowCost: LlmClient = async (messages) => {
+      const result = await immediate(messages);
+      return { ...result, usage: { ...result.usage, cost_usd: 0.1 } };
+    };
+
+    const receipt = await runEnrichTick(
+      deps(lowCost, {
+        maxUnitsPerTick: 4,
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        ceilings: { maxCostUsd: 0.6, maxCostPerCallUsd: 0.25 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({ units: 4, calls: 4, cost_usd: 0.4 });
+    expect(receipt.stopped_by).toBeUndefined();
+  });
+
   it("persists results, attempt events and registry events to the dataset", async () => {
     seedUnit("100", "vllm ships fp8 kernels");
     await runEnrichTick(deps(respondingClient(withEvidence)));
