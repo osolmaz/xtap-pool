@@ -222,6 +222,12 @@ export const enrichReceiptSchema = z
     new_candidates: z.number().int().nonnegative(),
     new_approvals: z.number().int().nonnegative(),
     new_rejections: z.number().int().nonnegative(),
+    /** Coordinator telemetry; absent from historical sequential receipts. */
+    configured_concurrency: z.number().int().min(1).max(32).optional(),
+    peak_concurrency: z.number().int().nonnegative().max(32).optional(),
+    provider_backoffs: z.number().int().nonnegative().optional(),
+    reservation_peak_usd: z.number().nonnegative().optional(),
+    commit_queue_peak: z.number().int().nonnegative().max(32).optional(),
     stopped_by: z.string().min(1).optional(),
   })
   .strict();

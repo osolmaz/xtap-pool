@@ -21,6 +21,7 @@ import { TweetStore } from "./store.js";
  * record), runs one bounded worker tick, and exits. This is the production
  * scheduling entrypoint — the API Space no longer runs an interval loop.
  */
+// eslint-disable-next-line complexity -- Production entrypoint validates config, rebuilds durable state, and reports its bounded run.
 export async function runEnrichCommand(env: Record<string, string | undefined>): Promise<void> {
   const config = loadConfig(env);
   if (!config.enrichEnabled) {
@@ -89,6 +90,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     verifyHubLabel: createExactHubVerifier(),
     judgeFreeLabel: createFreeLabelJudge(llm),
     maxUnitsPerTick: config.enrichMaxUnitsPerTick,
+    maxConcurrentCalls: config.enrichMaxConcurrentCalls,
     ...(env["JOB_ID"] === undefined ? {} : { workerId: env["JOB_ID"], writeEmptyReceipt: true }),
     leaseMs: DEFAULT_LEASE_MS,
     now: (): Date => new Date(),
@@ -97,6 +99,8 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
   console.log(
     `[xtap-pool worker] finished: units=${String(receipt.units)} retries=${String(receipt.retries)} ` +
       `blocked=${String(receipt.blocked)} calls=${String(receipt.calls)} ` +
+      `concurrency=${String(receipt.peak_concurrency ?? 0)}/${String(receipt.configured_concurrency ?? 1)} ` +
+      `backoffs=${String(receipt.provider_backoffs ?? 0)} ` +
       `tokens=${String(receipt.prompt_tokens + receipt.completion_tokens)} ` +
       `stopped_by=${receipt.stopped_by ?? "batch-complete"}`,
   );

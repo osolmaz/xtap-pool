@@ -14,6 +14,7 @@ import {
   createExactHubVerifier,
   createFreeLabelJudge,
   createRouterLlmClient,
+  RouterError,
   runEnrichTick,
 } from "../src/enrich-worker.js";
 import type { EnrichWorkerDeps, LlmClient, LlmMessage } from "../src/enrich-worker.js";
@@ -128,6 +129,71 @@ describe("runEnrichTick", () => {
       contract_hash: CONTRACT_HASH,
     });
     expect(enrichStore.queueEntry(unitId)?.status).toBe("done");
+  });
+
+  it("starts concurrent calls together and commits out-of-order responses in dispatch order", async () => {
+    seedUnit("100", "first unit");
+    seedUnit("101", "second unit");
+    seedUnit("102", "third unit");
+    const resolveCalls: (() => void)[] = [];
+    const immediate = respondingClient(withEvidence);
+    const delayed: LlmClient = (messages) =>
+      new Promise((resolve) => {
+        resolveCalls.push(() => {
+          void immediate(messages).then((result) => {
+            resolve(result);
+          });
+        });
+      });
+
+    const running = runEnrichTick(
+      deps(delayed, { maxUnitsPerTick: 3, unitsPerCall: 1, maxConcurrentCalls: 3 }),
+    );
+    await vi.waitFor(() => {
+      expect(resolveCalls).toHaveLength(3);
+    });
+    resolveCalls[2]?.();
+    resolveCalls[1]?.();
+    resolveCalls[0]?.();
+
+    const receipt = await running;
+    expect(receipt).toMatchObject({
+      units: 3,
+      calls: 3,
+      configured_concurrency: 3,
+      peak_concurrency: 3,
+      commit_queue_peak: 3,
+    });
+    const rows = (hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { unit_id: string });
+    expect(rows.map((row) => row.unit_id)).toEqual(["100:someone", "101:someone", "102:someone"]);
+  });
+
+  it("halves later waves after a provider timeout", async () => {
+    seedUnit("100", "first unit");
+    seedUnit("101", "second unit");
+    seedUnit("102", "third unit");
+    seedUnit("103", "fourth unit");
+    let calls = 0;
+    const immediate = respondingClient(withEvidence);
+    const model: LlmClient = (messages) => {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new RouterError("timed out", "timeout"));
+      return immediate(messages);
+    };
+
+    const receipt = await runEnrichTick(
+      deps(model, { maxUnitsPerTick: 4, unitsPerCall: 1, maxConcurrentCalls: 2 }),
+    );
+    expect(receipt).toMatchObject({
+      units: 3,
+      failures: 1,
+      calls: 4,
+      peak_concurrency: 2,
+      provider_backoffs: 1,
+    });
   });
 
   it("persists results, attempt events and registry events to the dataset", async () => {

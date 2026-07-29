@@ -104,6 +104,12 @@ describe("Hugging Face enrichment Job", () => {
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow("five-field cron");
+
+    invalid.set("ENRICH_JOB_SCHEDULE", "17 */6 * * *");
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "33");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow("1 through 32");
   });
 
   it("classifies exact, stale, unrelated, and active Jobs", async () => {
@@ -621,6 +627,7 @@ function variables(): Map<string, string> {
     ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
     ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
     ["ENRICH_MAX_UNITS_PER_TICK", "50"],
+    ["ENRICH_MAX_CONCURRENT_CALLS", "1"],
     ["ENRICH_MAX_TOKENS", "400000"],
     ["ENRICH_MAX_ELAPSED_MS", "2400000"],
     ["ENRICH_MAX_ERROR_RATE", "0.25"],

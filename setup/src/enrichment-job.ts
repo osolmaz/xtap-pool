@@ -33,6 +33,7 @@ export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> 
   ENRICH_JOB_SCHEDULE: "17 */6 * * *",
   ENRICH_JOB_TIMEOUT_SECONDS: "2700",
   ENRICH_MAX_UNITS_PER_TICK: "50",
+  ENRICH_MAX_CONCURRENT_CALLS: "1",
   ENRICH_MAX_TOKENS: "400000",
   ENRICH_MAX_ELAPSED_MS: "2400000",
   ENRICH_MAX_ERROR_RATE: "0.25",
@@ -73,6 +74,9 @@ const jobVariablesSchema = z
     ENRICH_JOB_SCHEDULE: cronSchedule,
     ENRICH_JOB_TIMEOUT_SECONDS: positiveInteger,
     ENRICH_MAX_UNITS_PER_TICK: positiveInteger,
+    ENRICH_MAX_CONCURRENT_CALLS: z
+      .string()
+      .regex(/^(?:[1-9]|[12][0-9]|3[0-2])$/u, "must be an integer from 1 through 32"),
     ENRICH_MAX_TOKENS: positiveInteger,
     ENRICH_MAX_ELAPSED_MS: positiveInteger,
     ENRICH_MAX_ERROR_RATE: rate,
@@ -182,6 +186,7 @@ export async function desiredEnrichmentJob(
     DATASET_REPO: datasetRepo,
     ENRICH_ENABLED: "true",
     ENRICH_MAX_UNITS_PER_TICK: configured.ENRICH_MAX_UNITS_PER_TICK,
+    ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
     ENRICH_MAX_TOKENS: configured.ENRICH_MAX_TOKENS,
     ENRICH_MAX_ELAPSED_MS: configured.ENRICH_MAX_ELAPSED_MS,
     ENRICH_MAX_ERROR_RATE: configured.ENRICH_MAX_ERROR_RATE,

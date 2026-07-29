@@ -18,6 +18,7 @@ const configSchema = z.object({
   ENRICH_ENABLED: z.enum(["true", "false"]).default("false"),
   ENRICH_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   ENRICH_MAX_UNITS_PER_TICK: z.coerce.number().int().positive().default(100),
+  ENRICH_MAX_CONCURRENT_CALLS: z.coerce.number().int().min(1).max(32).default(1),
   ENRICH_MAX_TOKENS: z.coerce.number().int().positive().optional(),
   ENRICH_MAX_ELAPSED_MS: z.coerce.number().int().positive().optional(),
   ENRICH_MAX_ERROR_RATE: z.coerce.number().min(0).max(1).optional(),
@@ -49,6 +50,7 @@ export type SpaceConfig = {
   enrichEnabled: boolean;
   enrichIntervalMs: number;
   enrichMaxUnitsPerTick: number;
+  enrichMaxConcurrentCalls: number;
   enrichMaxTokens?: number;
   enrichMaxElapsedMs?: number;
   enrichMaxErrorRate?: number;
@@ -99,6 +101,7 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     enrichEnabled: parsed.ENRICH_ENABLED === "true",
     enrichIntervalMs: parsed.ENRICH_INTERVAL_MS,
     enrichMaxUnitsPerTick: parsed.ENRICH_MAX_UNITS_PER_TICK,
+    enrichMaxConcurrentCalls: parsed.ENRICH_MAX_CONCURRENT_CALLS,
     ...(parsed.ENRICH_MAX_TOKENS === undefined
       ? {}
       : { enrichMaxTokens: parsed.ENRICH_MAX_TOKENS }),
