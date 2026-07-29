@@ -179,6 +179,43 @@ describe("runEnrichTick", () => {
     expect(rows.map((row) => row.unit_id)).toEqual(["100:someone", "101:someone", "102:someone"]);
   });
 
+  it("reduces an otherwise unaffordable token wave before dispatch", async () => {
+    seedUnit("100", "token ceiling unit");
+    let calibrationLimit: number | undefined;
+    const calibration: LlmClient = (messages, options) => {
+      calibrationLimit = options?.maxCompletionTokens;
+      return respondingClient(withEvidence)(messages);
+    };
+    await runEnrichTick(
+      deps(calibration, {
+        maxUnitsPerTick: 1,
+        unitsPerCall: 1,
+        ceilings: { maxTokens: 50_000 },
+      }),
+    );
+    expect(calibrationLimit).toBeDefined();
+
+    seedUnit("101", "token ceiling unit");
+    seedUnit("102", "token ceiling unit");
+    const promptUpperBound = 50_000 - (calibrationLimit ?? 0);
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxUnitsPerTick: 2,
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        ceilings: { maxTokens: promptUpperBound + 1 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({
+      units: 1,
+      calls: 1,
+      peak_concurrency: 1,
+      stopped_by: "max_tokens",
+    });
+    expect(enrichStore.queueEntry("101:someone")?.status).toBe("done");
+  });
+
   it("halves later waves after a provider timeout", async () => {
     seedUnit("100", "first unit");
     seedUnit("101", "second unit");

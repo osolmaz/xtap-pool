@@ -568,6 +568,20 @@ async function drainClaimedConcurrent(
         activeLimit,
       );
       if (maxCompletionTokens === 0) {
+        if (wave.length === 0 && activeLimit > 1) {
+          // A smaller wave may fit under the remaining token ceiling. Do not
+          // release and repeatedly reclaim this head batch without trying it.
+          activeLimit = Math.max(1, Math.floor(activeLimit / 2));
+          continue;
+        }
+        if (wave.length === 0) {
+          // Reuse the sequential splitter/blocker when even one slot cannot
+          // admit this batch, so a truly oversized unit cannot stall later Jobs.
+          const batchStopped = await processBatch(deps, batch, receipt, contractHash);
+          start += batch.length;
+          if (batchStopped !== undefined) return batchStopped;
+          break;
+        }
         stoppedBy = "max_tokens";
         break;
       }
