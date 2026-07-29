@@ -505,6 +505,29 @@ describe("summaries", () => {
     }
   });
 
+  it("returns every approved free label needed to validate selected units", () => {
+    const names = Array.from({ length: 51 }, (_, index) => `label-${String(index)}`);
+    for (const [index, name] of names.entries()) {
+      const id = String(1_000 + index);
+      const [unitId] = insertAndRegister([{ id }]);
+      if (unitId === undefined) throw new Error("expected unit");
+      const freeLabel = defaultAssignments(unitId).freeLabels[0];
+      if (freeLabel === undefined) throw new Error("expected free label evidence");
+      enrich.applyEnrichment(
+        row({
+          unit_id: unitId,
+          free_labels: [{ ...freeLabel, name }],
+        }),
+      );
+      recordCandidate(name);
+      enrich.promoteName(name, "test-approved");
+    }
+
+    const summary = enrich.labelsSummary(TAXONOMY);
+    const returnedNames = new Set(summary.free_labels.map((entry) => entry.name));
+    expect(names.every((name) => returnedNames.has(name))).toBe(true);
+  });
+
   it("summarizes label counts, free labels, queue depth and coverage", () => {
     const taxonomy = [
       { name: "ai", description: "d" },

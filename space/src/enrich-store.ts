@@ -36,7 +36,6 @@ export const MAX_ATTEMPTS = 5;
 export const RECENT_ERROR_WINDOW = 100;
 
 /** Query caps applied by consumer helpers. */
-const FREE_LABEL_LIMIT = 50;
 const RELATED_LIMIT = 50;
 const MAX_COMPLETE_GRAPH_NODES = 10_000;
 const MAX_COMPLETE_GRAPH_LINKS = 100_000;
@@ -1211,9 +1210,9 @@ export class EnrichStore {
          FROM label_assignments a
          JOIN free_label_registry r ON r.name = a.name AND r.status = 'approved'
          WHERE a.kind = 'free' AND a.unit_id IN (${eligible.sql})
-         GROUP BY a.name ORDER BY count DESC, a.name LIMIT ?`,
+         GROUP BY a.name ORDER BY count DESC, a.name`,
       )
-      .all(...eligible.params, FREE_LABEL_LIMIT) as FreeLabelCount[];
+      .all(...eligible.params) as FreeLabelCount[];
     return {
       taxonomy_version: this.taxonomyVersion,
       labels: taxonomy.map((label) => ({ ...label, count: presetCounts.get(label.name) ?? 0 })),
