@@ -19,7 +19,6 @@ export const testConfig: SpaceConfig = {
   staticRoot: "../explorer/dist",
   enrichEnabled: false,
   enrichIntervalMs: 60000,
-  enrichMaxUnitsPerTick: 100,
   enrichMaxConcurrentCalls: 1,
   llmModel: "zai-org/GLM-5.2",
   taxonomyVersion: 1,

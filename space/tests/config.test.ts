@@ -51,7 +51,6 @@ describe("loadConfig", () => {
     const config = loadConfig(baseEnv);
     expect(config.enrichEnabled).toBe(false);
     expect(config.enrichIntervalMs).toBe(60000);
-    expect(config.enrichMaxUnitsPerTick).toBe(100);
     expect(config.enrichMaxConcurrentCalls).toBe(1);
     expect(config.llmModel).toBe("zai-org/GLM-5.2");
     expect(config.taxonomyVersion).toBe(1);
@@ -63,7 +62,6 @@ describe("loadConfig", () => {
       ENRICH_ENABLED: "true",
       INFERENCE_TOKEN: "hf_inference",
       ENRICH_INTERVAL_MS: "5000",
-      ENRICH_MAX_UNITS_PER_TICK: "40",
       ENRICH_MAX_CONCURRENT_CALLS: "32",
       LLM_MODEL: "meta-llama/Llama-4",
       TAXONOMY_VERSION: "3",
@@ -71,7 +69,6 @@ describe("loadConfig", () => {
     expect(config.enrichEnabled).toBe(true);
     expect(config.inferenceToken).toBe("hf_inference");
     expect(config.enrichIntervalMs).toBe(5000);
-    expect(config.enrichMaxUnitsPerTick).toBe(40);
     expect(config.enrichMaxConcurrentCalls).toBe(32);
     expect(config.llmModel).toBe("meta-llama/Llama-4");
     expect(config.taxonomyVersion).toBe(3);

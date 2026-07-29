@@ -185,7 +185,7 @@ Run receipts record successful units, retries, blocked units, provider calls, to
 
 The worker stops automatically when:
 
-- the configured cost or token ceiling is reached;
+- the configured cost or runtime ceiling is reached;
 - the batch error rate crosses its limit;
 - invalid or ungrounded label output crosses its limit;
 - the dataset commit or result verification fails;

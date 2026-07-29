@@ -67,7 +67,7 @@ Dataset writes remain serialized through `DatasetMirror.commitBatch`. The datase
 
 ## Admission control
 
-A concurrency maximum caps active calls. The worker starts a full configured wave immediately, subject to the shared cost and token ceilings.
+A concurrency maximum caps active calls. The worker repeatedly claims one bounded wave and starts it immediately, subject to the shared cost and runtime ceilings. It does not stop after an arbitrary unit count or aggregate token count.
 
 Provider pressure reduces later waves quickly:
 
@@ -78,7 +78,7 @@ Provider pressure reduces later waves quickly:
 
 A full 32-call wave can reserve at most $8 under the current $0.25 per-call bound. Provider errors reduce the next wave before further requests are admitted.
 
-The coordinator checks capacity before every dispatch. It includes all active reservations when evaluating the run ceilings. With the current `$0.25` per-call bound and `$10` run ceiling, 16 active calls reserve $4 and 32 active calls reserve $8. The worker cannot admit a call that would exceed the remaining cost or token capacity.
+The coordinator checks capacity before every dispatch. It includes all active reservations when evaluating the run ceilings. With the current `$0.25` per-call bound, 16 active calls reserve $4 and 32 active calls reserve $8. The worker cannot admit a call that would exceed the remaining cost capacity.
 
 Elapsed time stops new admissions. It does not abandon in-flight calls or skip their durable accounting. A platform timeout remains an emergency limit and must leave enough time for the request timeout, ordered commit queue, receipt write, and lease release.
 

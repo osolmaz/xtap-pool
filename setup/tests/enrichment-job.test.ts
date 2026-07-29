@@ -47,7 +47,7 @@ beforeEach(() => {
 });
 
 describe("Hugging Face enrichment Job", () => {
-  it("derives one bounded revision-bound Job contract", async () => {
+  it("derives one safety-bounded revision-bound Job contract", async () => {
     const desired = await desiredFixture();
 
     expect(desired).toMatchObject({
@@ -71,6 +71,8 @@ describe("Hugging Face enrichment Job", () => {
         secret_names: "HF_TOKEN.INFERENCE_TOKEN",
       },
     });
+    expect(desired.environment).not.toHaveProperty("ENRICH_MAX_UNITS_PER_TICK");
+    expect(desired.environment).not.toHaveProperty("ENRICH_MAX_TOKENS");
     expect(desiredEnrichmentJobHash(desired)).toMatch(/^[0-9a-f]{64}$/u);
     expect(Object.values(desired.labels).every((value) => /^[a-zA-Z0-9._-]*$/u.test(value))).toBe(
       true,
@@ -350,7 +352,7 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.listScheduledJobs.mockResolvedValue([scheduleFixture(desired, "exact", true)]);
     hubMocks.getJob.mockResolvedValue({
       ...physicalFixture(desired, "job-1", "COMPLETED"),
-      environment: { ...desired.environment, ENRICH_MAX_UNITS_PER_TICK: "25" },
+      environment: { ...desired.environment, ENRICH_MAX_CONCURRENT_CALLS: "2" },
     });
 
     await expect(
@@ -482,9 +484,9 @@ describe("Hugging Face enrichment Job", () => {
   });
 
   it.each([
-    ["missing cost", { cost_usd: undefined }, "cost"],
-    ["too many tokens", { prompt_tokens: 400001 }, "token"],
-  ])("rejects a canary receipt with %s", async (_name, override, message) => {
+    ["missing cost", { cost_usd: undefined }],
+    ["excessive cost", { cost_usd: 2.01 }],
+  ])("rejects a canary receipt with %s", async (_name, override) => {
     const desired = await desiredFixture();
     const exact = scheduleFixture(desired, "exact", true);
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
@@ -502,7 +504,7 @@ describe("Hugging Face enrichment Job", () => {
         pollIntervalMs: 0,
         receiptTimeoutMs: 100,
       }),
-    ).rejects.toThrow(message);
+    ).rejects.toThrow("cost");
   });
 
   it("rejects reused physical identities and changed contracts across attempts", async () => {
@@ -626,9 +628,7 @@ function variables(): Map<string, string> {
   return new Map([
     ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
     ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
-    ["ENRICH_MAX_UNITS_PER_TICK", "50"],
     ["ENRICH_MAX_CONCURRENT_CALLS", "1"],
-    ["ENRICH_MAX_TOKENS", "400000"],
     ["ENRICH_MAX_ELAPSED_MS", "2400000"],
     ["ENRICH_MAX_ERROR_RATE", "0.25"],
     ["ENRICH_MAX_COST_USD", "2"],
