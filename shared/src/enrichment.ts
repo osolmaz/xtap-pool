@@ -89,6 +89,8 @@ export function isCurrentEnrichmentRow(row: EnrichmentRow): boolean {
  */
 export const attemptOutcomeSchema = z.enum([
   "success",
+  /** A provider request was durably reserved before it was sent. */
+  "dispatched",
   "transient_failure",
   "invalid_output",
   "commit_failed",
@@ -120,6 +122,8 @@ export const attemptEventSchema = z.object({
   at: z.string().min(1),
   first_queued_at: z.string().min(1).optional(),
   next_retry_at: z.string().min(1).optional(),
+  /** Conservative per-call reservation, recorded once per dispatched batch. */
+  reserved_cost_usd: z.number().nonnegative().optional(),
 });
 
 export type AttemptEvent = z.infer<typeof attemptEventSchema>;

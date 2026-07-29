@@ -585,6 +585,7 @@ async function drainClaimedConcurrent(
     receipt.peak_concurrency = Math.max(receipt.peak_concurrency ?? 0, wave.length);
     receipt.commit_queue_peak = Math.max(receipt.commit_queue_peak ?? 0, wave.length);
     receipt.reservation_peak_usd = Math.max(receipt.reservation_peak_usd ?? 0, reservedCostUsd);
+    await persistDispatchReservations(deps, wave, ceilings);
     const outcomes = await Promise.all(
       wave.map((prepared) => callLlm(deps, prepared.messages, prepared.maxCompletionTokens)),
     );
@@ -870,6 +871,38 @@ async function callLlm(
       errorClass: error instanceof RouterError ? error.errorClass : classifyError(error),
     };
   }
+}
+
+/**
+ * Publish a retryable dispatch record before spending provider capacity. If the
+ * process dies before a final outcome is committed, rebuild delays reissue
+ * until this reservation's request window has passed.
+ */
+async function persistDispatchReservations(
+  deps: EnrichWorkerDeps,
+  wave: readonly PreparedBatch[],
+  ceilings: WorkerCeilings,
+): Promise<void> {
+  const at = deps.now();
+  const retryAt = new Date(at.getTime() + DEFAULT_REQUEST_TIMEOUT_MS).toISOString();
+  const events: AttemptEvent[] = wave.flatMap((prepared) =>
+    prepared.batch.map((item, index) => ({
+      unit_id: item.unitId,
+      input_hash: item.inputHash,
+      contract_hash: item.contractHash,
+      attempt: item.attempts + 1,
+      outcome: "dispatched" as const,
+      error_message: "provider dispatch reserved before request",
+      at: at.toISOString(),
+      first_queued_at: item.firstQueuedAt,
+      next_retry_at: retryAt,
+      ...(index === 0 && ceilings.maxCostPerCallUsd !== undefined
+        ? { reserved_cost_usd: ceilings.maxCostPerCallUsd }
+        : {}),
+    })),
+  );
+  const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+  await lock(() => persistRowsAndEvents(deps, [], events, []));
 }
 
 /** Apply observed provider accounting only in durable commit order. */

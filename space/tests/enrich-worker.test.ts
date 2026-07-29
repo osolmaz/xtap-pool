@@ -152,6 +152,14 @@ describe("runEnrichTick", () => {
     await vi.waitFor(() => {
       expect(resolveCalls).toHaveLength(3);
     });
+    const dispatches = (
+      hub.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl") ?? ""
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { outcome: string });
+    expect(dispatches).toHaveLength(3);
+    expect(dispatches.every((event) => event.outcome === "dispatched")).toBe(true);
     resolveCalls[2]?.();
     resolveCalls[1]?.();
     resolveCalls[0]?.();

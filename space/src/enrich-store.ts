@@ -806,6 +806,10 @@ export class EnrichStore {
   }
 
   replayAttemptEvent(event: AttemptEvent): void {
+    if (event.outcome === "dispatched") {
+      this.replayDispatchReservation(event);
+      return;
+    }
     if (!this.isReplayable(event)) return;
     const nowIso = this.now().toISOString();
     const nextStatus: QueueStatus = event.outcome === "blocked" ? "blocked" : "retrying";
@@ -843,9 +847,40 @@ export class EnrichStore {
       );
   }
 
+  /** A dispatch is durable before its HTTP request, but is not a completed retry. */
+  private replayDispatchReservation(event: AttemptEvent): void {
+    if (event.contract_hash !== this.contractHash) return;
+    const existing = this.rawQueueEntry(event.unit_id);
+    if (
+      existing === undefined ||
+      existing.status === "done" ||
+      existing.input_hash !== event.input_hash
+    ) {
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE enrich_queue SET
+           status = 'retrying',
+           last_error = ?,
+           last_error_class = 'other',
+           next_retry_at = ?,
+           lease_owner = NULL,
+           lease_expires_at = NULL,
+           updated_at = ?
+         WHERE unit_id = ?`,
+      )
+      .run(
+        "provider dispatch was not durably settled",
+        nullable(event.next_retry_at),
+        this.now().toISOString(),
+        event.unit_id,
+      );
+  }
+
   private isReplayable(event: AttemptEvent): boolean {
     if (event.contract_hash !== this.contractHash) return false;
-    if (event.outcome === "success") return false;
+    if (event.outcome === "success" || event.outcome === "dispatched") return false;
     const existing = this.rawQueueEntry(event.unit_id);
     if (existing === undefined) return false;
     if (existing.status === "done") return false;

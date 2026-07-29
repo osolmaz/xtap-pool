@@ -209,6 +209,25 @@ describe("queue state machine", () => {
     expect(enrich.queueEntry("100:someone")?.firstQueuedAt).toBe("2026-05-20T00:00:00.000Z");
   });
 
+  it("replays an unsettled dispatch without consuming an attempt", () => {
+    insertAndRegister([{ id: "100" }]);
+    const before = enrich.queueEntry("100:someone");
+    enrich.replayAttemptEvent({
+      unit_id: "100:someone",
+      input_hash: before?.inputHash ?? "missing",
+      contract_hash: CONTRACT_HASH,
+      attempt: 1,
+      outcome: "dispatched",
+      error_message: "provider dispatch reserved before request",
+      at: NOW.toISOString(),
+      next_retry_at: new Date(NOW.getTime() + 60_000).toISOString(),
+      reserved_cost_usd: 0.25,
+    });
+    const after = enrich.queueEntry("100:someone");
+    expect(after).toMatchObject({ status: "retrying", attempts: 0 });
+    expect(enrich.claimQueued(10)).toHaveLength(0);
+  });
+
   it("skips claim until next_retry_at has passed", () => {
     insertAndRegister([{ id: "100" }]);
     const future = new Date(NOW.getTime() + 60_000);
