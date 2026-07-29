@@ -577,7 +577,7 @@ async function drainClaimedConcurrent(
         if (wave.length === 0) {
           // Reuse the sequential splitter/blocker when even one slot cannot
           // admit this batch, so a truly oversized unit cannot stall later Jobs.
-          const batchStopped = await processBatch(deps, batch, receipt, contractHash);
+          const batchStopped = await processBatch(deps, batch, receipt, contractHash, true);
           start += batch.length;
           if (batchStopped !== undefined) return batchStopped;
           break;
@@ -595,7 +595,12 @@ async function drainClaimedConcurrent(
       reservedTokens += promptTokenUpperBound(messages) + (maxCompletionTokens ?? 0);
       reservedCostUsd += ceilings.maxCostPerCallUsd ?? 0;
     }
-    if (wave.length === 0) return stoppedBy;
+    if (wave.length === 0) {
+      if (stoppedBy !== undefined) return stoppedBy;
+      // A token-split fallback settled the head batch; continue with the
+      // remaining claimed units rather than ending the tick prematurely.
+      continue;
+    }
     receipt.peak_concurrency = Math.max(receipt.peak_concurrency ?? 0, wave.length);
     receipt.commit_queue_peak = Math.max(receipt.commit_queue_peak ?? 0, wave.length);
     receipt.reservation_peak_usd = Math.max(receipt.reservation_peak_usd ?? 0, reservedCostUsd);
@@ -776,6 +781,7 @@ async function processBatch(
   batch: readonly QueueItem[],
   receipt: EnrichReceipt,
   contractHash: string,
+  reserveDispatch = false,
 ): Promise<string | undefined> {
   const units: PromptUnit[] = batch.map((item) => ({
     unitId: item.unitId,
@@ -784,7 +790,21 @@ async function processBatch(
   const messages = messagesForUnits(deps, units);
   const maxCompletionTokens = completionTokenLimit(messages, receipt, deps.ceilings);
   if (maxCompletionTokens === 0) {
-    return handlePromptTokenStop(deps, batch, units, receipt, contractHash);
+    return handlePromptTokenStop(deps, batch, units, receipt, contractHash, reserveDispatch);
+  }
+  if (reserveDispatch) {
+    await persistDispatchReservations(
+      deps,
+      [
+        {
+          batch,
+          units,
+          messages,
+          ...(maxCompletionTokens === undefined ? {} : { maxCompletionTokens }),
+        },
+      ],
+      deps.ceilings ?? {},
+    );
   }
   const outcome = recordLlmOutcome(
     receipt,
@@ -833,12 +853,19 @@ async function handlePromptTokenStop(
   units: readonly PromptUnit[],
   receipt: EnrichReceipt,
   contractHash: string,
+  reserveDispatch: boolean,
 ): Promise<string | undefined> {
   if (batch.length > 1) {
     const middle = Math.ceil(batch.length / 2);
-    const firstStopped = await processBatch(deps, batch.slice(0, middle), receipt, contractHash);
+    const firstStopped = await processBatch(
+      deps,
+      batch.slice(0, middle),
+      receipt,
+      contractHash,
+      reserveDispatch,
+    );
     if (firstStopped !== undefined) return firstStopped;
-    return processBatch(deps, batch.slice(middle), receipt, contractHash);
+    return processBatch(deps, batch.slice(middle), receipt, contractHash, reserveDispatch);
   }
   const item = batch[0];
   if (item !== undefined && unitPromptExceedsRunCeiling(deps, units)) {

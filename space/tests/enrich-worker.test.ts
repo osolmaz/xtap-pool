@@ -216,6 +216,43 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry("101:someone")?.status).toBe("done");
   });
 
+  it("continues and records reservations after splitting a token-constrained batch", async () => {
+    seedUnit("100", "token split unit");
+    let calibrationLimit: number | undefined;
+    const calibration: LlmClient = (messages, options) => {
+      calibrationLimit = options?.maxCompletionTokens;
+      return respondingClient(withEvidence)(messages);
+    };
+    await runEnrichTick(
+      deps(calibration, {
+        maxUnitsPerTick: 1,
+        unitsPerCall: 1,
+        ceilings: { maxTokens: 50_000 },
+      }),
+    );
+
+    seedUnit("101", "token split unit");
+    seedUnit("102", "token split unit");
+    seedUnit("103", "token split unit");
+    const promptUpperBound = 50_000 - (calibrationLimit ?? 0);
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxUnitsPerTick: 3,
+        unitsPerCall: 2,
+        maxConcurrentCalls: 2,
+        ceilings: { maxTokens: promptUpperBound + 100 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({ units: 3, calls: 3 });
+    const attempts = (hub.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl") ?? "")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { unit_id: string; outcome: string });
+    expect(attempts.filter((event) => event.outcome === "dispatched")).toHaveLength(3);
+    expect(enrichStore.queueEntry("103:someone")?.status).toBe("done");
+  });
+
   it("halves later waves after a provider timeout", async () => {
     seedUnit("100", "first unit");
     seedUnit("101", "second unit");
