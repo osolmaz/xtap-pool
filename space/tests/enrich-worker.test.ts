@@ -788,6 +788,14 @@ describe("runEnrichTick", () => {
             name: "opaque-subject",
             evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
           },
+          {
+            name: "opaque-subject-rejected",
+            evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
+          },
+          {
+            name: "opaque-subject-unknown-cost",
+            evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
+          },
         ],
         model: "test-model",
         taxonomy_version: 1,
@@ -797,6 +805,9 @@ describe("runEnrichTick", () => {
     const candidate = enrichStore.candidateEventIfNew("opaque-subject").event;
     if (candidate === undefined) throw new Error("expected candidate");
     enrichStore.applyRegistryEvent(candidate);
+    const rejectedCandidate = enrichStore.candidateEventIfNew("opaque-subject-rejected").event;
+    if (rejectedCandidate === undefined) throw new Error("expected rejected candidate");
+    enrichStore.applyRegistryEvent(rejectedCandidate);
     expect(enrichStore.promotionSignals("opaque-subject")).toEqual({
       units: 15,
       authors: 8,
@@ -804,22 +815,40 @@ describe("runEnrichTick", () => {
     });
     const receipt = await runEnrichTick(
       deps(respondingClient(withEvidence), {
-        judgeFreeLabel: () =>
+        judgeFreeLabel: (name) =>
           Promise.resolve({
-            verdict: true,
+            verdict: name !== "opaque-subject-rejected",
             usage: { prompt_tokens: 4, completion_tokens: 2, cost_usd: 0.03 },
           }),
       }),
     );
     expect(receipt).toMatchObject({
       units: 0,
-      calls: 1,
-      prompt_tokens: 4,
-      completion_tokens: 2,
-      cost_usd: 0.03,
+      calls: 2,
+      prompt_tokens: 8,
+      completion_tokens: 4,
+      cost_usd: 0.06,
       new_approvals: 1,
+      new_rejections: 1,
     });
     expect(enrichStore.registryStatus("opaque-subject")).toBe("approved");
+    expect(enrichStore.registryStatus("opaque-subject-rejected")).toBe("rejected");
+
+    const unknownCost = enrichStore.candidateEventIfNew("opaque-subject-unknown-cost").event;
+    if (unknownCost === undefined) throw new Error("expected unknown-cost candidate");
+    enrichStore.applyRegistryEvent(unknownCost);
+    const unmeasured = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        judgeFreeLabel: () =>
+          Promise.resolve({ verdict: true, usage: { prompt_tokens: 4, completion_tokens: 2 } }),
+        ceilings: { maxCostUsd: 1, maxCostPerCallUsd: 0.25 },
+      }),
+    );
+    expect(unmeasured).toMatchObject({
+      calls: 1,
+      cost_usd: undefined,
+      stopped_by: "cost_unmeasured",
+    });
   });
 
   it("assigns strictly increasing registry revisions to multiple discoveries in one batch", async () => {
