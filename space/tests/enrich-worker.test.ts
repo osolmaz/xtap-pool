@@ -110,7 +110,6 @@ function deps(llm: LlmClient, overrides: Partial<EnrichWorkerDeps> = {}): Enrich
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
     llm,
     model: "test-model",
-    maxUnitsPerTick: 100,
     now: () => NOW,
     workerId: "worker-1",
     leaseMs: 60_000,
@@ -146,9 +145,7 @@ describe("runEnrichTick", () => {
         });
       });
 
-    const running = runEnrichTick(
-      deps(delayed, { maxUnitsPerTick: 3, unitsPerCall: 1, maxConcurrentCalls: 3 }),
-    );
+    const running = runEnrichTick(deps(delayed, { unitsPerCall: 1, maxConcurrentCalls: 3 }));
     await vi.waitFor(() => {
       expect(resolveCalls).toHaveLength(3);
     });
@@ -179,78 +176,20 @@ describe("runEnrichTick", () => {
     expect(rows.map((row) => row.unit_id)).toEqual(["100:someone", "101:someone", "102:someone"]);
   });
 
-  it("reduces an otherwise unaffordable token wave before dispatch", async () => {
-    seedUnit("100", "token ceiling unit");
-    let calibrationLimit: number | undefined;
-    const calibration: LlmClient = (messages, options) => {
-      calibrationLimit = options?.maxCompletionTokens;
-      return respondingClient(withEvidence)(messages);
-    };
-    await runEnrichTick(
-      deps(calibration, {
-        maxUnitsPerTick: 1,
-        unitsPerCall: 1,
-        ceilings: { maxTokens: 50_000 },
-      }),
-    );
-    expect(calibrationLimit).toBeDefined();
+  it("keeps claiming bounded pages until the eligible queue is drained", async () => {
+    for (let id = 100; id < 105; id += 1) seedUnit(String(id), `unit ${String(id)}`);
 
-    seedUnit("101", "token ceiling unit");
-    seedUnit("102", "token ceiling unit");
-    const promptUpperBound = 50_000 - (calibrationLimit ?? 0);
     const receipt = await runEnrichTick(
       deps(respondingClient(withEvidence), {
-        maxUnitsPerTick: 2,
         unitsPerCall: 1,
         maxConcurrentCalls: 2,
-        ceilings: { maxTokens: promptUpperBound + 1 },
       }),
     );
 
-    expect(receipt).toMatchObject({
-      units: 1,
-      calls: 1,
-      peak_concurrency: 1,
-      stopped_by: "max_tokens",
-    });
-    expect(enrichStore.queueEntry("101:someone")?.status).toBe("done");
-  });
-
-  it("continues and records reservations after splitting a token-constrained batch", async () => {
-    seedUnit("100", "token split unit");
-    let calibrationLimit: number | undefined;
-    const calibration: LlmClient = (messages, options) => {
-      calibrationLimit = options?.maxCompletionTokens;
-      return respondingClient(withEvidence)(messages);
-    };
-    await runEnrichTick(
-      deps(calibration, {
-        maxUnitsPerTick: 1,
-        unitsPerCall: 1,
-        ceilings: { maxTokens: 50_000 },
-      }),
-    );
-
-    seedUnit("101", "token split unit");
-    seedUnit("102", "token split unit");
-    seedUnit("103", "token split unit");
-    const promptUpperBound = 50_000 - (calibrationLimit ?? 0);
-    const receipt = await runEnrichTick(
-      deps(respondingClient(withEvidence), {
-        maxUnitsPerTick: 3,
-        unitsPerCall: 2,
-        maxConcurrentCalls: 2,
-        ceilings: { maxTokens: promptUpperBound + 100 },
-      }),
-    );
-
-    expect(receipt).toMatchObject({ units: 3, calls: 3 });
-    const attempts = (hub.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl") ?? "")
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line) as { unit_id: string; outcome: string });
-    expect(attempts.filter((event) => event.outcome === "dispatched")).toHaveLength(3);
-    expect(enrichStore.queueEntry("103:someone")?.status).toBe("done");
+    expect(receipt).toMatchObject({ units: 5, calls: 5, peak_concurrency: 2 });
+    for (let id = 100; id < 105; id += 1) {
+      expect(enrichStore.queueEntry(`${String(id)}:someone`)?.status).toBe("done");
+    }
   });
 
   it("halves later waves after a provider timeout", async () => {
@@ -266,9 +205,7 @@ describe("runEnrichTick", () => {
       return immediate(messages);
     };
 
-    const receipt = await runEnrichTick(
-      deps(model, { maxUnitsPerTick: 4, unitsPerCall: 1, maxConcurrentCalls: 2 }),
-    );
+    const receipt = await runEnrichTick(deps(model, { unitsPerCall: 1, maxConcurrentCalls: 2 }));
     expect(receipt).toMatchObject({
       units: 3,
       failures: 1,
@@ -285,7 +222,6 @@ describe("runEnrichTick", () => {
 
     const receipt = await runEnrichTick(
       deps(model, {
-        maxUnitsPerTick: 2,
         unitsPerCall: 1,
         maxConcurrentCalls: 2,
         ceilings: { maxCostUsd: 0.5, maxCostPerCallUsd: 0.25 },
@@ -312,7 +248,6 @@ describe("runEnrichTick", () => {
 
     const receipt = await runEnrichTick(
       deps(lowCost, {
-        maxUnitsPerTick: 4,
         unitsPerCall: 1,
         maxConcurrentCalls: 2,
         ceilings: { maxCostUsd: 0.6, maxCostPerCallUsd: 0.25 },
@@ -558,15 +493,14 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry("100:someone")?.status).toBe("done");
   });
 
-  it("counts failed units once for ceilings and keeps error-rate accounting bounded", async () => {
+  it("counts failed units once and keeps error-rate accounting bounded", async () => {
     seedUnit("100", "first");
     seedUnit("101", "second");
     seedUnit("102", "third");
     const failing: LlmClient = () => Promise.reject(new Error("router down"));
-    const receipt = await runEnrichTick(
-      deps(failing, { unitsPerCall: 1, ceilings: { maxUnits: 2 } }),
-    );
-    expect(receipt).toMatchObject({ calls: 2, failures: 2, retries: 2, stopped_by: "max_units" });
+    const receipt = await runEnrichTick(deps(failing, { unitsPerCall: 1 }));
+    expect(receipt).toMatchObject({ calls: 3, failures: 3, retries: 3 });
+    expect(receipt.stopped_by).toBeUndefined();
     expect(receipt.failures / (receipt.units + receipt.failures)).toBeLessThanOrEqual(1);
   });
 
@@ -606,7 +540,6 @@ describe("runEnrichTick", () => {
 
     const receipt = await runEnrichTick(
       deps(model, {
-        maxUnitsPerTick: 3,
         unitsPerCall: 1,
         maxConcurrentCalls: 2,
         ceilings: { maxCostUsd: 1, maxCostPerCallUsd: 0.25 },
@@ -617,15 +550,9 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry("102:someone")?.status).toBe("pending");
   });
 
-  it("honors zero-valued token and elapsed ceilings before leasing provider work", async () => {
+  it("honors a zero-valued elapsed ceiling before leasing provider work", async () => {
     seedUnit("100", "vllm");
     const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
-    await expect(runEnrichTick(deps(model, { ceilings: { maxTokens: 0 } }))).resolves.toMatchObject(
-      {
-        stopped_by: "max_tokens",
-        calls: 0,
-      },
-    );
     await expect(
       runEnrichTick(deps(model, { ceilings: { maxElapsedMs: 0 } })),
     ).resolves.toMatchObject({
@@ -633,39 +560,6 @@ describe("runEnrichTick", () => {
       calls: 0,
     });
     expect(model).not.toHaveBeenCalled();
-  });
-
-  it("durably blocks a unit whose full prompt cannot fit the run token ceiling", async () => {
-    const unitId = seedUnit("100", "x".repeat(2_000));
-    const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
-    await expect(
-      runEnrichTick(deps(model, { ceilings: { maxTokens: 100 } })),
-    ).resolves.toMatchObject({ calls: 0, failures: 1, retries: 1, blocked: 1 });
-    expect(model).not.toHaveBeenCalled();
-    expect(enrichStore.queueEntry(unitId)).toMatchObject({
-      status: "blocked",
-      attempts: 1,
-      lastError: "unit prompt exceeds the configured full-run token ceiling",
-    });
-    expect(hubJson("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl")).toMatchObject({
-      unit_id: unitId,
-      outcome: "blocked",
-    });
-  });
-
-  it("isolates an oversized unit and continues with other claimed work", async () => {
-    const oversized = seedUnit("100", "x".repeat(20_000));
-    const normal = seedUnit("101", "vllm ships fp8 kernels");
-    const receipt = await runEnrichTick(
-      deps(respondingClient(withEvidence), {
-        maxUnitsPerTick: 2,
-        unitsPerCall: 2,
-        ceilings: { maxTokens: 8_000 },
-      }),
-    );
-    expect(receipt).toMatchObject({ calls: 1, units: 1, failures: 1, blocked: 1 });
-    expect(enrichStore.queueEntry(oversized)?.status).toBe("blocked");
-    expect(enrichStore.queueEntry(normal)?.status).toBe("done");
   });
 
   it("allows clean work under zero-valued error and discard ceilings", async () => {
@@ -685,7 +579,6 @@ describe("runEnrichTick", () => {
     const failing: LlmClient = () => Promise.reject(new Error("router down"));
     const receipt = await runEnrichTick(
       deps(failing, {
-        maxUnitsPerTick: 2,
         unitsPerCall: 1,
         ceilings: { maxErrorRate: 0 },
       }),
@@ -710,17 +603,21 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry(unitId)?.status).toBe("retrying");
   });
 
-  it("releases claimed units that were not processed after a worker ceiling", async () => {
+  it("releases claimed units that were not processed after a safety ceiling", async () => {
     const first = seedUnit("100", "vllm ships fp8 kernels");
     const second = seedUnit("101", "vllm ships fp8 kernels");
+    const base = respondingClient(withEvidence);
+    const metered: LlmClient = async (messages) => ({
+      ...(await base(messages)),
+      usage: { prompt_tokens: 11, completion_tokens: 7, cost_usd: 0.1 },
+    });
     const receipt = await runEnrichTick(
-      deps(respondingClient(withEvidence), {
-        maxUnitsPerTick: 2,
+      deps(metered, {
         unitsPerCall: 1,
-        ceilings: { maxUnits: 1 },
+        ceilings: { maxCostUsd: 0.25, maxCostPerCallUsd: 0.2 },
       }),
     );
-    expect(receipt).toMatchObject({ units: 1, stopped_by: "max_units" });
+    expect(receipt).toMatchObject({ units: 1, stopped_by: "max_cost_usd" });
     expect(enrichStore.queueEntry(first)?.status).toBe("done");
     expect(enrichStore.queueEntry(second)?.status).toBe("pending");
   });

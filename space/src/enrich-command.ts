@@ -18,10 +18,11 @@ import { TweetStore } from "./store.js";
 
 /**
  * Standalone worker: rebuilds the local mirror from the dataset (system of
- * record), runs one bounded worker tick, and exits. This is the production
- * scheduling entrypoint — the API Space no longer runs an interval loop.
+ * record), drains eligible work until a safety ceiling is reached, and exits.
+ * This is the production scheduling entrypoint — the API Space no longer runs
+ * an interval loop.
  */
-// eslint-disable-next-line complexity -- Production entrypoint validates config, rebuilds durable state, and reports its bounded run.
+// eslint-disable-next-line complexity -- Production entrypoint validates config, rebuilds durable state, and reports its safety-bounded run.
 export async function runEnrichCommand(env: Record<string, string | undefined>): Promise<void> {
   const config = loadConfig(env);
   if (!config.enrichEnabled) {
@@ -73,8 +74,6 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
         }),
   });
   const ceilings: WorkerCeilings = {
-    maxUnits: config.enrichMaxUnitsPerTick,
-    maxTokens: config.enrichMaxTokens,
     maxElapsedMs: config.enrichMaxElapsedMs,
     maxErrorRate: config.enrichMaxErrorRate,
     maxCostUsd: config.enrichMaxCostUsd,
@@ -89,7 +88,6 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     model: config.llmModel,
     verifyHubLabel: createExactHubVerifier(),
     judgeFreeLabel: createFreeLabelJudge(llm),
-    maxUnitsPerTick: config.enrichMaxUnitsPerTick,
     maxConcurrentCalls: config.enrichMaxConcurrentCalls,
     ...(env["JOB_ID"] === undefined ? {} : { workerId: env["JOB_ID"], writeEmptyReceipt: true }),
     leaseMs: DEFAULT_LEASE_MS,

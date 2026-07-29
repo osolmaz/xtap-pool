@@ -277,8 +277,6 @@ export function createFreeLabelJudge(llm: LlmClient): FreeLabelJudge {
 }
 
 export type WorkerCeilings = {
-  maxUnits?: number | undefined;
-  maxTokens?: number | undefined;
   maxElapsedMs?: number | undefined;
   maxErrorRate?: number | undefined;
   maxCostUsd?: number | undefined;
@@ -312,7 +310,6 @@ export type EnrichWorkerDeps = {
   taxonomy: EnrichTaxonomy;
   llm: LlmClient;
   model: string;
-  maxUnitsPerTick: number;
   /** Maximum simultaneous provider requests in this one physical Job. */
   maxConcurrentCalls?: number;
   unitsPerCall?: number;
@@ -407,24 +404,38 @@ export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichRecei
   deps.enrichStore.setContractHash(contractHash);
   const receipt = initReceipt(contractHash, workerId, deps.now, maxConcurrentCalls);
   deps.enrichStore.recoverExpiredLeases();
-  const claimed = deps.enrichStore.claimBatch({
-    limit: deps.maxUnitsPerTick,
-    workerId,
-    leaseMs: deps.leaseMs ?? DEFAULT_LEASE_MS,
-  });
+  const size = deps.unitsPerCall ?? DEFAULT_UNITS_PER_CALL;
+  const claimPageSize = size * maxConcurrentCalls;
+  const startedAt = deps.now().getTime();
+  let claimed: readonly QueueItem[] = [];
   try {
-    const size = deps.unitsPerCall ?? DEFAULT_UNITS_PER_CALL;
-    const startedAt = deps.now().getTime();
-    const stopped = await drainClaimed(
-      deps,
-      claimed,
-      size,
-      receipt,
-      contractHash,
-      startedAt,
-      maxConcurrentCalls,
-    );
-    if (stopped !== undefined) receipt.stopped_by = stopped;
+    while (receipt.stopped_by === undefined) {
+      const ceiling = ceilingHit(receipt, deps.ceilings ?? {}, deps.now, startedAt);
+      if (ceiling !== undefined) {
+        receipt.stopped_by = ceiling;
+        break;
+      }
+      claimed = deps.enrichStore.claimBatch({
+        limit: claimPageSize,
+        workerId,
+        leaseMs: deps.leaseMs ?? DEFAULT_LEASE_MS,
+      });
+      if (claimed.length === 0) break;
+      receipt.stopped_by = await drainClaimed(
+        deps,
+        claimed,
+        size,
+        receipt,
+        contractHash,
+        startedAt,
+        maxConcurrentCalls,
+      );
+      deps.enrichStore.releaseClaims(
+        workerId,
+        claimed.map((item) => item.unitId),
+      );
+      claimed = [];
+    }
     const completedCeiling = ceilingHit(receipt, deps.ceilings ?? {}, deps.now, startedAt);
     if (completedCeiling !== undefined) receipt.stopped_by ??= completedCeiling;
     const registryStopped = await settleRegistryDecisions(deps, receipt);
@@ -492,12 +503,7 @@ async function drainClaimedSequential(
     if (stopped !== undefined) return stopped;
     const costStopped = costCallPreflight(receipt, ceilings);
     if (costStopped !== undefined) return costStopped;
-    const remainingUnits =
-      ceilings.maxUnits === undefined
-        ? size
-        : Math.min(size, ceilings.maxUnits - unitsProcessed(receipt));
-    if (remainingUnits <= 0) return "max_units";
-    const batch = claimed.slice(start, start + remainingUnits);
+    const batch = claimed.slice(start, start + size);
     const batchStopped = await processBatch(deps, batch, receipt, contractHash);
     if (batchStopped !== undefined) return batchStopped;
     start += batch.length;
@@ -509,7 +515,6 @@ type PreparedBatch = {
   batch: readonly QueueItem[];
   units: readonly PromptUnit[];
   messages: readonly LlmMessage[];
-  maxCompletionTokens?: number;
 };
 
 /**
@@ -537,7 +542,6 @@ async function drainClaimedConcurrent(
     if (ceiling !== undefined) return ceiling;
     const wave: PreparedBatch[] = [];
     let reservedCostUsd = 0;
-    let reservedTokens = 0;
     let reservedUnits = 0;
     while (wave.length < activeLimit && start + reservedUnits < claimed.length) {
       const costStopped = costCallPreflight(receipt, ceilings, reservedCostUsd);
@@ -547,54 +551,14 @@ async function drainClaimedConcurrent(
         if (wave.length === 0) stoppedBy = costStopped;
         break;
       }
-      const remainingUnits =
-        ceilings.maxUnits === undefined
-          ? size
-          : Math.min(size, ceilings.maxUnits - unitsProcessed(receipt) - reservedUnits);
-      if (remainingUnits <= 0) {
-        stoppedBy = "max_units";
-        break;
-      }
-      const batch = claimed.slice(start + reservedUnits, start + reservedUnits + remainingUnits);
+      const batch = claimed.slice(start + reservedUnits, start + reservedUnits + size);
       const units = batch.map((item) => ({
         unitId: item.unitId,
         posts: promptPosts(deps, item.unitId),
       }));
       const messages = messagesForUnits(deps, units);
-      const maxCompletionTokens = concurrentCompletionTokenLimit(
-        messages,
-        receipt,
-        ceilings,
-        reservedTokens,
-        wave.length,
-        activeLimit,
-      );
-      if (maxCompletionTokens === 0) {
-        if (wave.length === 0 && activeLimit > 1) {
-          // A smaller wave may fit under the remaining token ceiling. Do not
-          // release and repeatedly reclaim this head batch without trying it.
-          activeLimit = Math.max(1, Math.floor(activeLimit / 2));
-          continue;
-        }
-        if (wave.length === 0) {
-          // Reuse the sequential splitter/blocker when even one slot cannot
-          // admit this batch, so a truly oversized unit cannot stall later Jobs.
-          const batchStopped = await processBatch(deps, batch, receipt, contractHash, true);
-          start += batch.length;
-          if (batchStopped !== undefined) return batchStopped;
-          break;
-        }
-        stoppedBy = "max_tokens";
-        break;
-      }
-      wave.push({
-        batch,
-        units,
-        messages,
-        ...(maxCompletionTokens === undefined ? {} : { maxCompletionTokens }),
-      });
+      wave.push({ batch, units, messages });
       reservedUnits += batch.length;
-      reservedTokens += promptTokenUpperBound(messages) + (maxCompletionTokens ?? 0);
       reservedCostUsd += ceilings.maxCostPerCallUsd ?? 0;
     }
     if (wave.length === 0) {
@@ -607,9 +571,7 @@ async function drainClaimedConcurrent(
     receipt.commit_queue_peak = Math.max(receipt.commit_queue_peak ?? 0, wave.length);
     receipt.reservation_peak_usd = Math.max(receipt.reservation_peak_usd ?? 0, reservedCostUsd);
     await persistDispatchReservations(deps, wave, ceilings);
-    const outcomes = await Promise.all(
-      wave.map((prepared) => callLlm(deps, prepared.messages, prepared.maxCompletionTokens)),
-    );
+    const outcomes = await Promise.all(wave.map((prepared) => callLlm(deps, prepared.messages)));
     for (const [index, prepared] of wave.entries()) {
       const outcome = outcomes[index];
       if (outcome === undefined) throw new Error("missing concurrent provider outcome");
@@ -630,20 +592,6 @@ async function drainClaimedConcurrent(
     start += reservedUnits;
   }
   return stoppedBy;
-}
-
-function concurrentCompletionTokenLimit(
-  messages: readonly LlmMessage[],
-  receipt: EnrichReceipt,
-  ceilings: WorkerCeilings,
-  reservedTokens: number,
-  reservedCalls: number,
-  activeLimit: number,
-): number | undefined {
-  if (ceilings.maxTokens === undefined) return undefined;
-  const slots = Math.max(1, activeLimit - reservedCalls);
-  const remaining = ceilings.maxTokens - tokensUsed(receipt) - reservedTokens;
-  return Math.max(0, Math.floor(remaining / slots) - promptTokenUpperBound(messages));
 }
 
 function isProviderPressure(outcome: LlmOutcome): boolean {
@@ -687,10 +635,6 @@ function promptPosts(deps: EnrichWorkerDeps, unitId: string): PromptPost[] {
   }));
 }
 
-function tokensUsed(receipt: EnrichReceipt): number {
-  return receipt.prompt_tokens + receipt.completion_tokens;
-}
-
 function promptTokenUpperBound(messages: readonly LlmMessage[]): number {
   return (
     PROMPT_TOKEN_OVERHEAD +
@@ -708,16 +652,6 @@ function completionTokensForRemaining(
 ): number | undefined {
   if (remainingTokens === undefined) return undefined;
   return Math.max(0, Math.floor(remainingTokens - promptTokenUpperBound(messages)));
-}
-
-function completionTokenLimit(
-  messages: readonly LlmMessage[],
-  receipt: EnrichReceipt,
-  ceilings: WorkerCeilings | undefined,
-): number | undefined {
-  const remaining =
-    ceilings?.maxTokens === undefined ? undefined : ceilings.maxTokens - tokensUsed(receipt);
-  return completionTokensForRemaining(messages, remaining);
 }
 
 function errorRate(receipt: EnrichReceipt): number {
@@ -753,8 +687,6 @@ function ceilingHit(
   const qualityStopped = qualityCeilingHit(receipt, ceilings);
   if (qualityStopped !== undefined) return qualityStopped;
   const checks: [number | undefined, number, string][] = [
-    [ceilings.maxUnits, unitsProcessed(receipt), "max_units"],
-    [ceilings.maxTokens, tokensUsed(receipt), "max_tokens"],
     [ceilings.maxElapsedMs, now().getTime() - startedAt, "max_elapsed"],
     [ceilings.maxCostUsd, receipt.cost_usd ?? 0, "max_cost_usd"],
   ];
@@ -783,36 +715,13 @@ async function processBatch(
   batch: readonly QueueItem[],
   receipt: EnrichReceipt,
   contractHash: string,
-  reserveDispatch = false,
 ): Promise<string | undefined> {
   const units: PromptUnit[] = batch.map((item) => ({
     unitId: item.unitId,
     posts: promptPosts(deps, item.unitId),
   }));
   const messages = messagesForUnits(deps, units);
-  const maxCompletionTokens = completionTokenLimit(messages, receipt, deps.ceilings);
-  if (maxCompletionTokens === 0) {
-    return handlePromptTokenStop(deps, batch, units, receipt, contractHash, reserveDispatch);
-  }
-  if (reserveDispatch) {
-    await persistDispatchReservations(
-      deps,
-      [
-        {
-          batch,
-          units,
-          messages,
-          ...(maxCompletionTokens === undefined ? {} : { maxCompletionTokens }),
-        },
-      ],
-      deps.ceilings ?? {},
-    );
-  }
-  const outcome = recordLlmOutcome(
-    receipt,
-    await callLlm(deps, messages, maxCompletionTokens),
-    deps.ceilings ?? {},
-  );
+  const outcome = recordLlmOutcome(receipt, await callLlm(deps, messages), deps.ceilings ?? {});
   return settleLlmOutcome(deps, batch, units, outcome, receipt, contractHash);
 }
 
@@ -849,34 +758,6 @@ async function settleLlmOutcome(
   return undefined;
 }
 
-async function handlePromptTokenStop(
-  deps: EnrichWorkerDeps,
-  batch: readonly QueueItem[],
-  units: readonly PromptUnit[],
-  receipt: EnrichReceipt,
-  contractHash: string,
-  reserveDispatch: boolean,
-): Promise<string | undefined> {
-  if (batch.length > 1) {
-    const middle = Math.ceil(batch.length / 2);
-    const firstStopped = await processBatch(
-      deps,
-      batch.slice(0, middle),
-      receipt,
-      contractHash,
-      reserveDispatch,
-    );
-    if (firstStopped !== undefined) return firstStopped;
-    return processBatch(deps, batch.slice(middle), receipt, contractHash, reserveDispatch);
-  }
-  const item = batch[0];
-  if (item !== undefined && unitPromptExceedsRunCeiling(deps, units)) {
-    await blockOversizedUnit(deps, item, receipt, contractHash);
-    return undefined;
-  }
-  return "max_tokens";
-}
-
 function messagesForUnits(deps: EnrichWorkerDeps, units: readonly PromptUnit[]): LlmMessage[] {
   const rejected = [...new Set([...HARD_REJECTED_NAMES, ...deps.enrichStore.rejectedNames()])].sort(
     (left, right) => left.localeCompare(right),
@@ -884,28 +765,12 @@ function messagesForUnits(deps: EnrichWorkerDeps, units: readonly PromptUnit[]):
   return buildMessages(deps.taxonomy.labels, rejected, units);
 }
 
-function unitPromptExceedsRunCeiling(
-  deps: EnrichWorkerDeps,
-  units: readonly PromptUnit[],
-): boolean {
-  const maxTokens = deps.ceilings?.maxTokens;
-  return (
-    maxTokens !== undefined &&
-    maxTokens > 0 &&
-    completionTokensForRemaining(messagesForUnits(deps, units), maxTokens) === 0
-  );
-}
-
 async function callLlm(
   deps: EnrichWorkerDeps,
   messages: readonly LlmMessage[],
-  maxCompletionTokens: number | undefined,
 ): Promise<LlmOutcome> {
   try {
-    const result = await deps.llm(
-      messages,
-      maxCompletionTokens === undefined ? undefined : { maxCompletionTokens },
-    );
+    const result = await deps.llm(messages);
     return { ok: true, content: result.content, usage: result.usage };
   } catch (error) {
     return {
@@ -1251,30 +1116,6 @@ function stampRegistryEvents(
   return events.map((event, index) => ({ ...event, registry_revision: base + index + 1 }));
 }
 
-async function blockOversizedUnit(
-  deps: EnrichWorkerDeps,
-  item: QueueItem,
-  receipt: EnrichReceipt,
-  contractHash: string,
-): Promise<void> {
-  const at = deps.now();
-  await persistAttemptAndApply(deps, {
-    unit_id: item.unitId,
-    input_hash: item.inputHash,
-    contract_hash: contractHash,
-    attempt: item.attempts + 1,
-    outcome: "blocked",
-    error_class: "other",
-    error_message: "unit prompt exceeds the configured full-run token ceiling",
-    at: at.toISOString(),
-    first_queued_at: item.firstQueuedAt,
-    next_retry_at: new Date(at.getTime() + BLOCKED_RETRY_MS).toISOString(),
-  });
-  receipt.failures += 1;
-  receipt.retries += 1;
-  receipt.blocked += 1;
-}
-
 async function failBatch(
   deps: EnrichWorkerDeps,
   batch: readonly QueueItem[],
@@ -1471,14 +1312,9 @@ async function settleRegistryDecisions(
     ) {
       const costStopped = costCallPreflight(receipt, deps.ceilings ?? {});
       if (costStopped !== undefined) return costStopped;
-      const remainingTokens =
-        deps.ceilings?.maxTokens === undefined
-          ? undefined
-          : deps.ceilings.maxTokens - tokensUsed(receipt);
       const reviewed = await deps.judgeFreeLabel(
         name,
         assignments.flatMap((assignment) => assignment.evidence).slice(0, 20),
-        remainingTokens,
       );
       if (typeof reviewed === "object" && reviewed.stopped_by !== undefined) {
         return reviewed.stopped_by;

@@ -2,8 +2,9 @@
 // Inference Providers router (GLM 5.2) using real pool tweets, with a
 // no-op dataset mirror so nothing is written anywhere durable.
 //
-//   HF_TOKEN=... node scripts/validate-enrichment-live.mjs [maxUnits]
+//   HF_TOKEN=... node scripts/validate-enrichment-live.mjs [sampleUnits]
 
+import { unitIdFor } from "@xtap-pool/shared";
 import { TweetStore } from "../space/dist/src/store.js";
 import { EnrichStore, ensureEnrichmentTables } from "../space/dist/src/enrich-store.js";
 import { DEFAULT_TAXONOMY } from "../space/dist/src/enrich-config.js";
@@ -14,9 +15,9 @@ if (!token) {
   console.error("HF_TOKEN required");
   process.exit(1);
 }
-const maxUnits = Number(process.argv[2] ?? "40");
-if (!Number.isInteger(maxUnits) || maxUnits < 1 || maxUnits > 200) {
-  console.error("maxUnits must be an integer between 1 and 200");
+const sampleUnits = Number(process.argv[2] ?? "40");
+if (!Number.isInteger(sampleUnits) || sampleUnits < 1 || sampleUnits > 200) {
+  console.error("sampleUnits must be an integer between 1 and 200");
   process.exit(1);
 }
 
@@ -45,13 +46,19 @@ async function fetchPoolSample() {
 }
 
 const tweets = await fetchPoolSample();
-console.error(`sample: ${tweets.length} pool tweets`);
+const selectedUnitIds = new Set();
+for (const tweet of tweets) {
+  if (selectedUnitIds.size >= sampleUnits) break;
+  selectedUnitIds.add(unitIdFor(tweet));
+}
+const selectedTweets = tweets.filter((tweet) => selectedUnitIds.has(unitIdFor(tweet)));
+console.error(`sample: ${selectedUnitIds.size} units / ${selectedTweets.length} pool tweets`);
 
 const store = new TweetStore(":memory:");
 ensureEnrichmentTables(store.database);
 const enrichStore = new EnrichStore(store.database, 1);
-store.insert(tweets);
-enrichStore.registerTweets(tweets);
+store.insert(selectedTweets);
+enrichStore.registerTweets(selectedTweets);
 
 const mirror = {
   commitBatch: async () => {},
@@ -66,7 +73,6 @@ const receipt = await runEnrichTick({
   taxonomy: { labels: [...DEFAULT_TAXONOMY], version: 1 },
   llm,
   model: "zai-org/GLM-5.2",
-  maxUnitsPerTick: maxUnits,
   unitsPerCall: 6,
   now: () => new Date(),
 });

@@ -32,9 +32,7 @@ export const ENRICHMENT_JOB_LABELS = {
 export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> = {
   ENRICH_JOB_SCHEDULE: "17 */6 * * *",
   ENRICH_JOB_TIMEOUT_SECONDS: "2700",
-  ENRICH_MAX_UNITS_PER_TICK: "50",
   ENRICH_MAX_CONCURRENT_CALLS: "1",
-  ENRICH_MAX_TOKENS: "400000",
   ENRICH_MAX_ELAPSED_MS: "2400000",
   ENRICH_MAX_ERROR_RATE: "0.25",
   ENRICH_MAX_COST_USD: "2",
@@ -73,11 +71,9 @@ const jobVariablesSchema = z
   .object({
     ENRICH_JOB_SCHEDULE: cronSchedule,
     ENRICH_JOB_TIMEOUT_SECONDS: positiveInteger,
-    ENRICH_MAX_UNITS_PER_TICK: positiveInteger,
     ENRICH_MAX_CONCURRENT_CALLS: z
       .string()
       .regex(/^(?:[1-9]|[12][0-9]|3[0-2])$/u, "must be an integer from 1 through 32"),
-    ENRICH_MAX_TOKENS: positiveInteger,
     ENRICH_MAX_ELAPSED_MS: positiveInteger,
     ENRICH_MAX_ERROR_RATE: rate,
     ENRICH_MAX_COST_USD: positiveNumber,
@@ -185,9 +181,7 @@ export async function desiredEnrichmentJob(
     DATA_DIR: "/tmp/xtap-pool-enrichment",
     DATASET_REPO: datasetRepo,
     ENRICH_ENABLED: "true",
-    ENRICH_MAX_UNITS_PER_TICK: configured.ENRICH_MAX_UNITS_PER_TICK,
     ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
-    ENRICH_MAX_TOKENS: configured.ENRICH_MAX_TOKENS,
     ENRICH_MAX_ELAPSED_MS: configured.ENRICH_MAX_ELAPSED_MS,
     ENRICH_MAX_ERROR_RATE: configured.ENRICH_MAX_ERROR_RATE,
     ENRICH_MAX_COST_USD: configured.ENRICH_MAX_COST_USD,
@@ -564,12 +558,9 @@ function assertCanaryContinuationBudget(
 
 function validateCanaryReceipt(receipt: EnrichReceipt, desired: DesiredEnrichmentJob): void {
   const maxCost = Number(desired.environment["ENRICH_MAX_COST_USD"]);
-  const maxTokens = Number(desired.environment["ENRICH_MAX_TOKENS"]);
-  const tokens = receipt.prompt_tokens + receipt.completion_tokens;
   if (receipt.cost_usd === undefined || receipt.cost_usd > maxCost) {
     throw new Error("Canary receipt has missing or excessive measured cost.");
   }
-  if (tokens > maxTokens) throw new Error("Canary receipt exceeds its token ceiling.");
 }
 
 function delay(milliseconds: number): Promise<void> {
