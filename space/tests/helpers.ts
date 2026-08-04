@@ -7,6 +7,7 @@ export const testConfig: SpaceConfig = {
   port: 7860,
   dataDir: ".data-test",
   datasetRepo: "osolmaz/xtap-pool-data",
+  indexBucket: "osolmaz/xtap-pool-bucket",
   hfToken: "hf_test_token",
   poolSigningSecret: "pool-secret-0123456789abcdef0123456789abcdef",
   sessionSecret: "session-secret-0123456789abcdef0123456789ab",

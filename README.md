@@ -17,7 +17,7 @@ xtap-pool is three pieces in one repo:
   for downstream applications that should not scan the private dataset or
   repeat semantic extraction.
 
-See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the original design, [`docs/labels-and-free-labels-implementation-plan.md`](docs/labels-and-free-labels-implementation-plan.md) for the target two-output classification contract, and [`docs/durable-enrichment-implementation-plan.md`](docs/durable-enrichment-implementation-plan.md) for the durable worker and completion contract.
+See [`docs/implementation-plan.md`](docs/implementation-plan.md) for the original design, [`docs/labels-and-free-labels-implementation-plan.md`](docs/labels-and-free-labels-implementation-plan.md) for the target two-output classification contract, [`docs/durable-enrichment-implementation-plan.md`](docs/durable-enrichment-implementation-plan.md) for the durable worker and completion contract, and [Add a durable enrichment index](docs/2026-08-04-durable-enrichment-index-plan.md) for the verified SQLite index.
 
 ## Set up a pool (once, by the pool owner)
 
@@ -29,9 +29,11 @@ npm ci
 npm run setup
 ```
 
-The setup flow creates or updates the private dataset repo and public Docker
-Space, configures the Space variables and generated secrets, verifies the
-dataset-only `HF_TOKEN`, and can import existing xTap JSONL files.
+The setup flow creates or updates the private dataset repo, private index
+Bucket, and public Docker Space. It configures the Space, can import existing
+xTap JSONL files, builds the first durable SQLite index, and verifies one
+storage-only `HF_TOKEN` with read/write access to exactly the dataset and index
+Bucket.
 
 To diagnose an existing pool without changing secrets or restarting the Space:
 
@@ -44,7 +46,7 @@ To repair missing or broken deployment configuration, run the bounded repair
 flow. It owns both the Space and the scheduled Hugging Face enrichment Job. The
 flow prompts privately for replacement tokens, validates their intended roles,
 reconciles Space configuration, and creates or replaces the scheduled Job in a
-suspended state. `HF_TOKEN` must be scoped to the dataset repo;
+suspended state. `HF_TOKEN` must be scoped to the dataset repo and index Bucket;
 `INFERENCE_TOKEN` must be a separate fine-grained token with the `Make calls to
 Inference Providers` permission:
 
@@ -87,12 +89,13 @@ npm run update -- osolmaz/xtap-pool
 ```
 
 The update command reads the current Space variables, reuses the existing
-dataset repo and membership bootstrap settings, preserves all secrets, and only
-uploads the latest Space code plus any missing variables.
+dataset repo, index Bucket, and membership bootstrap settings, preserves all
+secrets, and only uploads the latest Space code plus any missing variables.
 It will not create or rotate generated signing/session secrets; run the setup
 flow if those were never initialized. Keep `HF_TOKEN` scoped to read/write the
-private dataset. The Space keeps `ENRICH_ENABLED=false`; doctor provisions the
-separate inference credential only on the Hugging Face enrichment Job.
+private dataset and index Bucket. The Space keeps `ENRICH_ENABLED=false`; doctor
+provisions the separate inference credential only on the Hugging Face enrichment
+Job.
 
 The lower-level scripts are still available when you want to do those steps
 manually:
@@ -143,10 +146,10 @@ verifies their durable receipts, continuation contract, source revision, and
 cost accounting. `--enable-schedule` resumes the schedule only after the canary
 passes and recurring paid work is explicitly approved.
 
-The Job receives separate purpose-scoped dataset-writer and inference secrets
-through Hugging Face Jobs. Its environment contains the dataset repo, model,
-taxonomy, pricing, elapsed-time, error-rate, discarded-assignment-rate, and
-cumulative-cost ceilings. The discarded-assignment quality guard counts rejected
+The Job receives separate purpose-scoped storage and inference secrets through
+Hugging Face Jobs. Its environment contains the dataset repo, index Bucket,
+model, taxonomy, pricing, elapsed-time, error-rate, discarded-assignment-rate,
+and cumulative-cost ceilings. The discarded-assignment quality guard counts rejected
 model labels per successfully enriched unit. It defaults to 0.15 after 200 units,
 so healthy large runs do not stop merely because they process more data. Missing
 credentials or cost configuration fails before any provider call. The default
@@ -154,8 +157,17 @@ repair configuration caps each canary Job at $2 of inference and 40 minutes of
 worker time. Two canary Jobs plus their worst-case `cpu-basic` time have a
 cumulative hard ceiling below $4.02.
 Scheduled and manually triggered runs use the same non-concurrent Hugging Face
-schedule. The web API exposes no enrichment writer, and GitHub Actions remains
-CI-only.
+schedule. Each fresh process restores a checksum-verified SQLite generation from
+the private Bucket and applies only new JSONL files or strict append suffixes.
+The dataset remains authoritative. A missing, corrupt, truncated, or rewritten
+source fails closed instead of triggering an automatic full replay. An operator
+can intentionally rebuild and publish the index with:
+
+```sh
+npm run index:bootstrap
+```
+
+The web API exposes no enrichment writer, and GitHub Actions remains CI-only.
 
 ## Join a pool (each friend)
 

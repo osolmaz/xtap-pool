@@ -457,7 +457,7 @@ describe("doctor", () => {
     expect(reconcileJob).toHaveBeenCalledWith(
       expect.objectContaining({ accessToken: "hf_owner" }),
       expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
-      { datasetToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
+      { storageToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
     );
     expect(secretWrites).toEqual([{ key: "HF_TOKEN", value: "hf_dataset" }]);
     expect(restarts).toEqual(["alice/xtap-pool"]);
@@ -777,7 +777,7 @@ describe("doctor", () => {
     expect(reconcileJob).toHaveBeenCalledWith(
       expect.objectContaining({ accessToken: "hf_owner" }),
       expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
-      { datasetToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
+      { storageToken: "hf_job_dataset", inferenceToken: "hf_job_inference" },
     );
   });
 
@@ -936,6 +936,7 @@ function jobEnvironment(): Record<string, string> {
   return {
     DATA_DIR: "/tmp/xtap-pool-enrichment",
     DATASET_REPO: "alice/xtap-pool-data",
+    INDEX_BUCKET: "alice/xtap-pool-bucket",
     ENRICH_ENABLED: "true",
     ENRICH_MAX_CONCURRENT_CALLS: "1",
     ENRICH_MAX_ELAPSED_MS: "2400000",
@@ -999,6 +1000,8 @@ function fetchFixture(options: {
   generatedSecrets?: readonly ("POOL_SIGNING_SECRET" | "SESSION_SECRET")[];
   healthStatus?: number;
   datasetPrivate?: boolean;
+  indexBucketPrivate?: boolean;
+  indexManifestStatus?: number;
   variables?: Record<string, string>;
   datasetCredential?: "ok" | "invalid" | "unknown";
   datasetError?: string;
@@ -1048,9 +1051,16 @@ function handleSecretsRequest(
   return Promise.resolve(secretsResponse(options));
 }
 
+// eslint-disable-next-line complexity -- The fixture routes every doctor dependency through one fake Hub.
 function handleReadRequest(url: string, options: FixtureOptions): Promise<Response> {
   if (url.includes("/api/datasets/alice/xtap-pool-data")) {
     return Promise.resolve(Response.json({ private: options.datasetPrivate ?? true }));
+  }
+  if (url.includes("/api/buckets/alice/xtap-pool-bucket")) {
+    return Promise.resolve(Response.json({ private: options.indexBucketPrivate ?? true }));
+  }
+  if (url.includes("/buckets/alice/xtap-pool-bucket/resolve/index/current.json")) {
+    return Promise.resolve(new Response("{}", { status: options.indexManifestStatus ?? 200 }));
   }
   if (url === "https://alice-xtap-pool.hf.space/healthz") {
     return Promise.resolve(
@@ -1120,6 +1130,7 @@ function componentReady(value: string | undefined): boolean {
 function variablesResponse(overrides: Record<string, string> | undefined): Response {
   const values = {
     DATASET_REPO: "alice/xtap-pool-data",
+    INDEX_BUCKET: "alice/xtap-pool-bucket",
     ALLOWED_USERS: "alice",
     POOL_ADMINS: "alice",
     ENRICH_ENABLED: "false",

@@ -46,6 +46,7 @@ describe("setup deployment helpers", () => {
         namespace: "alice",
         spaceRepo: "alice/xtap-pool",
         datasetRepo: "alice/xtap-pool-data",
+        indexBucket: "alice/xtap-pool-bucket",
         allowedUsers: ["alice"],
         poolAdmins: ["alice"],
       },
@@ -63,6 +64,7 @@ describe("setup deployment helpers", () => {
       .map(parseVariableWrite);
     expect(Object.fromEntries(writes.map(({ key, value }) => [key, value]))).toEqual({
       DATASET_REPO: "alice/xtap-pool-data",
+      INDEX_BUCKET: "alice/xtap-pool-bucket",
       ALLOWED_USERS: "alice",
       POOL_ADMINS: "alice",
       ENRICH_ENABLED: "false",

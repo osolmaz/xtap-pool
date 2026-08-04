@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   note,
   outro,
@@ -27,6 +31,7 @@ import {
 import { deployPool, updateExistingPool } from "./deploy.js";
 import {
   desiredEnrichmentJob,
+  ENRICHMENT_JOB_DEFAULT_VARIABLES,
   reconcileEnrichmentJob,
   suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
@@ -34,7 +39,7 @@ import { getSpaceVariables, setSpaceSecret } from "./hub-api.js";
 import { defaultTweetsDirectory, expandHomePath } from "./path.js";
 import { captureCommand, inheritCommand } from "./process.js";
 import { verifyInferenceToken } from "./inference-token.js";
-import { verifyDatasetWriteToken } from "./token.js";
+import { verifyStorageWriteToken } from "./token.js";
 
 export async function runSetupWizard(root: string): Promise<void> {
   intro("xtap-pool setup");
@@ -46,9 +51,20 @@ export async function runSetupWizard(root: string): Promise<void> {
   task.start("Creating repos, deploying Space, and setting generated secrets");
   await deployPool(root, { accessToken }, config);
   task.stop("Space deployed");
-  const datasetToken = await promptDatasetToken(config.datasetRepo);
+  const storageToken = await promptStorageToken(config.datasetRepo, config.indexBucket);
   await maybeSeed(root, config);
-  await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", datasetToken);
+  await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
+  await bootstrapIndex(root, config, storageToken);
+  await inheritCommand("hf", ["spaces", "restart", config.spaceRepo, "--format", "json"]);
+  await inheritCommand("hf", [
+    "spaces",
+    "wait",
+    config.spaceRepo,
+    "--timeout",
+    "10m",
+    "--format",
+    "json",
+  ]);
   const inferenceToken = await promptInferenceToken();
   const variables = await getSpaceVariables({ accessToken }, config.spaceRepo);
   const desired = await desiredEnrichmentJob(
@@ -57,7 +73,7 @@ export async function runSetupWizard(root: string): Promise<void> {
     config.datasetRepo,
     variables,
   );
-  await reconcileEnrichmentJob({ accessToken }, desired, { datasetToken, inferenceToken });
+  await reconcileEnrichmentJob({ accessToken }, desired, { storageToken, inferenceToken });
   outro(
     `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nEnrichment Job: created and suspended pending its recovery canary.`,
   );
@@ -113,6 +129,11 @@ async function promptConfig(username: string): Promise<SetupConfig> {
     repoInNamespace(namespace, "xtap-pool-data"),
     validateRepoId,
   );
+  const indexBucket = await promptText(
+    "Private index Bucket",
+    repoInNamespace(namespace, "xtap-pool-bucket"),
+    validateRepoId,
+  );
   const allowed = await promptText(
     "Allowed HF users",
     usersValue(defaults.allowedUsers),
@@ -123,6 +144,7 @@ async function promptConfig(username: string): Promise<SetupConfig> {
     namespace,
     spaceRepo,
     datasetRepo,
+    indexBucket,
     allowedUsers: normalizeUsers(allowed),
     poolAdmins: normalizeUsers(admins),
   };
@@ -133,6 +155,7 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
     [
       `Space: ${config.spaceRepo}`,
       `Dataset: ${config.datasetRepo}`,
+      `Index Bucket: ${config.indexBucket}`,
       `Allowed users: ${usersValue(config.allowedUsers)}`,
       `Pool admins: ${usersValue(config.poolAdmins)}`,
     ].join("\n"),
@@ -145,19 +168,20 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
   }
 }
 
-async function promptDatasetToken(datasetRepo: string): Promise<string> {
+async function promptStorageToken(datasetRepo: string, indexBucket: string): Promise<string> {
   note(
     [
-      `Create a fine-grained token scoped only to ${datasetRepo}.`,
-      `Choose write access to contents/settings for that dataset.`,
+      "Create one fine-grained storage token scoped exactly to:",
+      `- read/write ${datasetRepo}`,
+      `- read/write ${indexBucket}`,
       "Setup will store it as HF_TOKEN on both the Space and its suspended enrichment Job.",
       tokenSettingsUrl(),
     ].join("\n"),
-    "Dataset token",
+    "Storage token",
   );
   for (;;) {
-    const token = await promptPassword("Paste the dataset-only HF_TOKEN");
-    const report = await verifyDatasetWriteToken({ token, datasetRepo });
+    const token = await promptPassword("Paste the storage-only HF_TOKEN");
+    const report = await verifyStorageWriteToken({ token, datasetRepo, indexBucket });
     if (report.ok) {
       note(`${report.tokenName || "token"} on ${report.username || "unknown account"}`, "Verified");
       return token;
@@ -179,6 +203,31 @@ async function promptInferenceToken(): Promise<string> {
     const report = await verifyInferenceToken({ token });
     if (report.ok) return token;
     note(report.errors.join("\n"), "Token refused");
+  }
+}
+
+async function bootstrapIndex(
+  root: string,
+  config: SetupConfig,
+  storageToken: string,
+): Promise<void> {
+  const dataDir = await mkdtemp(join(tmpdir(), "xtap-pool-index-bootstrap-"));
+  try {
+    await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+    await inheritCommand("npm", ["run", "index:bootstrap", "--workspace", "space"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        DATA_DIR: dataDir,
+        DATASET_REPO: config.datasetRepo,
+        INDEX_BUCKET: config.indexBucket,
+        HF_TOKEN: storageToken,
+        LLM_MODEL: ENRICHMENT_JOB_DEFAULT_VARIABLES["LLM_MODEL"],
+        TAXONOMY_VERSION: ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"],
+      },
+    });
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 }
 

@@ -195,6 +195,12 @@ Also run a local full-replay-versus-incremental comparison over representative t
 - Confirm the second Job restores the first generation rather than replaying all history.
 - Resume cron and verify the next scheduled Job uses the same source revision and index contract.
 
+## Implementation measurements
+
+A local read-only production-data check pinned dataset revision `a4bbebdba5cde0c508bd4365480d32b488974da6`. The clean replay read 91,384 tweet rows, 74,913 enrichment rows, 135,744 attempt events, and 13,808 registry events in 120.351 seconds. Loading the resulting index and checking for an unchanged dataset revision took 1.417 seconds, a reduction of 118.934 seconds, or 98.8%.
+
+The durable and clean projections matched for tweets, unit membership, enrichment results, label assignments, label evidence, the free-label registry, recent errors, and the registry revision. Queue rows also matched except for `updated_at`, which records the local rebuild time and is not part of completion, retry, or consumer semantics.
+
 ## Acceptance criteria
 
 The feature is complete when:

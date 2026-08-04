@@ -33,7 +33,7 @@ import { verifyInferenceToken } from "./inference-token.js";
 import { manifestFromSpace } from "./manifest.js";
 import type { PoolManifest } from "./manifest.js";
 import { captureCommand } from "./process.js";
-import { verifyDatasetWriteToken } from "./token.js";
+import { verifyStorageWriteToken } from "./token.js";
 
 export type DoctorOptions = {
   spaceRepo: string;
@@ -56,6 +56,7 @@ export type DoctorCheck = {
 export type DoctorReport = {
   spaceRepo: string;
   datasetRepo?: string;
+  indexBucket?: string;
   summary: Record<DoctorStatus, number>;
   checks: readonly DoctorCheck[];
 };
@@ -69,7 +70,11 @@ export type DoctorDeps = {
     keys: readonly GeneratedSecretKey[],
     report: DoctorReport,
   ) => Promise<boolean>;
-  validateDatasetToken?: (token: string, datasetRepo: string) => Promise<readonly string[]>;
+  validateDatasetToken?: (
+    token: string,
+    datasetRepo: string,
+    indexBucket: string,
+  ) => Promise<readonly string[]>;
   validateInferenceToken?: (token: string) => Promise<readonly string[]>;
   restartAndWait?: (spaceRepo: string) => Promise<void>;
   inspectJob?: (
@@ -133,7 +138,7 @@ export async function collectDoctorReport(
     checks.push(pass("space.variables.read", `Read Space variables for ${spaceRepo}.`));
   } catch (error) {
     checks.push(fail("space.variables.read", errorMessage(error)));
-    return report(spaceRepo, undefined, checks);
+    return report(spaceRepo, undefined, undefined, checks);
   }
 
   let manifest: PoolManifest;
@@ -142,7 +147,7 @@ export async function collectDoctorReport(
     checks.push(pass("pool.manifest", `Derived desired state for ${spaceRepo}.`));
   } catch (error) {
     checks.push(fail("pool.manifest", errorMessage(error)));
-    return report(spaceRepo, undefined, checks);
+    return report(spaceRepo, undefined, undefined, checks);
   }
 
   for (const key of manifest.requiredVariables) {
@@ -151,10 +156,11 @@ export async function collectDoctorReport(
 
   await checkSecrets(client, manifest, checks);
   await checkDataset(client, manifest, checks);
+  await checkIndexBucket(client, manifest, checks);
   await checkEnrichmentJob(client, manifest, variables, checks, deps);
   await checkLiveHealth(manifest, checks, deps.fetchFn ?? fetch);
 
-  return report(spaceRepo, manifest.datasetRepo, checks);
+  return report(spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
 }
 
 // eslint-disable-next-line complexity -- This boundary keeps canary evidence, paid approval, and activation in one fail-closed transaction.
@@ -202,7 +208,7 @@ async function runDoctorCanary(
         "The recovery canary passed, but the recurring schedule remains suspended.",
       ),
     );
-    return report(current.spaceRepo, manifest.datasetRepo, checks);
+    return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
   }
   const approved = await (deps.confirmScheduleEnable ?? confirmScheduleEnableDefault)(
     desired,
@@ -215,7 +221,7 @@ async function runDoctorCanary(
         "Recurring paid enrichment was not approved; schedule remains suspended.",
       ),
     );
-    return report(current.spaceRepo, manifest.datasetRepo, checks);
+    return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
   }
   const inspection = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
   if (inspection.exactSchedules.length !== 1 || inspection.schedules.length !== 1) {
@@ -234,7 +240,7 @@ async function runDoctorCanary(
     throw new Error("Hugging Face did not confirm the enrichment schedule as active.");
   }
   const refreshed = await collectDoctorReport(client, username, current.spaceRepo, deps);
-  return report(current.spaceRepo, manifest.datasetRepo, [
+  return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, [
     ...refreshed.checks,
     canaryCheck,
     pass("job.schedule.approval", "The approved Hugging Face schedule is active."),
@@ -320,6 +326,46 @@ async function checkDataset(
     if (stats.files > 0) checks.push(datasetRecordsCheck(stats));
   } catch (error) {
     checks.push(fail("dataset.files", errorMessage(error)));
+  }
+}
+
+async function checkIndexBucket(
+  client: HubClient,
+  manifest: PoolManifest,
+  checks: DoctorCheck[],
+): Promise<void> {
+  try {
+    const isPrivate = await getRepoPrivateState(client, {
+      type: "bucket",
+      name: manifest.indexBucket,
+    });
+    checks.push(
+      isPrivate
+        ? pass("index_bucket.visibility", `${manifest.indexBucket} is private.`)
+        : fail("index_bucket.visibility", `${manifest.indexBucket} is public.`),
+    );
+  } catch (error) {
+    checks.push(fail("index_bucket.visibility", errorMessage(error)));
+    return;
+  }
+  try {
+    const base = client.hubUrl ?? "https://huggingface.co";
+    const response = await (client.fetchFn ?? fetch)(
+      `${base}/buckets/${manifest.indexBucket}/resolve/index/current.json`,
+      { headers: { authorization: `Bearer ${client.accessToken}` } },
+    );
+    checks.push(
+      response.ok
+        ? pass("index_bucket.manifest", "The durable index manifest exists.")
+        : fail(
+            "index_bucket.manifest",
+            response.status === 404
+              ? "The durable index manifest is missing."
+              : `Could not read the durable index manifest (${String(response.status)}).`,
+          ),
+    );
+  } catch (error) {
+    checks.push(fail("index_bucket.manifest", errorMessage(error)));
   }
 }
 
@@ -611,7 +657,7 @@ async function repairDoctorFindings(
   const jobVariablesChanged = await maybeRepairJobVariables(client, report);
   const webWorkerChanged = await maybeDisableSpaceEnrichment(client, report);
   const generatedChanged = await maybeRepairGeneratedSecrets(client, report, repair);
-  const datasetRepairKind = datasetTokenRepairKind(report);
+  const datasetRepairKind = storageTokenRepairKind(report);
   const datasetChanged =
     generatedChanged && datasetRepairKind === "indeterminate"
       ? false
@@ -653,6 +699,16 @@ function repairDependencies(deps: DoctorDeps): RepairDependencies {
 }
 
 async function maybeRepairJobVariables(client: HubClient, report: DoctorReport): Promise<boolean> {
+  let repairedIndexBucket = false;
+  if (
+    report.indexBucket !== undefined &&
+    report.checks.some(
+      (check) => check.code === "space.variable.INDEX_BUCKET" && check.status === "fail",
+    )
+  ) {
+    await setSpaceVariable(client, report.spaceRepo, "INDEX_BUCKET", report.indexBucket);
+    repairedIndexBucket = true;
+  }
   const missing = Object.entries(ENRICHMENT_JOB_DEFAULT_VARIABLES).filter(([key]) =>
     report.checks.some(
       (check) => check.code === `space.variable.${key}` && check.status === "fail",
@@ -661,7 +717,7 @@ async function maybeRepairJobVariables(client: HubClient, report: DoctorReport):
   for (const [key, value] of missing) {
     await setSpaceVariable(client, report.spaceRepo, key, value);
   }
-  return missing.length > 0;
+  return repairedIndexBucket || missing.length > 0;
 }
 
 async function maybeDisableSpaceEnrichment(
@@ -705,7 +761,11 @@ async function maybeRepairGeneratedSecrets(
 type DatasetRepairDeps = {
   promptDatasetToken: (datasetRepo: string) => Promise<string>;
   confirmDatasetTokenRepair: (datasetRepo: string, report: DoctorReport) => Promise<boolean>;
-  validateDatasetToken: (token: string, datasetRepo: string) => Promise<readonly string[]>;
+  validateDatasetToken: (
+    token: string,
+    datasetRepo: string,
+    indexBucket: string,
+  ) => Promise<readonly string[]>;
 };
 
 async function maybeRepairDatasetToken(
@@ -713,7 +773,7 @@ async function maybeRepairDatasetToken(
   report: DoctorReport,
   datasetRepo: string,
   deps: DatasetRepairDeps,
-  repairKind = datasetTokenRepairKind(report),
+  repairKind = storageTokenRepairKind(report),
 ): Promise<boolean> {
   if (repairKind === undefined) return false;
   if (
@@ -723,9 +783,9 @@ async function maybeRepairDatasetToken(
     return false;
   }
   const token = await promptForValidToken(
-    "Dataset credential rejected",
+    "Storage credential rejected",
     () => deps.promptDatasetToken(datasetRepo),
-    (candidate) => deps.validateDatasetToken(candidate, datasetRepo),
+    (candidate) => deps.validateDatasetToken(candidate, datasetRepo, requiredIndexBucket(report)),
   );
   await setSpaceSecret(client, report.spaceRepo, "HF_TOKEN", token);
   return true;
@@ -743,7 +803,11 @@ type JobRepairDeps = {
   ) => Promise<unknown>;
   promptJobDatasetToken: (datasetRepo: string) => Promise<string>;
   promptJobInferenceToken: () => Promise<string>;
-  validateDatasetToken: (token: string, datasetRepo: string) => Promise<readonly string[]>;
+  validateDatasetToken: (
+    token: string,
+    datasetRepo: string,
+    indexBucket: string,
+  ) => Promise<readonly string[]>;
   validateInferenceToken: (token: string) => Promise<readonly string[]>;
 };
 
@@ -778,17 +842,17 @@ async function maybeRepairEnrichmentJob(
     await deps.reconcileJob(client, desired);
     return;
   }
-  const datasetToken = await promptForValidToken(
-    "Job dataset credential rejected",
+  const storageToken = await promptForValidToken(
+    "Job storage credential rejected",
     () => deps.promptJobDatasetToken(manifest.datasetRepo),
-    (candidate) => deps.validateDatasetToken(candidate, manifest.datasetRepo),
+    (candidate) => deps.validateDatasetToken(candidate, manifest.datasetRepo, manifest.indexBucket),
   );
   const inferenceToken = await promptForValidToken(
     "Job inference credential rejected",
     deps.promptJobInferenceToken,
     deps.validateInferenceToken,
   );
-  await deps.reconcileJob(client, desired, { datasetToken, inferenceToken });
+  await deps.reconcileJob(client, desired, { storageToken, inferenceToken });
 }
 
 async function promptForValidToken(
@@ -804,7 +868,7 @@ async function promptForValidToken(
   }
 }
 
-function datasetTokenRepairKind(report: DoctorReport): "definite" | "indeterminate" | undefined {
+function storageTokenRepairKind(report: DoctorReport): "definite" | "indeterminate" | undefined {
   const failedCodes = new Set(
     report.checks.filter((check) => check.status === "fail").map((check) => check.code),
   );
@@ -841,8 +905,9 @@ function generatedSecretsWithPossibleMalformedValues(
 async function validateDatasetTokenDefault(
   token: string,
   datasetRepo: string,
+  indexBucket: string,
 ): Promise<readonly string[]> {
-  const validation = await verifyDatasetWriteToken({ token, datasetRepo });
+  const validation = await verifyStorageWriteToken({ token, datasetRepo, indexBucket });
   return validation.ok ? [] : validation.errors;
 }
 
@@ -853,10 +918,10 @@ async function validateInferenceTokenDefault(token: string): Promise<readonly st
 
 async function promptDatasetTokenDefault(datasetRepo: string): Promise<string> {
   note(
-    `Paste a fine-grained token scoped to read/write ${datasetRepo}. It will be written to the Space as HF_TOKEN.`,
-    "Dataset credential",
+    `Paste a fine-grained token scoped to read/write ${datasetRepo} and the configured index Bucket. It will be written to the Space as HF_TOKEN.`,
+    "Storage credential",
   );
-  return promptPassword("Dataset-only HF_TOKEN");
+  return promptPassword("Storage-only HF_TOKEN");
 }
 
 async function confirmDatasetTokenRepairDefault(
@@ -915,13 +980,13 @@ async function confirmGeneratedSecretRepairDefault(
 async function promptJobDatasetTokenDefault(datasetRepo: string): Promise<string> {
   note(
     [
-      `Paste a fine-grained token scoped to read/write ${datasetRepo}.`,
+      `Paste a fine-grained token scoped to read/write ${datasetRepo} and the configured index Bucket.`,
       "Hugging Face will encrypt it as HF_TOKEN on the scheduled Job.",
       "The value cannot be recovered from the existing Space secret.",
     ].join("\n"),
-    "Job dataset credential",
+    "Job storage credential",
   );
-  return promptPassword("Scheduled Job dataset token");
+  return promptPassword("Scheduled Job storage token");
 }
 
 async function promptJobInferenceTokenDefault(): Promise<string> {
@@ -1083,11 +1148,13 @@ function isNotFound(error: unknown): boolean {
 function report(
   spaceRepo: string,
   datasetRepo: string | undefined,
+  indexBucket: string | undefined,
   checks: readonly DoctorCheck[],
 ): DoctorReport {
   return {
     spaceRepo,
     ...(datasetRepo === undefined ? {} : { datasetRepo }),
+    ...(indexBucket === undefined ? {} : { indexBucket }),
     summary: {
       pass: checks.filter((check) => check.status === "pass").length,
       warn: checks.filter((check) => check.status === "warn").length,
@@ -1095,6 +1162,11 @@ function report(
     },
     checks,
   };
+}
+
+function requiredIndexBucket(report: DoctorReport): string {
+  if (report.indexBucket === undefined) throw new Error("Doctor report is missing INDEX_BUCKET.");
+  return report.indexBucket;
 }
 
 function printHuman(report: DoctorReport): void {

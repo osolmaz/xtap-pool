@@ -10,7 +10,9 @@ const TARGET_PERMISSIONS = new Set([
 const READ_PERMISSION = "repo.content.read";
 const WRITE_PERMISSIONS = ["repo.content.write", "repo.write"] as const;
 
-export type DatasetTokenReport =
+type StorageTarget = { kind: "bucket" | "dataset"; name: string };
+
+export type StorageTokenReport =
   | {
       ok: true;
       username: string;
@@ -22,52 +24,68 @@ export type DatasetTokenReport =
       errors: readonly string[];
     };
 
-export async function verifyDatasetWriteToken(params: {
+export async function verifyStorageWriteToken(params: {
   token: string;
   datasetRepo: string;
+  indexBucket: string;
   fetchFn?: typeof fetch;
-}): Promise<DatasetTokenReport> {
+}): Promise<StorageTokenReport> {
   const response = await (params.fetchFn ?? fetch)("https://huggingface.co/api/whoami-v2", {
     headers: { authorization: `Bearer ${params.token}` },
   });
-  if (!response.ok)
+  if (!response.ok) {
     return { ok: false, errors: [`Hugging Face rejected the token (${String(response.status)}).`] };
+  }
   const payload: unknown = await response.json();
-  const permissions = evaluateDatasetWriteToken(payload, params.datasetRepo);
+  const targets: readonly StorageTarget[] = [
+    { kind: "dataset", name: params.datasetRepo },
+    { kind: "bucket", name: params.indexBucket },
+  ];
+  const permissions = evaluateStorageWriteToken(payload, targets);
   if (!permissions.ok) return permissions;
-  const accessErrors = await datasetDownloadErrors(params);
+  const accessErrors = await storageReadErrors(params);
   return accessErrors.length === 0 ? permissions : { ok: false, errors: accessErrors };
 }
 
-async function datasetDownloadErrors(params: {
+async function storageReadErrors(params: {
   token: string;
   datasetRepo: string;
+  indexBucket: string;
   fetchFn?: typeof fetch;
 }): Promise<readonly string[]> {
-  const access = await (params.fetchFn ?? fetch)(datasetProbeUrl(params.datasetRepo), {
-    headers: { authorization: `Bearer ${params.token}` },
-  });
-  if (access.status === 401 || access.status === 403) {
-    return [
-      `Token permissions claim access to ${params.datasetRepo}, but Hugging Face rejected a direct private-dataset download (${String(access.status)}).`,
-    ];
+  const fetchFn = params.fetchFn ?? fetch;
+  const probes = [
+    { name: params.datasetRepo, url: datasetProbeUrl(params.datasetRepo), kind: "dataset" },
+    { name: params.indexBucket, url: bucketProbeUrl(params.indexBucket), kind: "Bucket" },
+  ];
+  const errors: string[] = [];
+  for (const probe of probes) {
+    const access = await fetchFn(probe.url, {
+      headers: { authorization: `Bearer ${params.token}` },
+    });
+    if (access.status === 401 || access.status === 403) {
+      errors.push(
+        `Token permissions claim access to ${probe.name}, but Hugging Face rejected a direct private-${probe.kind} read (${String(access.status)}).`,
+      );
+    } else if (!access.ok && access.status !== 404) {
+      errors.push(`Could not verify a direct read from ${probe.name} (${String(access.status)}).`);
+    }
   }
-  if (!access.ok && access.status !== 404) {
-    return [
-      `Could not verify a direct download from ${params.datasetRepo} (${String(access.status)}).`,
-    ];
-  }
-  return [];
+  return errors;
 }
 
 function datasetProbeUrl(datasetRepo: string): string {
   return `https://huggingface.co/datasets/${datasetRepo}/resolve/main/config/pool.json`;
 }
 
-export function evaluateDatasetWriteToken(
+function bucketProbeUrl(indexBucket: string): string {
+  return `https://huggingface.co/api/buckets/${indexBucket}`;
+}
+
+export function evaluateStorageWriteToken(
   payload: unknown,
-  datasetRepo: string,
-): DatasetTokenReport {
+  targets: readonly StorageTarget[],
+): StorageTokenReport {
   const root = asRecord(payload);
   const accessToken = asRecord(asRecord(root["auth"])["accessToken"]);
   const fineGrained = asRecord(accessToken["fineGrained"]);
@@ -77,19 +95,27 @@ export function evaluateDatasetWriteToken(
       ? []
       : [`Token role is '${role || "unknown"}', expected fine-grained.`];
   errors.push(...globalPermissionErrors(fineGrained));
-  const targetPermissions = scopedPermissionErrors(fineGrained, datasetRepo, errors);
-  if (!targetPermissions.has(READ_PERMISSION)) {
-    errors.push(`Token must include ${READ_PERMISSION} on ${datasetRepo}.`);
-  }
-  if (!WRITE_PERMISSIONS.some((permission) => targetPermissions.has(permission))) {
-    errors.push(`Token must include ${WRITE_PERMISSIONS.join(" or ")} on ${datasetRepo}.`);
+  const permissionsByTarget = scopedPermissionErrors(fineGrained, targets, errors);
+  for (const target of targets) {
+    const key = targetKey(target);
+    const permissions = permissionsByTarget.get(key) ?? new Set<string>();
+    if (!permissions.has(READ_PERMISSION)) {
+      errors.push(`Token must include ${READ_PERMISSION} on ${target.name}.`);
+    }
+    if (!WRITE_PERMISSIONS.some((permission) => permissions.has(permission))) {
+      errors.push(`Token must include ${WRITE_PERMISSIONS.join(" or ")} on ${target.name}.`);
+    }
   }
   if (errors.length > 0) return { ok: false, errors };
   return {
     ok: true,
     username: text(root["name"]),
     tokenName: text(accessToken["displayName"]),
-    permissions: [...targetPermissions].sort(),
+    permissions: [...permissionsByTarget.entries()]
+      .flatMap(([target, permissions]) =>
+        [...permissions].map((permission) => `${target}:${permission}`),
+      )
+      .sort(),
   };
 }
 
@@ -101,53 +127,51 @@ function globalPermissionErrors(fineGrained: JsonObject): string[] {
 
 function scopedPermissionErrors(
   fineGrained: JsonObject,
-  datasetRepo: string,
+  targets: readonly StorageTarget[],
   errors: string[],
-): Set<string> {
-  const targetPermissions = new Set<string>();
+): Map<string, Set<string>> {
+  const permissionsByTarget = new Map(
+    targets.map((target) => [targetKey(target), new Set<string>()]),
+  );
   for (const scope of array(fineGrained["scoped"])) {
-    collectScopePermissions(asRecord(scope), datasetRepo, targetPermissions, errors);
+    collectScopePermissions(asRecord(scope), targets, permissionsByTarget, errors);
   }
-  return targetPermissions;
+  return permissionsByTarget;
 }
 
 function collectScopePermissions(
   scope: JsonObject,
-  datasetRepo: string,
-  targetPermissions: Set<string>,
+  targets: readonly StorageTarget[],
+  permissionsByTarget: Map<string, Set<string>>,
   errors: string[],
 ): void {
   const entity = asRecord(scope["entity"]);
+  const target = targets.find((candidate) => matchesTarget(entity, candidate));
   for (const permission of strings(scope["permissions"])) {
-    if (matchesDataset(entity, datasetRepo)) {
-      recordTargetPermission(permission, targetPermissions, errors);
-    } else {
+    if (target === undefined) {
       errors.push(
-        `Unexpected permission outside ${datasetRepo}: ${permission} on ${entityLabel(entity)}.`,
+        `Unexpected permission outside configured storage: ${permission} on ${entityLabel(entity)}.`,
       );
+    } else if (!TARGET_PERMISSIONS.has(permission)) {
+      errors.push(`Unexpected permission on storage token: ${permission}.`);
+    } else {
+      permissionsByTarget.get(targetKey(target))?.add(permission);
     }
   }
 }
 
-function recordTargetPermission(
-  permission: string,
-  targetPermissions: Set<string>,
-  errors: string[],
-): void {
-  if (TARGET_PERMISSIONS.has(permission)) targetPermissions.add(permission);
-  else errors.push(`Unexpected permission on dataset token: ${permission}.`);
-}
-
-function matchesDataset(entity: JsonObject, datasetRepo: string): boolean {
+function matchesTarget(entity: JsonObject, target: StorageTarget): boolean {
+  const type = text(entity["type"]).replace(/s$/, "");
   return (
-    isDatasetEntity(entity) &&
-    entityCandidates(entity).some((candidate) => normalizeRepo(candidate) === datasetRepo)
+    type === target.kind &&
+    entityCandidates(entity).some(
+      (candidate) => normalizeName(candidate, target.kind) === target.name,
+    )
   );
 }
 
-function isDatasetEntity(entity: JsonObject): boolean {
-  const type = text(entity["type"]);
-  return type === "dataset" || type === "datasets";
+function targetKey(target: StorageTarget): string {
+  return `${target.kind}:${target.name}`;
 }
 
 function entityCandidates(entity: JsonObject): readonly string[] {
@@ -164,8 +188,9 @@ function entityLabel(entity: JsonObject): string {
   return `${kind}:${name}`;
 }
 
-function normalizeRepo(value: string): string {
-  return value.replace(/^datasets\//, "");
+function normalizeName(value: string, kind: StorageTarget["kind"]): string {
+  const prefix = kind === "dataset" ? /^datasets\// : /^buckets\//;
+  return value.replace(prefix, "");
 }
 
 function asRecord(value: unknown): JsonObject {

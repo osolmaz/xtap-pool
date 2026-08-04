@@ -19,6 +19,7 @@ describe("setup config helpers", () => {
       namespace: "alice",
       spaceRepo: "alice/xtap-pool",
       datasetRepo: "alice/xtap-pool-data",
+      indexBucket: "alice/xtap-pool-bucket",
       allowedUsers: ["alice"],
       poolAdmins: ["alice"],
     });
@@ -35,6 +36,7 @@ describe("setup config helpers", () => {
       "team/xtap-pool",
       new Map([
         ["DATASET_REPO", "team/tweets"],
+        ["INDEX_BUCKET", "team/tweets-index-bucket"],
         ["ALLOWED_USERS", "alice,bob"],
         ["POOL_ADMINS", "bob"],
       ]),
@@ -44,6 +46,7 @@ describe("setup config helpers", () => {
       namespace: "team",
       spaceRepo: "team/xtap-pool",
       datasetRepo: "team/tweets",
+      indexBucket: "team/tweets-index-bucket",
       allowedUsers: ["alice", "bob"],
       poolAdmins: ["bob"],
     });
@@ -56,6 +59,7 @@ describe("setup config helpers", () => {
       namespace: "team",
       spaceRepo: "team/xtap-pool",
       datasetRepo: "team/xtap-pool-data",
+      indexBucket: "team/xtap-pool-bucket",
       allowedUsers: ["alice"],
       poolAdmins: ["alice"],
     });

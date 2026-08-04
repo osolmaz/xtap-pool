@@ -13,6 +13,7 @@
     "setup": "npm run build --workspace shared && npm run build --workspace setup && npm run start --workspace setup",
     "update": "npm run build --workspace shared && npm run build --workspace setup && npm run start --workspace setup -- update",
     "doctor": "npm run --silent build --workspace shared && npm run --silent build --workspace setup && npm run --silent start --workspace setup -- doctor",
+    "index:bootstrap": "npm run build --workspace shared && npm run build --workspace space && npm run index:bootstrap --workspace space",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "lint": "eslint .",

@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { evaluateDatasetWriteToken, verifyDatasetWriteToken } from "../src/token.js";
+import { evaluateStorageWriteToken, verifyStorageWriteToken } from "../src/token.js";
+
+const datasetRepo = "alice/xtap-pool-data";
+const indexBucket = "alice/xtap-pool-bucket";
+const targets = [
+  { kind: "dataset", name: datasetRepo },
+  { kind: "bucket", name: indexBucket },
+] as const;
 
 function whoami(scoped: readonly unknown[], role = "fineGrained"): unknown {
   return {
     name: "owner",
     auth: {
       accessToken: {
-        displayName: "dataset-writer",
+        displayName: "storage-writer",
         role,
         fineGrained: { global: [], scoped },
       },
@@ -19,161 +26,106 @@ function scope(name: string, permissions: readonly string[], type = "dataset"): 
   return { entity: { type, name }, permissions };
 }
 
-describe("dataset token verification", () => {
-  it("rejects permission metadata when the private-dataset download is unauthorized", async () => {
+function validScopes(): readonly unknown[] {
+  const permissions = ["repo.access.read", "repo.content.read", "repo.write"];
+  return [scope(datasetRepo, permissions), scope(indexBucket, permissions, "bucket")];
+}
+
+describe("storage token verification", () => {
+  it("accepts direct private-dataset and private-Bucket reads", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        Response.json(
-          whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
-        ),
-      )
+      .mockResolvedValueOnce(Response.json(whoami(validScopes())))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    const report = await verifyStorageWriteToken({
+      token: "hf_good",
+      datasetRepo,
+      indexBucket,
+      fetchFn,
+    });
+    expect(report.ok).toBe(true);
+    expect(fetchFn).toHaveBeenNthCalledWith(
+      3,
+      `https://huggingface.co/api/buckets/${indexBucket}`,
+      expect.objectContaining({ headers: { authorization: "Bearer hf_good" } }),
+    );
+  });
+
+  it("rejects permission metadata when either direct read is unauthorized", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(whoami(validScopes())))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
       .mockResolvedValueOnce(new Response("unauthorized", { status: 401 }));
 
-    await expect(
-      verifyDatasetWriteToken({
-        token: "hf_bad",
-        datasetRepo: "alice/xtap-pool-data",
-        fetchFn,
-      }),
-    ).resolves.toEqual({
+    const report = await verifyStorageWriteToken({
+      token: "hf_bad",
+      datasetRepo,
+      indexBucket,
+      fetchFn,
+    });
+    expect(report).toEqual({
       ok: false,
       errors: [
-        "Token permissions claim access to alice/xtap-pool-data, but Hugging Face rejected a direct private-dataset download (401).",
+        `Token permissions claim access to ${indexBucket}, but Hugging Face rejected a direct private-Bucket read (401).`,
       ],
     });
   });
 
-  it.each([200, 404])(
-    "accepts permission metadata when the private-dataset probe returns %s",
-    async (status) => {
-      const fetchFn = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(
-          Response.json(
-            whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
-          ),
-        )
-        .mockResolvedValueOnce(new Response(status === 200 ? "{}" : "missing", { status }));
-
-      await expect(
-        verifyDatasetWriteToken({
-          token: "hf_good",
-          datasetRepo: "alice/xtap-pool-data",
-          fetchFn,
-        }),
-      ).resolves.toEqual({
-        ok: true,
-        username: "owner",
-        tokenName: "dataset-writer",
-        permissions: ["repo.content.read", "repo.content.write"],
-      });
-    },
-  );
-
-  it("rejects a token when the private-dataset probe is inconclusive", async () => {
-    const fetchFn = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        Response.json(
-          whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
-        ),
-      )
-      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
-
-    await expect(
-      verifyDatasetWriteToken({
-        token: "hf_unknown",
-        datasetRepo: "alice/xtap-pool-data",
-        fetchFn,
-      }),
-    ).resolves.toEqual({
-      ok: false,
-      errors: ["Could not verify a direct download from alice/xtap-pool-data (503)."],
-    });
+  it("accepts exact read/write scopes on the dataset and Bucket", () => {
+    const report = evaluateStorageWriteToken(whoami(validScopes()), targets);
+    expect(report.ok).toBe(true);
+    if (report.ok) {
+      expect(report.permissions).toContain(`dataset:${datasetRepo}:repo.content.read`);
+      expect(report.permissions).toContain(`bucket:${indexBucket}:repo.write`);
+    }
   });
 
-  it("accepts a fine-grained token scoped only to the dataset repo", () => {
-    const report = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
-      "alice/xtap-pool-data",
-    );
-    expect(report).toEqual({
-      ok: true,
-      username: "owner",
-      tokenName: "dataset-writer",
-      permissions: ["repo.content.read", "repo.content.write"],
-    });
-  });
-
-  it("accepts the current HF selected-repo write permission shape", () => {
-    const report = evaluateDatasetWriteToken(
+  it("accepts prefixed entity names", () => {
+    const permissions = ["repo.content.read", "repo.content.write"];
+    const report = evaluateStorageWriteToken(
       whoami([
-        scope("alice/xtap-pool-data", ["repo.access.read", "repo.content.read", "repo.write"]),
+        scope(`datasets/${datasetRepo}`, permissions),
+        scope(`buckets/${indexBucket}`, permissions, "buckets"),
       ]),
-      "alice/xtap-pool-data",
-    );
-    expect(report).toEqual({
-      ok: true,
-      username: "owner",
-      tokenName: "dataset-writer",
-      permissions: ["repo.access.read", "repo.content.read", "repo.write"],
-    });
-  });
-
-  it("accepts dataset entity names with a datasets prefix", () => {
-    const report = evaluateDatasetWriteToken(
-      whoami([scope("datasets/alice/xtap-pool-data", ["repo.content.read", "repo.content.write"])]),
-      "alice/xtap-pool-data",
+      targets,
     );
     expect(report.ok).toBe(true);
   });
 
-  it("rejects classic or broad tokens", () => {
-    const report = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.content.write"])], "write"),
-      "alice/xtap-pool-data",
+  it("rejects classic tokens, unrelated scopes, and global permissions", () => {
+    const classic = evaluateStorageWriteToken(whoami(validScopes(), "write"), targets);
+    const unrelated = evaluateStorageWriteToken(
+      whoami([...validScopes(), scope("alice/other", ["repo.content.read"])]),
+      targets,
     );
-    expect(report.ok).toBe(false);
-    if (!report.ok) expect(report.errors[0]).toContain("fine-grained");
+    const global = whoami(validScopes()) as {
+      auth: { accessToken: { fineGrained: { global: string[] } } };
+    };
+    global.auth.accessToken.fineGrained.global = ["inference.serverless.write"];
+    expect(classic.ok).toBe(false);
+    expect(unrelated.ok).toBe(false);
+    expect(evaluateStorageWriteToken(global, targets).ok).toBe(false);
   });
 
-  it("rejects permissions outside the target dataset", () => {
-    const report = evaluateDatasetWriteToken(
+  it("requires read and write permission on both exact targets", () => {
+    const missingBucketWrite = evaluateStorageWriteToken(
       whoami([
-        scope("alice/xtap-pool-data", ["repo.content.write"]),
-        scope("alice/other-dataset", ["repo.content.read"]),
+        scope(datasetRepo, ["repo.content.read", "repo.content.write"]),
+        scope(indexBucket, ["repo.content.read"], "bucket"),
       ]),
-      "alice/xtap-pool-data",
+      targets,
     );
-    expect(report.ok).toBe(false);
-    if (!report.ok) expect(report.errors.join("\n")).toContain("outside alice/xtap-pool-data");
-  });
-
-  it("rejects same-name scopes on non-dataset entities", () => {
-    const report = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.content.read", "repo.content.write"], "model")]),
-      "alice/xtap-pool-data",
+    const unexpected = evaluateStorageWriteToken(
+      whoami([
+        scope(datasetRepo, ["repo.content.read", "repo.settings.write"]),
+        scope(indexBucket, ["repo.content.read", "repo.content.write"], "bucket"),
+      ]),
+      targets,
     );
-    expect(report.ok).toBe(false);
-    if (!report.ok) expect(report.errors.join("\n")).toContain("model:alice/xtap-pool-data");
-  });
-
-  it("rejects missing read, missing write, or unexpected target permissions", () => {
-    const missingWrite = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.content.read"])]),
-      "alice/xtap-pool-data",
-    );
-    const missingRead = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.content.write"])]),
-      "alice/xtap-pool-data",
-    );
-    const unexpected = evaluateDatasetWriteToken(
-      whoami([scope("alice/xtap-pool-data", ["repo.settings.write"])]),
-      "alice/xtap-pool-data",
-    );
-    expect(missingRead.ok).toBe(false);
-    expect(missingWrite.ok).toBe(false);
+    expect(missingBucketWrite.ok).toBe(false);
     expect(unexpected.ok).toBe(false);
   });
 });
