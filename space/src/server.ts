@@ -200,17 +200,19 @@ function startEnrichmentRefresh(): void {
     enrichmentRefreshTimer = undefined;
     void refreshExternalEnrichment()
       .catch((error: unknown) => {
-        console.error(`[xtap-pool] enrichment refresh failed: ${errorMessage(error)}`);
+        const message = errorMessage(error);
+        datasetState = { state: "invalid", error: `durable index refresh failed: ${message}` };
+        readiness = buildReadiness();
+        console.error(`[xtap-pool] enrichment refresh failed: ${message}`);
       })
       .finally(startEnrichmentRefresh);
   }, enrichmentRefreshMs());
 }
 
 async function refreshExternalEnrichment(): Promise<void> {
-  if (!datasetCredentialOk(datasetCredential) || datasetState.state !== "ready") return;
+  if (!datasetCredentialOk(datasetCredential)) return;
   await mutex.run(async () => {
-    // A rebuild may have changed readiness while this refresh was waiting.
-    if (!datasetCredentialOk(datasetCredential) || datasetState.state !== "ready") return;
+    if (!datasetCredentialOk(datasetCredential)) return;
     const nextTaxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
     if (nextTaxonomy.error !== undefined) {
       throw new Error(`enrichment taxonomy refresh failed: ${nextTaxonomy.error}`);
@@ -222,6 +224,7 @@ async function refreshExternalEnrichment(): Promise<void> {
     taxonomy = nextTaxonomy;
     await index.advanceToLatest();
     applyIndexStats();
+    datasetState = { state: "ready" };
     readiness = buildReadiness();
   });
 }
