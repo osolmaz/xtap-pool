@@ -1,31 +1,93 @@
 #!/usr/bin/env bash
 # Deploy this repo to a Hugging Face Docker Space.
 #
-# Requires an HF token with write access to the target namespace (a personal
-# session via `hf auth login`, not an agent's propose-only token).
+# Requires an authenticated Hugging Face CLI session that can create repos and
+# Buckets. XTAP_STORAGE_TOKEN must be a fine-grained token with read/write
+# access to only the target dataset and index Bucket. Supplying it explicitly
+# authorizes this script to install it as the Space HF_TOKEN secret.
 #
 # Usage:
-#   scripts/deploy-space.sh <namespace>            # e.g. dutifuldev or osolmaz
-#   SPACE_REPO=<ns>/<name> DATASET_REPO=<ns>/<name> scripts/deploy-space.sh
+#   XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh <namespace>
+#   SPACE_REPO=<ns>/<name> DATASET_REPO=<ns>/<name> INDEX_BUCKET=<ns>/<name> \
+#     XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh
 set -euo pipefail
 
 NAMESPACE="${1:-${NAMESPACE:-}}"
 SPACE_REPO="${SPACE_REPO:-${NAMESPACE:?usage: deploy-space.sh <namespace>}/xtap-pool}"
 DATASET_REPO="${DATASET_REPO:-${NAMESPACE}/xtap-pool-data}"
+INDEX_BUCKET="${INDEX_BUCKET:-${NAMESPACE}/xtap-pool-bucket}"
 ALLOWED_USERS="${ALLOWED_USERS:-osolmaz}"
+LLM_MODEL="${LLM_MODEL:-zai-org/GLM-5.2:fireworks-ai}"
+TAXONOMY_VERSION="${TAXONOMY_VERSION:-1}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+INDEX_WORK="$(mktemp -d)"
+trap 'rm -rf "$STAGE" "$INDEX_WORK"' EXIT
 
-echo "==> Creating repos (idempotent)"
+echo "==> Creating storage and Space resources (idempotent)"
 hf repos create "$DATASET_REPO" --repo-type dataset --private 2>/dev/null || true
+hf buckets create "$INDEX_BUCKET" --private --exist-ok
 # The Space itself is public: a private Space would put HF's repo-access gate
-# in front of the app, blocking friends who are on ALLOWED_USERS but not
-# Space collaborators. All data access is enforced in-app (OAuth allowlist +
-# pool tokens); anonymous visitors only see the sign-in page. To keep the
-# Space page private instead, add every friend as a Space collaborator.
+# in front of the app. Anonymous visitors still see only the sign-in page.
 hf repos create "$SPACE_REPO" --repo-type space --space-sdk docker 2>/dev/null || true
+
+if [[ -z "${XTAP_STORAGE_TOKEN:-}" ]]; then
+  cat >&2 <<EOF
+XTAP_STORAGE_TOKEN is required before deployment.
+Create a fine-grained token with read/write access to exactly:
+  dataset: $DATASET_REPO
+  Bucket:  $INDEX_BUCKET
+Then rerun this command with XTAP_STORAGE_TOKEN set. The script will use it to
+bootstrap the durable index and install the same value as the Space HF_TOKEN.
+EOF
+  exit 2
+fi
+
+echo "==> Bootstrapping and verifying the durable index"
+DATA_DIR="$INDEX_WORK" \
+DATASET_REPO="$DATASET_REPO" \
+INDEX_BUCKET="$INDEX_BUCKET" \
+HF_TOKEN="$XTAP_STORAGE_TOKEN" \
+LLM_MODEL="$LLM_MODEL" \
+TAXONOMY_VERSION="$TAXONOMY_VERSION" \
+npm --prefix "$ROOT" run index:bootstrap
+
+echo "==> Setting Space secrets and variables"
+SPACE_REPO="$SPACE_REPO" \
+DATASET_REPO="$DATASET_REPO" \
+INDEX_BUCKET="$INDEX_BUCKET" \
+ALLOWED_USERS="$ALLOWED_USERS" \
+LLM_MODEL="$LLM_MODEL" \
+TAXONOMY_VERSION="$TAXONOMY_VERSION" \
+XTAP_STORAGE_TOKEN="$XTAP_STORAGE_TOKEN" \
+python3 <<'PY'
+import os
+import secrets
+
+from huggingface_hub import HfApi
+
+space = os.environ["SPACE_REPO"]
+api = HfApi()
+variables = dict(api.get_space_variables(space))
+for name in (
+    "DATASET_REPO",
+    "INDEX_BUCKET",
+    "ALLOWED_USERS",
+    "LLM_MODEL",
+    "TAXONOMY_VERSION",
+):
+    api.add_space_variable(space, name, os.environ[name])
+api.add_space_secret(space, "HF_TOKEN", os.environ["XTAP_STORAGE_TOKEN"])
+# Secrets cannot be listed back, so a sentinel variable marks that they were
+# set once. Never rotate silently: rotating logs everyone out or disconnects
+# every extension.
+if "SECRETS_INITIALIZED" not in variables:
+    for name in ("POOL_SIGNING_SECRET", "SESSION_SECRET"):
+        api.add_space_secret(space, name, secrets.token_hex(32))
+    api.add_space_variable(space, "SECRETS_INITIALIZED", "1")
+print("Set storage variables, contract variables, and the scoped HF_TOKEN.")
+PY
 
 echo "==> Staging Space contents"
 git -C "$ROOT" archive HEAD | tar -x -C "$STAGE"
@@ -35,30 +97,5 @@ rm -rf "$STAGE/docs" "$STAGE/extension"
 echo "==> Uploading to $SPACE_REPO"
 hf upload "$SPACE_REPO" "$STAGE" . --repo-type space --commit-message "deploy: $(git -C "$ROOT" rev-parse --short HEAD)"
 
-echo "==> Setting Space secrets and variables"
-python3 - "$SPACE_REPO" "$DATASET_REPO" "$ALLOWED_USERS" <<'PY'
-import secrets
-import sys
-
-from huggingface_hub import HfApi
-
-space, dataset, allowed = sys.argv[1:4]
-api = HfApi()
-variables = dict(api.get_space_variables(space))
-api.add_space_variable(space, "DATASET_REPO", dataset)
-api.add_space_variable(space, "ALLOWED_USERS", allowed)
-# Secrets cannot be listed back, so a sentinel variable marks that they were
-# set once. Never rotate silently: rotating logs everyone out / disconnects
-# every extension.
-if "SECRETS_INITIALIZED" not in variables:
-    for name in ("POOL_SIGNING_SECRET", "SESSION_SECRET"):
-        api.add_space_secret(space, name, secrets.token_hex(32))
-    api.add_space_variable(space, "SECRETS_INITIALIZED", "1")
-print("Set DATASET_REPO, ALLOWED_USERS, POOL_SIGNING_SECRET, SESSION_SECRET.")
-print("Remaining manual steps:")
-print(f"  1. Create a fine-grained token with read/write access to {dataset} only,")
-print(f"     then: python3 -c \"from huggingface_hub import HfApi; HfApi().add_space_secret('{space}', 'HF_TOKEN', '<token>')\"")
-print(f"  2. Optionally import history: scripts/seed-dataset.sh {dataset} <hf-username> ~/Downloads/xtap")
-PY
-
 echo "==> Done. Space: https://huggingface.co/spaces/$SPACE_REPO"
+echo "Optional history import: scripts/seed-dataset.sh $DATASET_REPO <hf-username> ~/Downloads/xtap"
