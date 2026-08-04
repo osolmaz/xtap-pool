@@ -24,7 +24,8 @@ const configSchema = z.object({
   ENRICH_MAX_COST_PER_CALL_USD: z.coerce.number().positive().optional(),
   ENRICH_INPUT_TOKEN_USD: z.coerce.number().nonnegative().optional(),
   ENRICH_OUTPUT_TOKEN_USD: z.coerce.number().nonnegative().optional(),
-  ENRICH_MAX_DISCARDED_ASSIGNMENTS: z.coerce.number().int().nonnegative().optional(),
+  ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: z.coerce.number().nonnegative().optional(),
+  ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: z.coerce.number().int().positive().optional(),
   LLM_MODEL: z.string().min(1).default("zai-org/GLM-5.2"),
   TAXONOMY_VERSION: z.coerce.number().int().min(1).default(1),
 });
@@ -54,7 +55,8 @@ export type SpaceConfig = {
   enrichMaxCostPerCallUsd?: number;
   enrichInputTokenUsd?: number;
   enrichOutputTokenUsd?: number;
-  enrichMaxDiscardedAssignments?: number;
+  enrichMaxDiscardedAssignmentsPerUnit?: number;
+  enrichDiscardedAssignmentRateMinUnits?: number;
   llmModel: string;
   taxonomyVersion: number;
 };
@@ -74,6 +76,14 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
   ) {
     throw new Error(
       "ENRICH_MAX_COST_USD requires ENRICH_MAX_COST_PER_CALL_USD, ENRICH_INPUT_TOKEN_USD and ENRICH_OUTPUT_TOKEN_USD.",
+    );
+  }
+  if (
+    (parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT === undefined) !==
+    (parsed.ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS === undefined)
+  ) {
+    throw new Error(
+      "ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT and ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS must be configured together.",
     );
   }
   const host = parsed.SPACE_HOST.replace(/\/+$/, "");
@@ -115,9 +125,16 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     ...(parsed.ENRICH_OUTPUT_TOKEN_USD === undefined
       ? {}
       : { enrichOutputTokenUsd: parsed.ENRICH_OUTPUT_TOKEN_USD }),
-    ...(parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS === undefined
+    ...(parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT === undefined
       ? {}
-      : { enrichMaxDiscardedAssignments: parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS }),
+      : {
+          enrichMaxDiscardedAssignmentsPerUnit: parsed.ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT,
+        }),
+    ...(parsed.ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS === undefined
+      ? {}
+      : {
+          enrichDiscardedAssignmentRateMinUnits: parsed.ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS,
+        }),
     llmModel: parsed.LLM_MODEL,
     taxonomyVersion: parsed.TAXONOMY_VERSION,
   };

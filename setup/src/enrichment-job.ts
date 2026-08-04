@@ -39,7 +39,8 @@ export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> 
   ENRICH_MAX_COST_PER_CALL_USD: "0.25",
   ENRICH_INPUT_TOKEN_USD: "0.0000014",
   ENRICH_OUTPUT_TOKEN_USD: "0.0000044",
-  ENRICH_MAX_DISCARDED_ASSIGNMENTS: "100",
+  ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15",
+  ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200",
   LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
   TAXONOMY_VERSION: "1",
 };
@@ -54,7 +55,6 @@ const CPU_BASIC_HOURLY_CEILING_USD = 0.011;
 
 const nonempty = z.string().min(1);
 const positiveInteger = z.string().regex(/^[1-9][0-9]*$/u);
-const nonnegativeInteger = z.string().regex(/^(?:0|[1-9][0-9]*)$/u);
 const positiveNumber = z.string().refine((value) => finiteNumber(value) > 0, "must be positive");
 const nonnegativeNumber = z
   .string()
@@ -80,7 +80,8 @@ const jobVariablesSchema = z
     ENRICH_MAX_COST_PER_CALL_USD: positiveNumber,
     ENRICH_INPUT_TOKEN_USD: nonnegativeNumber,
     ENRICH_OUTPUT_TOKEN_USD: nonnegativeNumber,
-    ENRICH_MAX_DISCARDED_ASSIGNMENTS: nonnegativeInteger,
+    ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: nonnegativeNumber,
+    ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: positiveInteger,
     LLM_MODEL: nonempty,
     TAXONOMY_VERSION: positiveInteger,
   })
@@ -188,7 +189,9 @@ export async function desiredEnrichmentJob(
     ENRICH_MAX_COST_PER_CALL_USD: configured.ENRICH_MAX_COST_PER_CALL_USD,
     ENRICH_INPUT_TOKEN_USD: configured.ENRICH_INPUT_TOKEN_USD,
     ENRICH_OUTPUT_TOKEN_USD: configured.ENRICH_OUTPUT_TOKEN_USD,
-    ENRICH_MAX_DISCARDED_ASSIGNMENTS: configured.ENRICH_MAX_DISCARDED_ASSIGNMENTS,
+    ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: configured.ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT,
+    ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS:
+      configured.ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS,
     LLM_MODEL: configured.LLM_MODEL,
     TAXONOMY_VERSION: configured.TAXONOMY_VERSION,
     XTAP_SOURCE_REVISION: deployment.source_revision,

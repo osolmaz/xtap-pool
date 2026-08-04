@@ -63,6 +63,8 @@ describe("loadConfig", () => {
       INFERENCE_TOKEN: "hf_inference",
       ENRICH_INTERVAL_MS: "5000",
       ENRICH_MAX_CONCURRENT_CALLS: "32",
+      ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15",
+      ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200",
       LLM_MODEL: "meta-llama/Llama-4",
       TAXONOMY_VERSION: "3",
     });
@@ -70,6 +72,8 @@ describe("loadConfig", () => {
     expect(config.inferenceToken).toBe("hf_inference");
     expect(config.enrichIntervalMs).toBe(5000);
     expect(config.enrichMaxConcurrentCalls).toBe(32);
+    expect(config.enrichMaxDiscardedAssignmentsPerUnit).toBe(0.15);
+    expect(config.enrichDiscardedAssignmentRateMinUnits).toBe(200);
     expect(config.llmModel).toBe("meta-llama/Llama-4");
     expect(config.taxonomyVersion).toBe(3);
     expect(() => loadConfig({ ...baseEnv, TAXONOMY_VERSION: "0" })).toThrow();
@@ -81,6 +85,29 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...baseEnv, ENRICH_ENABLED: "true" })).toThrow(
       "INFERENCE_TOKEN is required",
     );
+  });
+
+  it("requires both discarded-assignment rate settings", () => {
+    expect(() =>
+      loadConfig({ ...baseEnv, ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15" }),
+    ).toThrow("must be configured together");
+    expect(() =>
+      loadConfig({ ...baseEnv, ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200" }),
+    ).toThrow("must be configured together");
+    expect(() =>
+      loadConfig({
+        ...baseEnv,
+        ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "-0.1",
+        ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200",
+      }),
+    ).toThrow();
+    expect(() =>
+      loadConfig({
+        ...baseEnv,
+        ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15",
+        ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "0",
+      }),
+    ).toThrow();
   });
 
   it("requires measurable pricing and a conservative per-call bound for a cost ceiling", () => {

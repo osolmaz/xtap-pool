@@ -282,7 +282,10 @@ export type WorkerCeilings = {
   maxCostUsd?: number | undefined;
   /** Conservative configured upper bound for one provider call. */
   maxCostPerCallUsd?: number | undefined;
-  maxDiscardedAssignments?: number | undefined;
+  /** Rejected label assignments divided by successfully enriched units. */
+  maxDiscardedAssignmentsPerUnit?: number | undefined;
+  /** Successful units required before evaluating discarded-assignment quality. */
+  discardedAssignmentRateMinUnits?: number | undefined;
 };
 
 /** Injectable exact-Hub verifier. It receives only bounded label evidence. */
@@ -400,6 +403,7 @@ function initReceipt(
 export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichReceipt> {
   const workerId = deps.workerId ?? randomUUID();
   const maxConcurrentCalls = configuredConcurrency(deps.maxConcurrentCalls);
+  validateDiscardedAssignmentRateCeiling(deps.ceilings ?? {});
   const contractHash = contractHashFor(deps);
   deps.enrichStore.setContractHash(contractHash);
   const receipt = initReceipt(contractHash, workerId, deps.now, maxConcurrentCalls);
@@ -659,6 +663,40 @@ function errorRate(receipt: EnrichReceipt): number {
   return processed === 0 ? 0 : receipt.failures / processed;
 }
 
+function discardedAssignmentsPerUnit(receipt: EnrichReceipt): number {
+  return receipt.units === 0 ? 0 : receipt.discarded_assignments / receipt.units;
+}
+
+function validateDiscardedAssignmentRateCeiling(ceilings: WorkerCeilings): void {
+  const maximum = ceilings.maxDiscardedAssignmentsPerUnit;
+  const minimumUnits = ceilings.discardedAssignmentRateMinUnits;
+  if ((maximum === undefined) !== (minimumUnits === undefined)) {
+    throw new Error(
+      "maxDiscardedAssignmentsPerUnit and discardedAssignmentRateMinUnits must be configured together.",
+    );
+  }
+  if (maximum !== undefined && (!Number.isFinite(maximum) || maximum < 0)) {
+    throw new Error("maxDiscardedAssignmentsPerUnit must be a finite nonnegative number.");
+  }
+  if (minimumUnits !== undefined && (!Number.isInteger(minimumUnits) || minimumUnits < 1)) {
+    throw new Error("discardedAssignmentRateMinUnits must be a positive integer.");
+  }
+}
+
+function discardedAssignmentQualityExceeded(
+  receipt: EnrichReceipt,
+  ceilings: WorkerCeilings,
+): boolean {
+  const maximum = ceilings.maxDiscardedAssignmentsPerUnit;
+  const minimumUnits = ceilings.discardedAssignmentRateMinUnits;
+  if (maximum === undefined || minimumUnits === undefined) return false;
+  return (
+    receipt.units >= minimumUnits &&
+    receipt.discarded_assignments > 0 &&
+    discardedAssignmentsPerUnit(receipt) >= maximum
+  );
+}
+
 function qualityCeilingHit(receipt: EnrichReceipt, ceilings: WorkerCeilings): string | undefined {
   if (
     ceilings.maxErrorRate !== undefined &&
@@ -667,14 +705,9 @@ function qualityCeilingHit(receipt: EnrichReceipt, ceilings: WorkerCeilings): st
   ) {
     return "max_error_rate";
   }
-  if (
-    ceilings.maxDiscardedAssignments !== undefined &&
-    receipt.discarded_assignments > 0 &&
-    receipt.discarded_assignments >= ceilings.maxDiscardedAssignments
-  ) {
-    return "max_discarded_assignments";
-  }
-  return undefined;
+  return discardedAssignmentQualityExceeded(receipt, ceilings)
+    ? "max_discarded_assignments_per_unit"
+    : undefined;
 }
 
 function ceilingHit(
