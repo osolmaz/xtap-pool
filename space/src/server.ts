@@ -131,9 +131,25 @@ const app = createApp({
     lastReceipt: () => lastReceipt,
   },
   ingest: (username, payload) =>
-    mutex.run(() =>
-      ingestBatch({ store, mirror, enrich: enrichStore, now: () => new Date() }, username, payload),
-    ),
+    mutex.run(async () => {
+      const result = await ingestBatch(
+        { store, mirror, enrich: enrichStore, now: () => new Date() },
+        username,
+        payload,
+      );
+      try {
+        await index.advanceToLatest();
+        applyIndexStats();
+        datasetState = { state: "ready" };
+        readiness = buildReadiness();
+      } catch (error) {
+        const message = errorMessage(error);
+        datasetState = { state: "invalid", error: `durable index ingest sync failed: ${message}` };
+        readiness = buildReadiness();
+        throw error;
+      }
+      return result;
+    }),
   repairMembership: (actor) =>
     mutex.run(async () => {
       const pool = await membership.repairConfig(actor);
