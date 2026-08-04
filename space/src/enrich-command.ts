@@ -67,6 +67,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
   );
   const publicationBase = join(config.dataDir, "index", "publication-base.sqlite");
   await index.createWorkingCopy(publicationBase);
+  const predecessorKeys = index.retainedDatabaseKeys();
 
   const llm = createRouterLlmClient({
     hfToken: config.inferenceToken,
@@ -109,6 +110,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     ...indexOptions,
     databasePath: publicationBase,
     mirror: publicationMirror,
+    predecessorKeys,
   });
   try {
     const { advance: finalAdvance, manifest } = await publication.publishLatest();
