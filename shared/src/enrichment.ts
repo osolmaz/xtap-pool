@@ -3,6 +3,8 @@ import { z } from "zod";
 import { dayKey } from "./tweet.js";
 import type { Tweet } from "./tweet.js";
 
+export const DEFAULT_ENRICHMENT_MODEL = "zai-org/GLM-5.2:fireworks-ai";
+
 /** One preset taxonomy entry; the description steers the classifier. */
 export const labelConfigSchema = z.object({
   name: z.string().min(1),

@@ -16,7 +16,12 @@ import {
 } from "@huggingface/hub";
 import { z } from "zod";
 
-import { DatasetMirror, datasetSourceKind } from "./dataset.js";
+import {
+  assertDatasetRepoReadable,
+  DatasetMirror,
+  datasetSourceKind,
+  isHubNotFound,
+} from "./dataset.js";
 import type { DatasetSourceKind } from "./dataset.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
@@ -533,19 +538,24 @@ async function listDatasetPrefix(
   prefix: string,
 ): Promise<DatasetSourceFile[]> {
   const files: DatasetSourceFile[] = [];
-  for await (const entry of listFiles({
-    repo,
-    accessToken,
-    recursive: true,
-    path: prefix,
-    revision,
-  })) {
-    if (entry.type !== "file" || !entry.path.endsWith(".jsonl")) continue;
-    const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
-    if (oid === undefined || oid.length === 0) {
-      throw new Error(`dataset source has no immutable object id: ${entry.path}`);
+  try {
+    for await (const entry of listFiles({
+      repo,
+      accessToken,
+      recursive: true,
+      path: prefix,
+      revision,
+    })) {
+      if (entry.type !== "file" || !entry.path.endsWith(".jsonl")) continue;
+      const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
+      if (oid === undefined || oid.length === 0) {
+        throw new Error(`dataset source has no immutable object id: ${entry.path}`);
+      }
+      files.push({ path: entry.path, oid, size: entry.size });
     }
-    files.push({ path: entry.path, oid, size: entry.size });
+  } catch (error) {
+    if (!isHubNotFound(error)) throw error;
+    await assertDatasetRepoReadable(repo, accessToken, revision);
   }
   return files;
 }

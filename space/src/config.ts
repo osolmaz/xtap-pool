@@ -1,3 +1,4 @@
+import { DEFAULT_ENRICHMENT_MODEL } from "@xtap-pool/shared";
 import { z } from "zod";
 
 const configSchema = z.object({
@@ -27,7 +28,7 @@ const configSchema = z.object({
   ENRICH_OUTPUT_TOKEN_USD: z.coerce.number().nonnegative().optional(),
   ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: z.coerce.number().nonnegative().optional(),
   ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: z.coerce.number().int().positive().optional(),
-  LLM_MODEL: z.string().min(1).default("zai-org/GLM-5.2"),
+  LLM_MODEL: z.string().min(1).default(DEFAULT_ENRICHMENT_MODEL),
   TAXONOMY_VERSION: z.coerce.number().int().min(1).default(1),
 });
 
