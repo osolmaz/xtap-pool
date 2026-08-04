@@ -44,6 +44,27 @@ let inferenceCredential: InferenceCredentialReadiness = config.enrichEnabled
 let readiness: AppReadiness;
 let credentialRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let enrichmentRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let activeFetch: (request: Request) => Response | Promise<Response> = () =>
+  Response.json(
+    {
+      ok: false,
+      dataset: {
+        credential: datasetCredential.credential,
+        state: datasetCredential.credential === "invalid" ? "invalid" : "unknown",
+        indexed_files: 0,
+        indexed_tweets: 0,
+        enrichment_rows: 0,
+        ...(datasetCredential.credential === "ok"
+          ? {}
+          : { credential_error: datasetCredential.error }),
+        error: datasetState.state === "ready" ? undefined : datasetState.error,
+      },
+    },
+    { status: 503 },
+  );
+serve({ fetch: (request: Request) => activeFetch(request), port: config.port }, (info) => {
+  console.log(`[xtap-pool] listening on :${String(info.port)}`);
+});
 
 [datasetCredential, inferenceCredential] = await Promise.all([
   checkDatasetCredential({
@@ -56,6 +77,7 @@ let enrichmentRefreshTimer: ReturnType<typeof setTimeout> | undefined;
     token: config.inferenceToken,
   }),
 ]);
+await waitForStorageCredential();
 
 const [membership, serviceAccounts] = await Promise.all([
   PoolMembership.load({
@@ -156,12 +178,9 @@ if (config.enrichEnabled) {
       "to drain the queue.",
   );
 }
+activeFetch = (request) => app.fetch(request);
 startCredentialRetryIfNeeded();
 startEnrichmentRefresh();
-
-serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`[xtap-pool] listening on :${String(info.port)}`);
-});
 
 function applyIndexStats(): void {
   const stats = index.stats();
@@ -367,6 +386,22 @@ async function retryUncertainCredentials(): Promise<void> {
     });
   }
   readiness = buildReadiness();
+}
+
+async function waitForStorageCredential(): Promise<void> {
+  while (!datasetCredentialOk(datasetCredential)) {
+    datasetState = {
+      state: datasetCredential.credential === "invalid" ? "invalid" : "unknown",
+      error: "error" in datasetCredential ? datasetCredential.error : "HF_TOKEN is unavailable.",
+    };
+    console.error(`[xtap-pool] storage credential unavailable: ${datasetState.error}`);
+    await new Promise((resolve) => setTimeout(resolve, credentialRetryMs()));
+    datasetCredential = await checkDatasetCredential({
+      token: config.hfToken,
+      datasetRepo: config.datasetRepo,
+      indexBucket: config.indexBucket,
+    });
+  }
 }
 
 function credentialRetryMs(): number {
