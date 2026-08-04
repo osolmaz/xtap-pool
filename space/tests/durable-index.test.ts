@@ -24,7 +24,7 @@ class FakeSource implements DatasetSnapshotClient {
   revision = "1".repeat(40);
   files = new Map<string, string>();
   textFiles = new Map<string, string>();
-  commitConflicts = 0;
+  commitErrors: unknown[] = [];
 
   currentRevision(): Promise<string> {
     return Promise.resolve(this.revision);
@@ -51,10 +51,12 @@ class FakeSource implements DatasetSnapshotClient {
   }
 
   commitText(path: string, content: string, parentRevision: string): Promise<string> {
-    if (this.commitConflicts > 0) {
-      this.commitConflicts -= 1;
+    const commitError = this.commitErrors.shift();
+    if (commitError !== undefined) {
       this.advanceRevision();
-      return Promise.reject(new Error("The branch was updated since publication started"));
+      // Deliberately permit a non-Error rejection to cover defensive classifier behavior.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      return Promise.reject(commitError);
     }
     if (parentRevision !== this.revision) {
       return Promise.reject(new Error("parent commit does not match dataset HEAD"));
@@ -292,13 +294,34 @@ describe("durable enrichment index", () => {
   it("re-advances and retries when the dataset changes during publication", async () => {
     source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
     const index = await DurableIndex.bootstrap(options("publication-retry"));
-    source.commitConflicts = 1;
+    source.commitErrors.push(new Error("The branch was updated since publication started"));
 
     const published = await index.publishLatest();
 
     expect(published.manifest.dataset.revision).toBe(published.advance.revision);
     expect(source.textFiles.has("index/current.json")).toBe(true);
     expect(bucket.files.has(published.manifest.database.key)).toBe(true);
+    index.close();
+  });
+
+  it("retries status-code conflicts but rejects unrelated and exhausted failures", async () => {
+    source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
+    const index = await DurableIndex.bootstrap(options("publication-errors"));
+    source.commitErrors.push(Object.assign(new Error("conflict"), { statusCode: 409 }));
+    await expect(index.publishLatest()).resolves.toHaveProperty("manifest.dataset.repo", DATASET);
+
+    source.commitErrors.push(new Error("permission denied"));
+    await expect(index.publishLatest()).rejects.toThrow("permission denied");
+    source.commitErrors.push("non-error rejection");
+    await expect(index.publishLatest()).rejects.toBe("non-error rejection");
+
+    source.commitErrors.push(
+      ...Array.from(
+        { length: 5 },
+        () => new Error("The branch was updated since publication started"),
+      ),
+    );
+    await expect(index.publishLatest()).rejects.toThrow("branch was updated");
     index.close();
   });
 
