@@ -30,6 +30,7 @@ const INDEX_SCHEMA_VERSION = 1;
 const CURRENT_MANIFEST_KEY = "index/current.json";
 const DATABASE_PREFIX = "index/databases";
 const RETAINED_PREDECESSORS = 3;
+const MAX_PUBLICATION_ATTEMPTS = 5;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const REVISION_PATTERN = /^[a-f0-9]{7,64}$/;
 
@@ -341,6 +342,21 @@ export class DurableIndex {
     await this.store.database.backup(path);
   }
 
+  async publishLatest(): Promise<{
+    advance: IndexAdvance;
+    manifest: DurableIndexManifest;
+  }> {
+    for (let attempt = 1; attempt <= MAX_PUBLICATION_ATTEMPTS; attempt += 1) {
+      const advance = await this.advanceToLatest();
+      try {
+        return { advance, manifest: await this.publish() };
+      } catch (error) {
+        if (attempt === MAX_PUBLICATION_ATTEMPTS || !isConcurrentDatasetUpdate(error)) throw error;
+      }
+    }
+    throw new Error("durable index publication retry invariant failed");
+  }
+
   async publish(): Promise<DurableIndexManifest> {
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new Error("durable index metadata is missing");
@@ -443,6 +459,19 @@ export class DurableIndex {
     const stale = files.map((file) => file.path).filter((path) => !keep.has(path));
     if (stale.length > 0) await this.bucket.remove(stale);
   }
+}
+
+function isConcurrentDatasetUpdate(error: unknown): boolean {
+  const statusCode =
+    typeof error === "object" && error !== null && "statusCode" in error
+      ? (error as { statusCode?: unknown }).statusCode
+      : undefined;
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    statusCode === 409 ||
+    message.includes("branch was updated") ||
+    message.includes("parent commit does not match")
+  );
 }
 
 function assertSourceKind(

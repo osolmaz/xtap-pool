@@ -24,6 +24,7 @@ class FakeSource implements DatasetSnapshotClient {
   revision = "1".repeat(40);
   files = new Map<string, string>();
   textFiles = new Map<string, string>();
+  commitConflicts = 0;
 
   currentRevision(): Promise<string> {
     return Promise.resolve(this.revision);
@@ -50,6 +51,11 @@ class FakeSource implements DatasetSnapshotClient {
   }
 
   commitText(path: string, content: string, parentRevision: string): Promise<string> {
+    if (this.commitConflicts > 0) {
+      this.commitConflicts -= 1;
+      this.advanceRevision();
+      return Promise.reject(new Error("The branch was updated since publication started"));
+    }
     if (parentRevision !== this.revision) {
       return Promise.reject(new Error("parent commit does not match dataset HEAD"));
     }
@@ -280,6 +286,19 @@ describe("durable enrichment index", () => {
 
     await expect(index.publish()).rejects.toThrow("parent commit does not match");
     expect(source.textFiles.has("index/current.json")).toBe(false);
+    index.close();
+  });
+
+  it("re-advances and retries when the dataset changes during publication", async () => {
+    source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
+    const index = await DurableIndex.bootstrap(options("publication-retry"));
+    source.commitConflicts = 1;
+
+    const published = await index.publishLatest();
+
+    expect(published.manifest.dataset.revision).toBe(published.advance.revision);
+    expect(source.textFiles.has("index/current.json")).toBe(true);
+    expect(bucket.files.has(published.manifest.database.key)).toBe(true);
     index.close();
   });
 

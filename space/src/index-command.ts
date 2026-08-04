@@ -37,7 +37,7 @@ export async function runIndexCommand(env: Record<string, string | undefined>): 
     contractHash,
   });
   try {
-    const manifest = await index.publish();
+    const { manifest } = await index.publishLatest();
     const stats = index.stats();
     console.log(
       `[xtap-pool index] published ${manifest.database.sha256} at ` +

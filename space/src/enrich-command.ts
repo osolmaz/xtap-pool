@@ -111,8 +111,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     mirror: publicationMirror,
   });
   try {
-    const finalAdvance = await publication.advanceToLatest();
-    const manifest = await publication.publish();
+    const { advance: finalAdvance, manifest } = await publication.publishLatest();
     console.log(
       `[xtap-pool worker] published index ${manifest.database.sha256.slice(0, 12)} at ` +
         `${finalAdvance.revision.slice(0, 12)}; changed_files=${String(finalAdvance.filesChanged)} ` +
