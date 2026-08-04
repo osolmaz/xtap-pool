@@ -38,8 +38,11 @@ XTAP_STORAGE_TOKEN is required before deployment.
 Create a fine-grained token with read/write access to exactly:
   dataset: $DATASET_REPO
   Bucket:  $INDEX_BUCKET
-Then rerun this command with XTAP_STORAGE_TOKEN set. The script will use it to
-bootstrap the durable index and install the same value as the Space HF_TOKEN.
+Before rerunning, optionally import history so the first durable generation
+contains it:
+  scripts/seed-dataset.sh $DATASET_REPO <hf-username> ~/Downloads/xtap
+Then rerun this command with XTAP_STORAGE_TOKEN set. The script will bootstrap
+the durable index and install the same value as the Space HF_TOKEN.
 EOF
   exit 2
 fi
@@ -98,4 +101,3 @@ echo "==> Uploading to $SPACE_REPO"
 hf upload "$SPACE_REPO" "$STAGE" . --repo-type space --commit-message "deploy: $(git -C "$ROOT" rev-parse --short HEAD)"
 
 echo "==> Done. Space: https://huggingface.co/spaces/$SPACE_REPO"
-echo "Optional history import: scripts/seed-dataset.sh $DATASET_REPO <hf-username> ~/Downloads/xtap"
