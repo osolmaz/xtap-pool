@@ -71,12 +71,41 @@ describe("Hugging Face enrichment Job", () => {
         secret_names: "HF_TOKEN.INFERENCE_TOKEN",
       },
     });
+    expect(desired.environment).toMatchObject({
+      ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15",
+      ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200",
+    });
+    expect(desired.environment).not.toHaveProperty("ENRICH_MAX_DISCARDED_ASSIGNMENTS");
     expect(desired.environment).not.toHaveProperty("ENRICH_MAX_UNITS_PER_TICK");
     expect(desired.environment).not.toHaveProperty("ENRICH_MAX_TOKENS");
     expect(desiredEnrichmentJobHash(desired)).toMatch(/^[0-9a-f]{64}$/u);
     expect(Object.values(desired.labels).every((value) => /^[a-zA-Z0-9._-]*$/u.test(value))).toBe(
       true,
     );
+  });
+
+  it("binds both discarded-assignment rate settings into the schedule contract", async () => {
+    const baseline = await desiredFixture();
+    const changedRate = variables();
+    changedRate.set("ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "0.2");
+    const changedSample = variables();
+    changedSample.set("ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS", "400");
+
+    const rateContract = await desiredEnrichmentJob(
+      client,
+      "alice/xtap-pool",
+      "alice/xtap-pool-data",
+      changedRate,
+    );
+    const sampleContract = await desiredEnrichmentJob(
+      client,
+      "alice/xtap-pool",
+      "alice/xtap-pool-data",
+      changedSample,
+    );
+
+    expect(desiredEnrichmentJobHash(rateContract)).not.toBe(desiredEnrichmentJobHash(baseline));
+    expect(desiredEnrichmentJobHash(sampleContract)).not.toBe(desiredEnrichmentJobHash(baseline));
   });
 
   it("rejects a missing deployment manifest and invalid Space namespace", async () => {
@@ -112,6 +141,18 @@ describe("Hugging Face enrichment Job", () => {
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow("1 through 32");
+
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "1");
+    invalid.set("ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "-0.1");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow("nonnegative");
+
+    invalid.set("ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "0.15");
+    invalid.set("ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS", "0");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow();
   });
 
   it("classifies exact, stale, unrelated, and active Jobs", async () => {
@@ -635,7 +676,8 @@ function variables(): Map<string, string> {
     ["ENRICH_MAX_COST_PER_CALL_USD", "0.25"],
     ["ENRICH_INPUT_TOKEN_USD", "0.0000014"],
     ["ENRICH_OUTPUT_TOKEN_USD", "0.0000044"],
-    ["ENRICH_MAX_DISCARDED_ASSIGNMENTS", "100"],
+    ["ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "0.15"],
+    ["ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS", "200"],
     ["LLM_MODEL", "zai-org/GLM-5.2:fireworks-ai"],
     ["TAXONOMY_VERSION", "1"],
   ]);

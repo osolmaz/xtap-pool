@@ -145,11 +145,14 @@ passes and recurring paid work is explicitly approved.
 
 The Job receives separate purpose-scoped dataset-writer and inference secrets
 through Hugging Face Jobs. Its environment contains the dataset repo, model,
-taxonomy, pricing, and bounded unit, token, elapsed-time, error-rate,
-discarded-assignment, and cumulative-cost ceilings. Missing credentials or cost
-configuration fails before any provider call. The default is capped at $2 of
-inference and 400,000 total tokens per physical Job. Two canary Jobs plus their
-worst-case `cpu-basic` time have a cumulative hard ceiling below $4.02.
+taxonomy, pricing, elapsed-time, error-rate, discarded-assignment-rate, and
+cumulative-cost ceilings. The discarded-assignment quality guard counts rejected
+model labels per successfully enriched unit. It defaults to 0.15 after 200 units,
+so healthy large runs do not stop merely because they process more data. Missing
+credentials or cost configuration fails before any provider call. The default
+repair configuration caps each canary Job at $2 of inference and 40 minutes of
+worker time. Two canary Jobs plus their worst-case `cpu-basic` time have a
+cumulative hard ceiling below $4.02.
 Scheduled and manually triggered runs use the same non-concurrent Hugging Face
 schedule. The web API exposes no enrichment writer, and GitHub Actions remains
 CI-only.

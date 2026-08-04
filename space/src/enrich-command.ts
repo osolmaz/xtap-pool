@@ -78,7 +78,8 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     maxErrorRate: config.enrichMaxErrorRate,
     maxCostUsd: config.enrichMaxCostUsd,
     maxCostPerCallUsd: config.enrichMaxCostPerCallUsd,
-    maxDiscardedAssignments: config.enrichMaxDiscardedAssignments,
+    maxDiscardedAssignmentsPerUnit: config.enrichMaxDiscardedAssignmentsPerUnit,
+    discardedAssignmentRateMinUnits: config.enrichDiscardedAssignmentRateMinUnits,
   };
   const receipt = await runEnrichTick({
     enrichStore,

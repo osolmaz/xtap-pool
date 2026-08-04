@@ -97,6 +97,30 @@ function withEvidence(unitIds: string[], texts: Map<string, string>, name = "ai"
   return JSON.stringify({ units });
 }
 
+function withSelectedDiscardedPreset(
+  unitIds: string[],
+  texts: Map<string, string>,
+  discard: (unitId: string) => boolean,
+): string {
+  const units = Object.fromEntries(
+    unitIds.map((unitId) => {
+      const tweetId = unitId.split(":")[0] ?? "0";
+      const text = texts.get(unitId) ?? "";
+      const quote = text.slice(0, Math.min(20, text.length)) || "hello";
+      return [
+        unitId,
+        {
+          preset_labels: discard(unitId)
+            ? [{ name: "not-in-taxonomy", evidence: [{ tweet_id: tweetId, quote }] }]
+            : [],
+          free_labels: [],
+        },
+      ];
+    }),
+  );
+  return JSON.stringify({ units });
+}
+
 function hubJson(path: string): unknown {
   const content = hub.files.get(path);
   if (content === undefined) throw new Error(`missing Hub fixture: ${path}`);
@@ -562,15 +586,80 @@ describe("runEnrichTick", () => {
     expect(model).not.toHaveBeenCalled();
   });
 
-  it("allows clean work under zero-valued error and discard ceilings", async () => {
+  it("allows clean work under zero-valued error and discard-rate ceilings", async () => {
     seedUnit("100", "vllm ships fp8 kernels");
     const receipt = await runEnrichTick(
       deps(respondingClient(withEvidence), {
-        ceilings: { maxErrorRate: 0, maxDiscardedAssignments: 0 },
+        ceilings: {
+          maxErrorRate: 0,
+          maxDiscardedAssignmentsPerUnit: 0,
+          discardedAssignmentRateMinUnits: 1,
+        },
       }),
     );
     expect(receipt).toMatchObject({ calls: 1, units: 1, failures: 0, discarded_assignments: 0 });
     expect(receipt.stopped_by).toBeUndefined();
+  });
+
+  it("does not turn a healthy discarded-assignment rate into a volume ceiling", async () => {
+    for (let id = 100; id < 120; id += 1) seedUnit(String(id), `unit ${String(id)}`);
+    const reply = (unitIds: string[], texts: Map<string, string>): string =>
+      withSelectedDiscardedPreset(
+        unitIds,
+        texts,
+        (unitId) => Number(unitId.split(":")[0]) % 10 === 0,
+      );
+
+    const receipt = await runEnrichTick(
+      deps(respondingClient(reply), {
+        unitsPerCall: 1,
+        ceilings: {
+          maxDiscardedAssignmentsPerUnit: 0.25,
+          discardedAssignmentRateMinUnits: 10,
+        },
+      }),
+    );
+
+    expect(receipt).toMatchObject({ calls: 20, units: 20, discarded_assignments: 2 });
+    expect(receipt.stopped_by).toBeUndefined();
+  });
+
+  it("waits for the minimum sample before enforcing discarded-assignment quality", async () => {
+    for (let id = 100; id < 104; id += 1) seedUnit(String(id), `unit ${String(id)}`);
+    const reply = (unitIds: string[], texts: Map<string, string>): string =>
+      withSelectedDiscardedPreset(unitIds, texts, (unitId) => Number(unitId.split(":")[0]) < 102);
+
+    const receipt = await runEnrichTick(
+      deps(respondingClient(reply), {
+        unitsPerCall: 1,
+        ceilings: {
+          maxDiscardedAssignmentsPerUnit: 0.5,
+          discardedAssignmentRateMinUnits: 3,
+        },
+      }),
+    );
+
+    expect(receipt).toMatchObject({
+      calls: 3,
+      units: 3,
+      discarded_assignments: 2,
+      stopped_by: "max_discarded_assignments_per_unit",
+    });
+    expect(enrichStore.queueEntry("103:someone")?.status).toBe("pending");
+  });
+
+  it("fails closed when only one discarded-assignment rate setting is supplied", async () => {
+    seedUnit("100", "vllm ships fp8 kernels");
+    const model = vi.fn<LlmClient>(() => Promise.reject(new Error("should not run")));
+
+    await expect(
+      runEnrichTick(
+        deps(model, {
+          ceilings: { maxDiscardedAssignmentsPerUnit: 0.15 },
+        }),
+      ),
+    ).rejects.toThrow("must be configured together");
+    expect(model).not.toHaveBeenCalled();
   });
 
   it("stops after the first failure under a zero error-rate ceiling", async () => {
