@@ -7,25 +7,20 @@ import { createApp } from "./app.js";
 import type { AppReadiness } from "./app.js";
 import { loadConfig } from "./config.js";
 import { createHubClient, DatasetMirror } from "./dataset.js";
-import { datasetStateFromRebuildError, errorStatus } from "./dataset-state.js";
 import type { DatasetState } from "./dataset-state.js";
 import { checkDatasetCredential, datasetCredentialOk } from "./dataset-token.js";
 import type { DatasetCredentialReadiness } from "./dataset-token.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
-import { EnrichStore } from "./enrich-store.js";
+import { DurableIndex } from "./durable-index.js";
 import { contractHashFor } from "./enrich-worker.js";
 import { ingestBatch, Mutex } from "./ingest.js";
 import { checkInferenceCredential, inferenceCredentialOk } from "./inference-token.js";
 import type { InferenceCredentialReadiness } from "./inference-token.js";
 import { PoolMembership } from "./membership.js";
 import { ServiceAccountRegistry } from "./service-accounts.js";
-import { TweetStore } from "./store.js";
 import { UnitStore } from "./unit-store.js";
 
 const config = loadConfig(process.env);
-const store = new TweetStore();
-const enrichStore = new EnrichStore(store.database, config.taxonomyVersion);
-const unitStore = new UnitStore(store.database, config.taxonomyVersion);
 const hub = createHubClient(config.datasetRepo, config.hfToken);
 const mirror = new DatasetMirror(hub, join(config.dataDir, "mirror"));
 const mutex = new Mutex();
@@ -37,7 +32,7 @@ let rebuilt: RebuildStats = { files: 0, tweets: 0 };
 let enrichment: EnrichmentStats = { files: 0, rows: 0 };
 let datasetState: DatasetState = {
   state: "unknown",
-  error: "The dataset index has not been built yet.",
+  error: "The durable dataset index has not been restored yet.",
 };
 let datasetCredential: DatasetCredentialReadiness = {
   credential: "unknown",
@@ -68,7 +63,26 @@ const [membership, serviceAccounts] = await Promise.all([
   ServiceAccountRegistry.load({ mirror, now: () => new Date() }),
 ]);
 let taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
-enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
+if (taxonomy.error !== undefined) {
+  throw new Error(`enrichment taxonomy unavailable: ${taxonomy.error}`);
+}
+const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
+const index = await DurableIndex.restore({
+  datasetRepo: config.datasetRepo,
+  indexBucket: config.indexBucket,
+  accessToken: config.hfToken,
+  databasePath: join(config.dataDir, "index", "space.sqlite"),
+  mirror,
+  taxonomyVersion: config.taxonomyVersion,
+  contractHash,
+});
+const initialAdvance = await index.advanceToLatest();
+const store = index.store;
+const enrichStore = index.enrichStore;
+const unitStore = new UnitStore(store.database, config.taxonomyVersion);
+applyIndexStats();
+datasetState = { state: "ready" };
+enrichStore.releaseClaims();
 readiness = buildReadiness();
 let lastReceipt: import("@xtap-pool/shared").EnrichReceipt | undefined;
 function recordLastReceipt(receipt: import("@xtap-pool/shared").EnrichReceipt | undefined): void {
@@ -113,8 +127,11 @@ const app = createApp({
 app.use("*", serveStatic({ root: config.staticRoot }));
 app.use("*", serveStatic({ root: config.staticRoot, path: "index.html" }));
 
-console.log(`[xtap-pool] rebuilding index from ${config.datasetRepo} ...`);
-await rebuildDatasetIndexIfReady();
+console.log(
+  `[xtap-pool] restored durable index ${initialAdvance.revision.slice(0, 12)} from ` +
+    `${config.indexBucket}; changed_files=${String(initialAdvance.filesChanged)} ` +
+    `rows=${String(initialAdvance.rowsApplied)}`,
+);
 readiness = buildReadiness();
 const pool = membership.snapshot();
 console.log(
@@ -142,30 +159,11 @@ serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`[xtap-pool] listening on :${String(info.port)}`);
 });
 
-async function rebuildDatasetIndexIfReady(): Promise<void> {
-  if (!datasetCredentialOk(datasetCredential)) return;
-  datasetState = { state: "unknown", error: "Rebuilding the dataset index." };
-  readiness = buildReadiness();
-  mirror.clearForRebuild();
-  enrichStore.clearForRebuild();
-  store.clearForRebuild();
-  rebuilt = { files: 0, tweets: 0 };
-  enrichment = { files: 0, rows: 0 };
-  try {
-    rebuilt = await mirror.rebuild(store, enrichStore);
-    enrichment = await mirror.rebuildEnrichment(enrichStore);
-    recordLastReceipt(mirror.latestReceipt());
-    enrichStore.releaseClaims();
-    datasetState = { state: "ready" };
-  } catch (error) {
-    const status = errorStatus(error);
-    if (status === 401 || status === 403) {
-      datasetCredential = { credential: "invalid", error: errorMessage(error) };
-      datasetState = { state: "unknown", error: "Dataset indexing requires a valid HF_TOKEN." };
-    } else {
-      datasetState = datasetStateFromRebuildError(error);
-    }
-  }
+function applyIndexStats(): void {
+  const stats = index.stats();
+  rebuilt = { files: stats.tweetFiles, tweets: stats.tweetRows };
+  enrichment = { files: stats.enrichmentFiles, rows: stats.enrichmentRows };
+  recordLastReceipt(mirror.latestReceipt());
 }
 
 /**
@@ -194,15 +192,13 @@ async function refreshExternalEnrichment(): Promise<void> {
     if (nextTaxonomy.error !== undefined) {
       throw new Error(`enrichment taxonomy refresh failed: ${nextTaxonomy.error}`);
     }
-    const refreshed = await mirror.refreshEnrichment(enrichStore, () => {
-      taxonomy = nextTaxonomy;
-      enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
-      if (lastReceipt?.contract_hash !== enrichStore.currentContractHash()) {
-        lastReceipt = undefined;
-      }
-    });
-    recordLastReceipt(refreshed.receipt);
-    enrichment = { ...enrichment, rows: enrichStore.enrichmentRowCount() };
+    const nextContractHash = contractHashFor({ taxonomy: nextTaxonomy, model: config.llmModel });
+    if (nextContractHash !== enrichStore.currentContractHash()) {
+      throw new Error("enrichment contract changed; publish a replacement durable index");
+    }
+    taxonomy = nextTaxonomy;
+    await index.advanceToLatest();
+    applyIndexStats();
     readiness = buildReadiness();
   });
 }
@@ -296,12 +292,17 @@ function taxonomyReady(): boolean {
   return taxonomy.error === undefined;
 }
 
+// eslint-disable-next-line complexity -- Recovery checks each independently persisted dataset-backed configuration.
 async function reloadDatasetBackedConfig(force: boolean): Promise<void> {
   if (force || membership.hasRetryableConfigError()) await membership.reload();
   if (force || serviceAccounts.hasRetryableConfigError()) await serviceAccounts.reload();
   if (config.enrichEnabled && (force || !taxonomyReady())) {
-    taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
-    enrichStore.setContractHash(contractHashFor({ taxonomy, model: config.llmModel }));
+    const nextTaxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
+    const nextContractHash = contractHashFor({ taxonomy: nextTaxonomy, model: config.llmModel });
+    if (nextContractHash !== enrichStore.currentContractHash()) {
+      throw new Error("enrichment contract changed; publish a replacement durable index");
+    }
+    taxonomy = nextTaxonomy;
   }
 }
 
@@ -348,7 +349,9 @@ async function retryUncertainCredentials(): Promise<void> {
     await mutex.run(async () => {
       await reloadDatasetBackedConfig(datasetRecovered);
       if (datasetRecovered || datasetState.state === "unknown") {
-        await rebuildDatasetIndexIfReady();
+        await index.advanceToLatest();
+        applyIndexStats();
+        datasetState = { state: "ready" };
       }
     });
   }

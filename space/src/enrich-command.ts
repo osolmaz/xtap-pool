@@ -1,9 +1,10 @@
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { loadConfig } from "./config.js";
 import { createHubClient, DatasetMirror } from "./dataset.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
-import { EnrichStore } from "./enrich-store.js";
+import { DurableIndex } from "./durable-index.js";
 import {
   contractHashFor,
   createExactHubVerifier,
@@ -14,7 +15,6 @@ import {
   runEnrichTick,
 } from "./enrich-worker.js";
 import type { WorkerCeilings } from "./enrich-worker.js";
-import { TweetStore } from "./store.js";
 
 /**
  * Standalone worker: rebuilds the local mirror from the dataset (system of
@@ -35,10 +35,8 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     process.exitCode = 2;
     return;
   }
-  const store = new TweetStore();
   const hub = createHubClient(config.datasetRepo, config.hfToken);
   const mirror = new DatasetMirror(hub, join(config.dataDir, "mirror"));
-  const enrichStore = new EnrichStore(store.database, config.taxonomyVersion, () => new Date());
   const taxonomy = await loadEnrichTaxonomy(mirror, config.taxonomyVersion);
   if (taxonomy.error !== undefined) {
     console.error(`[xtap-pool worker] taxonomy unavailable: ${taxonomy.error}`);
@@ -46,19 +44,29 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     return;
   }
   const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
-  enrichStore.setContractHash(contractHash);
 
   console.log(
-    `[xtap-pool worker] rebuilding index from ${config.datasetRepo}, contract ${contractHash.slice(0, 12)} ...`,
+    `[xtap-pool worker] restoring durable index from ${config.indexBucket}, contract ${contractHash.slice(0, 12)} ...`,
   );
-  mirror.clearForRebuild();
-  const tweetStats = await mirror.rebuild(store, enrichStore);
-  const enrichStats = await mirror.rebuildEnrichment(enrichStore);
-  enrichStore.releaseClaims();
+  const indexOptions = {
+    datasetRepo: config.datasetRepo,
+    indexBucket: config.indexBucket,
+    accessToken: config.hfToken,
+    databasePath: join(config.dataDir, "index", "worker.sqlite"),
+    mirror,
+    taxonomyVersion: config.taxonomyVersion,
+    contractHash,
+  };
+  const index = await DurableIndex.restore(indexOptions);
+  const advanced = await index.advanceToLatest();
+  index.enrichStore.releaseClaims();
   console.log(
-    `[xtap-pool worker] indexed ${String(tweetStats.tweets)} tweets, ` +
-      `${String(enrichStats.rows)} enrichment rows, ${String(enrichStats.attempts)} attempt events`,
+    `[xtap-pool worker] index revision ${advanced.revision.slice(0, 12)}; ` +
+      `changed_files=${String(advanced.filesChanged)} rows=${String(advanced.rowsApplied)} ` +
+      `tweets=${String(advanced.counts.tweets)} units=${String(advanced.counts.units)}`,
   );
+  const publicationBase = join(config.dataDir, "index", "publication-base.sqlite");
+  await index.createWorkingCopy(publicationBase);
 
   const llm = createRouterLlmClient({
     hfToken: config.inferenceToken,
@@ -82,7 +90,7 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     discardedAssignmentRateMinUnits: config.enrichDiscardedAssignmentRateMinUnits,
   };
   const receipt = await runEnrichTick({
-    enrichStore,
+    enrichStore: index.enrichStore,
     mirror,
     taxonomy,
     llm,
@@ -95,6 +103,27 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
     now: (): Date => new Date(),
     ceilings,
   });
+  index.close();
+  const publicationMirror = new DatasetMirror(hub, join(config.dataDir, "publication-mirror"));
+  const manifestBaselineSha256 = index.currentManifestBaselineSha256();
+  const publication = DurableIndex.openLocal({
+    ...indexOptions,
+    databasePath: publicationBase,
+    mirror: publicationMirror,
+    ...(manifestBaselineSha256 === undefined ? {} : { manifestBaselineSha256 }),
+  });
+  try {
+    const finalAdvance = await publication.advanceToLatest();
+    const manifest = await publication.publish();
+    console.log(
+      `[xtap-pool worker] published index ${manifest.database.sha256.slice(0, 12)} at ` +
+        `${finalAdvance.revision.slice(0, 12)}; changed_files=${String(finalAdvance.filesChanged)} ` +
+        `rows=${String(finalAdvance.rowsApplied)}`,
+    );
+  } finally {
+    publication.close();
+    await rm(publicationBase, { force: true });
+  }
   console.log(
     `[xtap-pool worker] finished: units=${String(receipt.units)} retries=${String(receipt.retries)} ` +
       `blocked=${String(receipt.blocked)} calls=${String(receipt.calls)} ` +
@@ -103,7 +132,6 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
       `tokens=${String(receipt.prompt_tokens + receipt.completion_tokens)} ` +
       `stopped_by=${receipt.stopped_by ?? "batch-complete"}`,
   );
-  store.close();
 }
 
 /**

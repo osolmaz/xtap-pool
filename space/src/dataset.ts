@@ -31,6 +31,13 @@ export type EnrichmentRefresh = {
   receipt?: EnrichReceipt;
 };
 
+export type DatasetSourceKind = "tweet" | "enrichment" | "attempt" | "registry" | "receipt";
+
+export type AppliedDatasetSource = {
+  kind: DatasetSourceKind;
+  rows: number;
+};
+
 type EnrichmentShardUpdate = {
   path: string;
   content: string;
@@ -354,6 +361,40 @@ export class DatasetMirror {
     return count;
   }
 
+  /** Apply one complete file or verified append suffix to the SQLite projection. */
+  applySourceContent(
+    path: string,
+    content: string,
+    store: TweetStore,
+    enrich: EnrichStore,
+  ): AppliedDatasetSource {
+    const kind = datasetSourceKind(path);
+    switch (kind) {
+      case "tweet": {
+        const tweets = parseJsonlTweets(content, path);
+        store.insert(tweets);
+        enrich.registerTweets(tweets);
+        return { kind, rows: tweets.length };
+      }
+      case "enrichment":
+        return { kind, rows: applyEnrichmentLines(enrich, content) };
+      case "attempt":
+        return { kind, rows: replayAttemptLines(enrich, content) };
+      case "registry":
+        return { kind, rows: replayRegistryLines(enrich, content) };
+      case "receipt":
+        this.recordLatestReceipt(content);
+        return { kind, rows: countValidReceipts(content) };
+    }
+  }
+
+  /** Keep a current source file locally so a later append preserves its prefix. */
+  rememberSourceFile(path: string, content: string): void {
+    const local = this.localPath(path);
+    mkdirSync(dirname(local), { recursive: true });
+    writeFileSync(local, content);
+  }
+
   /** Read a dataset file through the Hub, returning undefined when it is absent. */
   async readText(path: string): Promise<string | undefined> {
     try {
@@ -381,10 +422,13 @@ export class DatasetMirror {
     writes: readonly { path: string; content: string }[],
     title: string,
   ): Promise<void> {
-    const files = [
-      ...appends.map(({ path, lines }) => ({ path, content: this.appendedContent(path, lines) })),
-      ...writes,
-    ];
+    const appended = await Promise.all(
+      appends.map(async ({ path, lines }) => ({
+        path,
+        content: await this.appendedContent(path, lines),
+      })),
+    );
+    const files = [...appended, ...writes];
     await this.hub.commitFiles(files, title);
     for (const file of files) {
       const local = this.localPath(file.path);
@@ -393,9 +437,11 @@ export class DatasetMirror {
     }
   }
 
-  private appendedContent(path: string, lines: readonly string[]): string {
+  private async appendedContent(path: string, lines: readonly string[]): Promise<string> {
     const local = this.localPath(path);
-    const existing = existsSync(local) ? readFileSync(local, "utf8") : "";
+    const existing = existsSync(local)
+      ? readFileSync(local, "utf8")
+      : ((await this.readText(path)) ?? "");
     const prefix = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
     return `${prefix}${lines.map((line) => `${line}\n`).join("")}`;
   }
@@ -427,6 +473,23 @@ export class DatasetMirror {
  */
 type EnrichmentShardKind = "receipt" | "attempt" | "registry" | "row";
 
+export function datasetSourceKind(path: string): DatasetSourceKind {
+  if (/^data\/[^/]+\/\d{4}\/\d{2}\/tweets-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) {
+    return "tweet";
+  }
+  if (/^enrichment\/\d{4}\/\d{2}\/enrichment-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) {
+    return "enrichment";
+  }
+  if (/^enrichment\/attempts\/\d{4}\/\d{2}\/attempts-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) {
+    return "attempt";
+  }
+  if (/^enrichment\/registry\/\d{4}\/\d{2}\/registry-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) {
+    return "registry";
+  }
+  if (/^enrichment\/receipts\/\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "receipt";
+  throw new Error(`unsupported dataset index source: ${path}`);
+}
+
 function classifyEnrichmentPath(path: string): EnrichmentShardKind {
   if (path.startsWith("enrichment/receipts/")) return "receipt";
   if (path.startsWith("enrichment/attempts/")) return "attempt";
@@ -448,6 +511,19 @@ function selectEnrichmentRefreshShards(
     for (const path of [...oldestMissing, ...recent]) selected.add(path);
   }
   return [...selected].sort();
+}
+
+function countValidReceipts(content: string): number {
+  let count = 0;
+  for (const line of content.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      if (parseEnrichReceipt(JSON.parse(line)) !== undefined) count += 1;
+    } catch {
+      continue;
+    }
+  }
+  return count;
 }
 
 function applyEnrichmentLines(enrich: EnrichStore, content: string): number {

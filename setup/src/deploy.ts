@@ -27,6 +27,7 @@ export async function deployPool(
   config: SetupConfig,
 ): Promise<void> {
   await ensureRepo(client, { type: "dataset", name: config.datasetRepo }, "private");
+  await ensureRepo(client, { type: "bucket", name: config.indexBucket }, "private");
   await ensureRepo(client, { type: "space", name: config.spaceRepo }, "public");
   await uploadSpace(root, client, config.spaceRepo);
   await configureSpace(client, config);
@@ -38,6 +39,7 @@ export async function updateExistingPool(
   config: SetupConfig,
 ): Promise<void> {
   await assertRepoVisibility(client, { type: "dataset", name: config.datasetRepo }, "private");
+  await assertRepoVisibility(client, { type: "bucket", name: config.indexBucket }, "private");
   await assertRepoVisibility(client, { type: "space", name: config.spaceRepo }, "public");
   await uploadSpace(root, client, config.spaceRepo);
   await configureSpace(client, config, { initializeGeneratedSecrets: false });
@@ -51,6 +53,7 @@ export async function configureSpace(
   const initializeGeneratedSecrets = options.initializeGeneratedSecrets ?? true;
   const variables = await getSpaceVariables(client, config.spaceRepo);
   await setSpaceVariable(client, config.spaceRepo, "DATASET_REPO", config.datasetRepo);
+  await setSpaceVariable(client, config.spaceRepo, "INDEX_BUCKET", config.indexBucket);
   await setSpaceVariable(
     client,
     config.spaceRepo,

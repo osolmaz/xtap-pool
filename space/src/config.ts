@@ -4,6 +4,7 @@ const configSchema = z.object({
   PORT: z.coerce.number().int().positive().default(7860),
   DATA_DIR: z.string().default(".data"),
   DATASET_REPO: z.string().min(1),
+  INDEX_BUCKET: z.string().min(1),
   HF_TOKEN: z.string().min(1),
   INFERENCE_TOKEN: z.string().min(1).optional(),
   POOL_SIGNING_SECRET: z.string().min(32),
@@ -34,6 +35,7 @@ export type SpaceConfig = {
   port: number;
   dataDir: string;
   datasetRepo: string;
+  indexBucket: string;
   hfToken: string;
   inferenceToken?: string;
   poolSigningSecret: string;
@@ -93,6 +95,7 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     port: parsed.PORT,
     dataDir: parsed.DATA_DIR,
     datasetRepo: parsed.DATASET_REPO,
+    indexBucket: parsed.INDEX_BUCKET,
     hfToken: parsed.HF_TOKEN,
     ...(parsed.INFERENCE_TOKEN === undefined ? {} : { inferenceToken: parsed.INFERENCE_TOKEN }),
     poolSigningSecret: parsed.POOL_SIGNING_SECRET,

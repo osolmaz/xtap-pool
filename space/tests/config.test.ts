@@ -4,6 +4,7 @@ import { loadConfig } from "../src/config.js";
 
 const baseEnv = {
   DATASET_REPO: "osolmaz/xtap-pool-data",
+  INDEX_BUCKET: "osolmaz/xtap-pool-bucket",
   HF_TOKEN: "hf_x",
   POOL_SIGNING_SECRET: "pool-secret-0123456789abcdef0123456789abcdef",
   SESSION_SECRET: "session-secret-0123456789abcdef0123456789ab",
@@ -18,6 +19,7 @@ describe("loadConfig", () => {
   it("parses a full environment with defaults", () => {
     const config = loadConfig(baseEnv);
     expect(config.port).toBe(7860);
+    expect(config.indexBucket).toBe("osolmaz/xtap-pool-bucket");
     expect(config.allowedUsers).toEqual(["osolmaz", "alice", "bob"]);
     expect(config.poolAdmins).toEqual(["osolmaz"]);
     expect(config.publicUrl).toBe("https://dutifuldev-xtap-pool.hf.space");

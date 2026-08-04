@@ -6,7 +6,7 @@ export type HubClient = {
   fetchFn?: typeof fetch;
 };
 
-export type HubRepo = { type: "dataset" | "space"; name: string };
+export type HubRepo = { type: "bucket" | "dataset" | "space"; name: string };
 
 type JsonObject = Record<string, unknown>;
 

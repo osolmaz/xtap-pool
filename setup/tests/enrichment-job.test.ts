@@ -58,6 +58,7 @@ describe("Hugging Face enrichment Job", () => {
       timeoutSeconds: 2700,
       environment: {
         DATASET_REPO: "alice/xtap-pool-data",
+        INDEX_BUCKET: "alice/xtap-pool-bucket",
         ENRICH_ENABLED: "true",
         ENRICH_MAX_COST_USD: "2",
         LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
@@ -82,6 +83,20 @@ describe("Hugging Face enrichment Job", () => {
     expect(Object.values(desired.labels).every((value) => /^[a-zA-Z0-9._-]*$/u.test(value))).toBe(
       true,
     );
+  });
+
+  it("binds the index Bucket into the schedule contract", async () => {
+    const baseline = await desiredFixture();
+    const changed = variables();
+    changed.set("INDEX_BUCKET", "alice/other-index-bucket");
+    const changedContract = await desiredEnrichmentJob(
+      client,
+      "alice/xtap-pool",
+      "alice/xtap-pool-data",
+      changed,
+    );
+
+    expect(desiredEnrichmentJobHash(changedContract)).not.toBe(desiredEnrichmentJobHash(baseline));
   });
 
   it("binds both discarded-assignment rate settings into the schedule contract", async () => {
@@ -257,7 +272,7 @@ describe("Hugging Face enrichment Job", () => {
 
     await expect(
       reconcileEnrichmentJob(client, desired, {
-        datasetToken: "hf_dataset",
+        storageToken: "hf_dataset",
         inferenceToken: "hf_inference",
       }),
     ).resolves.toMatchObject({ id: "created", suspend: true, concurrency: false });
@@ -308,7 +323,7 @@ describe("Hugging Face enrichment Job", () => {
 
     await expect(
       reconcileEnrichmentJob(client, desired, {
-        datasetToken: "hf_dataset",
+        storageToken: "hf_dataset",
         inferenceToken: "hf_inference",
       }),
     ).rejects.toThrow("active");
@@ -417,7 +432,7 @@ describe("Hugging Face enrichment Job", () => {
       .mockResolvedValueOnce([physicalFixture(desired, "racing", "RUNNING")]);
     await expect(
       reconcileEnrichmentJob(client, desired, {
-        datasetToken: "hf_dataset",
+        storageToken: "hf_dataset",
         inferenceToken: "hf_inference",
       }),
     ).rejects.toThrow("became active");
@@ -433,7 +448,7 @@ describe("Hugging Face enrichment Job", () => {
 
     await expect(
       reconcileEnrichmentJob(client, desired, {
-        datasetToken: "hf_dataset",
+        storageToken: "hf_dataset",
         inferenceToken: "hf_inference",
       }),
     ).rejects.toThrow("does not match");
@@ -667,6 +682,7 @@ async function desiredFixture(): Promise<DesiredEnrichmentJob> {
 
 function variables(): Map<string, string> {
   return new Map([
+    ["INDEX_BUCKET", "alice/xtap-pool-bucket"],
     ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
     ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
     ["ENRICH_MAX_CONCURRENT_CALLS", "1"],

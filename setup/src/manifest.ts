@@ -6,7 +6,7 @@ export type PoolManifest = SetupConfig & {
   requiredVariables: readonly string[];
   requiredSecrets: readonly string[];
   credentialRoles: {
-    dataset: "HF_TOKEN";
+    storage: "HF_TOKEN";
     inference: "INFERENCE_TOKEN";
   };
   enrichmentEnabled: boolean;
@@ -24,13 +24,14 @@ export function manifestFromSpace(
     ...config,
     requiredVariables: [
       "DATASET_REPO",
+      "INDEX_BUCKET",
       "ALLOWED_USERS",
       "POOL_ADMINS",
       "ENRICH_ENABLED",
       ...Object.keys(ENRICHMENT_JOB_DEFAULT_VARIABLES),
     ],
     requiredSecrets: ["HF_TOKEN", "POOL_SIGNING_SECRET", "SESSION_SECRET"],
-    credentialRoles: { dataset: "HF_TOKEN", inference: "INFERENCE_TOKEN" },
+    credentialRoles: { storage: "HF_TOKEN", inference: "INFERENCE_TOKEN" },
     enrichmentEnabled,
   };
 }

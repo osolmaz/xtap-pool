@@ -140,7 +140,7 @@ export type ScheduledEnrichmentJob = z.infer<typeof scheduledJobSchema>;
 export type PhysicalEnrichmentJob = z.infer<typeof physicalJobSchema>;
 
 export type EnrichmentJobSecrets = {
-  datasetToken: string;
+  storageToken: string;
   inferenceToken: string;
 };
 
@@ -174,6 +174,7 @@ export async function desiredEnrichmentJob(
       Object.keys(jobVariablesSchema.shape).map((key) => [key, variables.get(key)]),
     ),
   );
+  const indexBucket = nonempty.parse(variables.get("INDEX_BUCKET"));
   const namespace = spaceRepo.split("/")[0];
   if (namespace === undefined || namespace.length === 0) {
     throw new Error(`Invalid Space repository: ${spaceRepo}.`);
@@ -181,6 +182,7 @@ export async function desiredEnrichmentJob(
   const environment = {
     DATA_DIR: "/tmp/xtap-pool-enrichment",
     DATASET_REPO: datasetRepo,
+    INDEX_BUCKET: indexBucket,
     ENRICH_ENABLED: "true",
     ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
     ENRICH_MAX_ELAPSED_MS: configured.ENRICH_MAX_ELAPSED_MS,
@@ -295,7 +297,7 @@ export async function reconcileEnrichmentJob(
       spaceId: desired.spaceRepo,
       command: [...JOB_COMMAND],
       environment: { ...desired.environment },
-      secrets: { HF_TOKEN: secrets.datasetToken, INFERENCE_TOKEN: secrets.inferenceToken },
+      secrets: { HF_TOKEN: secrets.storageToken, INFERENCE_TOKEN: secrets.inferenceToken },
       flavor: "cpu-basic",
       timeoutSeconds: desired.timeoutSeconds,
       attempts: 1,
