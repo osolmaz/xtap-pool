@@ -89,7 +89,7 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
   if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.datasetRepo))) {
     const storageToken = await promptStorageToken(config.datasetRepo, config.indexBucket);
-    await bootstrapIndex(root, config, storageToken);
+    await bootstrapIndex(root, config, storageToken, indexContractFromVariables(variables));
     await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
   }
   const task = spinner();
@@ -215,10 +215,27 @@ async function promptInferenceToken(): Promise<string> {
   }
 }
 
+export function indexContractFromVariables(variables: ReadonlyMap<string, string>): {
+  llmModel: string;
+  taxonomyVersion: string;
+} {
+  return {
+    llmModel: variables.get("LLM_MODEL") ?? ENRICHMENT_JOB_DEFAULT_VARIABLES["LLM_MODEL"] ?? "",
+    taxonomyVersion:
+      variables.get("TAXONOMY_VERSION") ??
+      ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"] ??
+      "",
+  };
+}
+
 export async function bootstrapIndex(
   root: string,
   config: SetupConfig,
   storageToken: string,
+  contract: { llmModel: string; taxonomyVersion: string } = {
+    llmModel: ENRICHMENT_JOB_DEFAULT_VARIABLES["LLM_MODEL"] ?? "",
+    taxonomyVersion: ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"] ?? "",
+  },
 ): Promise<void> {
   const dataDir = await mkdtemp(join(tmpdir(), "xtap-pool-index-bootstrap-"));
   try {
@@ -231,8 +248,8 @@ export async function bootstrapIndex(
         DATASET_REPO: config.datasetRepo,
         INDEX_BUCKET: config.indexBucket,
         HF_TOKEN: storageToken,
-        LLM_MODEL: ENRICHMENT_JOB_DEFAULT_VARIABLES["LLM_MODEL"],
-        TAXONOMY_VERSION: ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"],
+        LLM_MODEL: contract.llmModel,
+        TAXONOMY_VERSION: contract.taxonomyVersion,
       },
     });
   } finally {
