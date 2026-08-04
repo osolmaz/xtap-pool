@@ -100,14 +100,15 @@ Job.
 The lower-level scripts are still available when you want to do those steps
 manually. The deploy script first creates the private dataset and index Bucket.
 If `XTAP_STORAGE_TOKEN` is absent, it stops before deployment and prints the two
-exact resources the token needs. Create that fine-grained read/write token, then
-rerun the script. Supplying the variable explicitly authorizes the script to use
-it for index bootstrap and install it as the Space `HF_TOKEN` secret.
+exact resources the token needs. Import optional history at this point, before
+index bootstrap. Then create the fine-grained read/write token and rerun the
+script. Supplying the variable explicitly authorizes the script to use it for
+index bootstrap and install it as the Space `HF_TOKEN` secret.
 
 ```sh
 scripts/deploy-space.sh <namespace> # creates resources, then stops for the token
+scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/Downloads/xtap # optional
 XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh <namespace>
-scripts/seed-dataset.sh <namespace>/xtap-pool-data <hf-username> ~/Downloads/xtap
 ```
 
 The script publishes and verifies `index/current.json` before uploading reader
