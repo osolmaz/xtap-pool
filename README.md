@@ -157,9 +157,11 @@ repair configuration caps each canary Job at $2 of inference and 40 minutes of
 worker time. Two canary Jobs plus their worst-case `cpu-basic` time have a
 cumulative hard ceiling below $4.02.
 Scheduled and manually triggered runs use the same non-concurrent Hugging Face
-schedule. Each fresh process restores a checksum-verified SQLite generation from
-the private Bucket and applies only new JSONL files or strict append suffixes.
-The dataset remains authoritative. A missing, corrupt, truncated, or rewritten
+schedule. Each fresh process reads `index/current.json` from the private dataset,
+restores its checksum-verified SQLite generation from the private Bucket, and
+applies only new JSONL files or strict append suffixes. The manifest uses an
+exact parent commit so concurrent publishers cannot replace it. The dataset
+remains authoritative. A missing, corrupt, truncated, or rewritten
 source fails closed instead of triggering an automatic full replay. An operator
 can intentionally rebuild and publish the index with:
 

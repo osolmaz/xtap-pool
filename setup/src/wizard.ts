@@ -13,7 +13,7 @@ import {
   cancel,
   isCancel,
 } from "@clack/prompts";
-import { whoAmI } from "@huggingface/hub";
+import { downloadFile, whoAmI } from "@huggingface/hub";
 
 import type { SetupConfig } from "./config.js";
 import {
@@ -28,7 +28,7 @@ import {
   validateRepoId,
   validateUserList,
 } from "./config.js";
-import { deployPool, updateExistingPool } from "./deploy.js";
+import { deployPool, ensureIndexBucket, updateExistingPool } from "./deploy.js";
 import {
   desiredEnrichmentJob,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
@@ -86,6 +86,12 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   const spaceRepo = requestedSpaceRepo ?? repoInNamespace(account.name, "xtap-pool");
   const variables = await getSpaceVariables({ accessToken }, spaceRepo);
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
+  const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
+  if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.datasetRepo))) {
+    const storageToken = await promptStorageToken(config.datasetRepo, config.indexBucket);
+    await bootstrapIndex(root, config, storageToken);
+    await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
+  }
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
   await updateExistingPool(root, { accessToken }, config);
@@ -168,7 +174,10 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
   }
 }
 
-async function promptStorageToken(datasetRepo: string, indexBucket: string): Promise<string> {
+export async function promptStorageToken(
+  datasetRepo: string,
+  indexBucket: string,
+): Promise<string> {
   note(
     [
       "Create one fine-grained storage token scoped exactly to:",
@@ -206,7 +215,7 @@ async function promptInferenceToken(): Promise<string> {
   }
 }
 
-async function bootstrapIndex(
+export async function bootstrapIndex(
   root: string,
   config: SetupConfig,
   storageToken: string,
@@ -229,6 +238,18 @@ async function bootstrapIndex(
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
+}
+
+async function durableIndexManifestExists(
+  accessToken: string,
+  datasetRepo: string,
+): Promise<boolean> {
+  const blob = await downloadFile({
+    repo: { type: "dataset", name: datasetRepo },
+    path: "index/current.json",
+    accessToken,
+  });
+  return blob !== null;
 }
 
 async function maybeSeed(root: string, config: SetupConfig): Promise<void> {

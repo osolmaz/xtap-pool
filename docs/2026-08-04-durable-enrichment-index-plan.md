@@ -50,7 +50,7 @@ This work does not change:
 
 ### Current manifest
 
-The mutable object `index/current.json` points to one immutable SQLite file:
+The mutable dataset file `index/current.json` points to one immutable SQLite file in the private Bucket:
 
 ```json
 {
@@ -76,7 +76,7 @@ The mutable object `index/current.json` points to one immutable SQLite file:
 }
 ```
 
-The manifest is strict and versioned. Keys outside `index/` are outside this feature's control.
+The manifest is strict and versioned. Publishing it uses a dataset commit whose `parentCommit` is the exact revision recorded in the database. Hugging Face rejects the commit if ingest or another publisher advances the dataset first, so two publishers cannot replace the pointer concurrently. Keys outside `index/` are outside this feature's control.
 
 ### SQLite metadata
 
@@ -109,7 +109,7 @@ Schemator reviewed the draft model and converged after two iterations. The accep
 
 ### Restore and advance
 
-1. Read and strictly parse `index/current.json`.
+1. Read and strictly parse `index/current.json` from one exact dataset revision.
 2. Download the referenced immutable SQLite object to a temporary path.
 3. Verify its SHA-256 digest, `PRAGMA quick_check`, metadata, contract hash, and physical counts.
 4. Pin the current dataset Git revision.
@@ -127,13 +127,13 @@ After the worker writes its final durable receipt, it pins a dataset revision th
 1. writes exact metadata and counts;
 2. checkpoints SQLite and creates a compact standalone copy;
 3. hashes and validates that copy;
-4. uploads it under `index/databases/<sha256>.sqlite`;
+4. uploads it under `index/databases/<sha256>.sqlite` in the Bucket;
 5. downloads and validates the uploaded object;
-6. replaces `index/current.json`;
-7. reads the manifest back and verifies the active generation; and
-8. removes old unreferenced generations while retaining the current generation and three recent predecessors.
+6. commits `index/current.json` to the dataset with the indexed dataset revision as its required parent commit;
+7. reads the manifest back from the returned commit and verifies the active generation; and
+8. removes old unreferenced Bucket generations while retaining the current generation and three recent predecessors.
 
-A crash before the manifest replacement leaves the previous generation active. The next Job loads it and replays the durable dataset tail, including partial work committed by the crashed Job.
+A crash before the manifest commit leaves the previous generation active. The next Job loads it and replays the durable dataset tail, including partial work committed by the crashed Job. A concurrent dataset write makes the parent-commit check fail and leaves the uploaded database unreferenced; the next successful publication removes that orphan during retention cleanup.
 
 ### Bootstrap and repair
 
@@ -206,7 +206,7 @@ The durable and clean projections matched for tweets, unit membership, enrichmen
 The feature is complete when:
 
 - normal Space and Job startup does not replay unchanged historical JSONL rows;
-- the current manifest references a checksum-verified SQLite database covering one exact dataset revision;
+- the dataset manifest references a checksum-verified Bucket database covering one exact dataset revision;
 - incremental state matches a clean full replay in tests and the live canary;
 - a stale or corrupt index cannot become active;
 - a crashed Job's durable results are recovered from the dataset tail;

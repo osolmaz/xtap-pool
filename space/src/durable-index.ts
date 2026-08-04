@@ -6,7 +6,14 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import Database from "better-sqlite3";
-import { datasetInfo, deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/hub";
+import {
+  commit,
+  datasetInfo,
+  deleteFiles,
+  downloadFile,
+  listFiles,
+  uploadFile,
+} from "@huggingface/hub";
 import { z } from "zod";
 
 import { DatasetMirror, datasetSourceKind } from "./dataset.js";
@@ -68,15 +75,15 @@ export type DatasetSnapshotClient = {
   currentRevision(): Promise<string>;
   listJsonlFiles(revision: string): Promise<readonly DatasetSourceFile[]>;
   downloadFile(path: string, revision: string): Promise<Uint8Array>;
+  readText(path: string, revision: string): Promise<string | undefined>;
+  commitText(path: string, content: string, parentRevision: string): Promise<string>;
 };
 
 export type BucketFile = { path: string; uploadedAt?: string };
 
 export type DurableIndexBucketClient = {
   download(path: string, destination: string): Promise<boolean>;
-  readText(path: string): Promise<string | undefined>;
   uploadFile(path: string, source: string): Promise<void>;
-  writeText(path: string, content: string): Promise<void>;
   list(prefix: string): Promise<readonly BucketFile[]>;
   remove(paths: readonly string[]): Promise<void>;
 };
@@ -117,7 +124,6 @@ export type DurableIndexOptions = {
   contractHash: string;
   sourceClient?: DatasetSnapshotClient;
   bucketClient?: DurableIndexBucketClient;
-  manifestBaselineSha256?: string;
 };
 
 export type IndexAdvance = {
@@ -149,7 +155,6 @@ export class DurableIndex {
     private readonly options: DurableIndexOptions,
     private readonly source: DatasetSnapshotClient,
     private readonly bucket: DurableIndexBucketClient,
-    private manifestBaselineSha256: string | undefined,
     store: TweetStore,
     enrichStore: EnrichStore,
   ) {
@@ -163,7 +168,8 @@ export class DurableIndex {
     const bucket =
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
-    const rawManifest = await bucket.readText(CURRENT_MANIFEST_KEY);
+    const manifestRevision = await source.currentRevision();
+    const rawManifest = await source.readText(CURRENT_MANIFEST_KEY, manifestRevision);
     if (rawManifest === undefined) {
       throw new Error("durable index manifest is missing; run the index bootstrap command");
     }
@@ -189,14 +195,7 @@ export class DurableIndex {
     );
     ensureIndexTables(store.database);
     validateDatabase(store.database, manifest, options);
-    const index = new DurableIndex(
-      options,
-      source,
-      bucket,
-      sha256Text(rawManifest),
-      store,
-      enrichStore,
-    );
+    const index = new DurableIndex(options, source, bucket, store, enrichStore);
     await index.loadLatestReceipt(manifest.dataset.revision);
     return index;
   }
@@ -228,14 +227,7 @@ export class DurableIndex {
       store.close();
       throw new Error("durable index working database provenance mismatch");
     }
-    return new DurableIndex(
-      options,
-      source,
-      bucket,
-      options.manifestBaselineSha256,
-      store,
-      enrichStore,
-    );
+    return new DurableIndex(options, source, bucket, store, enrichStore);
   }
 
   static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
@@ -254,15 +246,7 @@ export class DurableIndex {
       options.contractHash,
     );
     ensureIndexTables(store.database);
-    const currentManifest = await bucket.readText(CURRENT_MANIFEST_KEY);
-    const index = new DurableIndex(
-      options,
-      source,
-      bucket,
-      currentManifest === undefined ? undefined : sha256Text(currentManifest),
-      store,
-      enrichStore,
-    );
+    const index = new DurableIndex(options, source, bucket, store, enrichStore);
     await index.advanceToLatest();
     return index;
   }
@@ -347,10 +331,6 @@ export class DurableIndex {
     };
   }
 
-  currentManifestBaselineSha256(): string | undefined {
-    return this.manifestBaselineSha256;
-  }
-
   async createWorkingCopy(path: string): Promise<void> {
     await rm(path, { force: true });
     await this.store.database.backup(path);
@@ -364,7 +344,6 @@ export class DurableIndex {
     const publicationPath = `${this.options.databasePath}.${randomUUID()}.publish`;
     const verificationPath = `${this.options.databasePath}.${randomUUID()}.verify`;
     try {
-      await this.assertManifestUnchanged();
       await this.store.database.backup(publicationPath);
       validateStandaloneDatabase(publicationPath, metadata, counts);
       const sha256 = await fileSha256(publicationPath);
@@ -383,16 +362,18 @@ export class DurableIndex {
         counts,
       };
       const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
-      await this.assertManifestUnchanged();
-      await this.bucket.writeText(CURRENT_MANIFEST_KEY, encoded);
-      const active = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+      const manifestRevision = await this.source.commitText(
+        CURRENT_MANIFEST_KEY,
+        encoded,
+        metadata.dataset_revision,
+      );
+      const active = await this.source.readText(CURRENT_MANIFEST_KEY, manifestRevision);
       if (
         active === undefined ||
         JSON.stringify(parseManifest(active, this.options)) !== JSON.stringify(manifest)
       ) {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
-      this.manifestBaselineSha256 = sha256Text(encoded);
       await this.pruneDatabases(key);
       return manifest;
     } finally {
@@ -405,14 +386,6 @@ export class DurableIndex {
 
   close(): void {
     this.store.close();
-  }
-
-  private async assertManifestUnchanged(): Promise<void> {
-    const current = await this.bucket.readText(CURRENT_MANIFEST_KEY);
-    const currentSha256 = current === undefined ? undefined : sha256Text(current);
-    if (currentSha256 !== this.manifestBaselineSha256) {
-      throw new Error("durable index manifest changed while this publisher was running");
-    }
   }
 
   private async stageSourceFile(
@@ -532,6 +505,23 @@ export function createDatasetSnapshotClient(
       if (blob === null) throw new Error(`dataset source is missing: ${path}`);
       return new Uint8Array(await blob.arrayBuffer());
     },
+    async readText(path: string, revision: string): Promise<string | undefined> {
+      const blob = await downloadFile({ repo, accessToken, path, revision });
+      return blob === null ? undefined : blob.text();
+    },
+    async commitText(path: string, content: string, parentRevision: string): Promise<string> {
+      const result = await commit({
+        repo,
+        accessToken,
+        parentCommit: parentRevision,
+        title: "Publish durable enrichment index manifest",
+        operations: [{ operation: "addOrUpdate", path, content: new Blob([content]) }],
+      });
+      if (result === undefined || !REVISION_PATTERN.test(result.commit.oid)) {
+        throw new Error("dataset did not confirm the durable index manifest commit");
+      }
+      return result.commit.oid;
+    },
   };
 }
 
@@ -573,23 +563,11 @@ export function createDurableIndexBucketClient(
       await pipeline(Readable.fromWeb(blob.stream()), createWriteStream(destination));
       return true;
     },
-    async readText(path: string): Promise<string | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path });
-      return blob === null ? undefined : blob.text();
-    },
     async uploadFile(path: string, source: string): Promise<void> {
       await uploadFile({
         repo,
         accessToken,
         file: { path, content: await openAsBlob(source) },
-        commitTitle: `Publish ${path}`,
-      });
-    },
-    async writeText(path: string, content: string): Promise<void> {
-      await uploadFile({
-        repo,
-        accessToken,
-        file: { path, content: new Blob([content]) },
         commitTitle: `Publish ${path}`,
       });
     },
@@ -816,10 +794,6 @@ async function assertFileSha256(path: string, expected: string): Promise<void> {
   if ((await fileSha256(path)) !== expected) {
     throw new Error("durable index database checksum mismatch");
   }
-}
-
-function sha256Text(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
 }
 
 function sha256Bytes(content: Uint8Array): string {
