@@ -33,6 +33,7 @@ const RETAINED_PREDECESSORS = 3;
 const MAX_PUBLICATION_ATTEMPTS = 5;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const REVISION_PATTERN = /^[a-f0-9]{7,64}$/;
+const DATABASE_KEY_PATTERN = /^index\/databases\/[a-f0-9]{64}\.sqlite$/;
 
 const indexCountsSchema = z
   .object({
@@ -52,7 +53,14 @@ export const durableIndexManifestSchema = z
       .strict(),
     projection: z.object({ contract_hash: z.string().regex(SHA256_PATTERN) }).strict(),
     database: z
-      .object({ key: z.string().min(1), sha256: z.string().regex(SHA256_PATTERN) })
+      .object({
+        key: z.string().regex(DATABASE_KEY_PATTERN),
+        sha256: z.string().regex(SHA256_PATTERN),
+        predecessors: z
+          .array(z.string().regex(DATABASE_KEY_PATTERN))
+          .max(RETAINED_PREDECESSORS)
+          .refine((keys) => new Set(keys).size === keys.length, "predecessors must be unique"),
+      })
       .strict(),
     counts: indexCountsSchema,
   })
@@ -64,6 +72,13 @@ export const durableIndexManifestSchema = z
         code: "custom",
         path: ["database", "key"],
         message: `database key must be ${expected}`,
+      });
+    }
+    if (manifest.database.predecessors.includes(manifest.database.key)) {
+      context.addIssue({
+        code: "custom",
+        path: ["database", "predecessors"],
+        message: "predecessors must not include the active database",
       });
     }
   });
@@ -130,6 +145,7 @@ export type DurableIndexOptions = {
   contractHash: string;
   sourceClient?: DatasetSnapshotClient;
   bucketClient?: DurableIndexBucketClient;
+  predecessorKeys?: readonly string[];
 };
 
 export type IndexAdvance = {
@@ -163,6 +179,7 @@ export class DurableIndex {
     private readonly bucket: DurableIndexBucketClient,
     store: TweetStore,
     enrichStore: EnrichStore,
+    private publishedKeys: string[],
   ) {
     this.store = store;
     this.enrichStore = enrichStore;
@@ -187,7 +204,7 @@ export class DurableIndex {
         throw new Error(`durable index database is missing: ${manifest.database.key}`);
       }
       await assertFileSha256(staged, manifest.database.sha256);
-      if (existsSync(options.databasePath)) await rm(options.databasePath, { force: true });
+      await removeDatabaseFiles(options.databasePath);
       await rename(staged, options.databasePath);
     } finally {
       await rm(staged, { force: true });
@@ -201,7 +218,10 @@ export class DurableIndex {
     );
     ensureIndexTables(store.database);
     validateDatabase(store.database, manifest, options);
-    const index = new DurableIndex(options, source, bucket, store, enrichStore);
+    const index = new DurableIndex(options, source, bucket, store, enrichStore, [
+      manifest.database.key,
+      ...manifest.database.predecessors,
+    ]);
     await index.loadLatestReceipt(manifest.dataset.revision);
     return index;
   }
@@ -233,7 +253,14 @@ export class DurableIndex {
       store.close();
       throw new Error("durable index working database provenance mismatch");
     }
-    return new DurableIndex(options, source, bucket, store, enrichStore);
+    return new DurableIndex(
+      options,
+      source,
+      bucket,
+      store,
+      enrichStore,
+      configuredPredecessors(options),
+    );
   }
 
   static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
@@ -243,7 +270,7 @@ export class DurableIndex {
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
     await mkdir(dirname(options.databasePath), { recursive: true });
-    await rm(options.databasePath, { force: true });
+    await removeDatabaseFiles(options.databasePath);
     const store = new TweetStore(options.databasePath);
     const enrichStore = new EnrichStore(
       store.database,
@@ -252,7 +279,7 @@ export class DurableIndex {
       options.contractHash,
     );
     ensureIndexTables(store.database);
-    const index = new DurableIndex(options, source, bucket, store, enrichStore);
+    const index = new DurableIndex(options, source, bucket, store, enrichStore, []);
     await index.advanceToLatest();
     return index;
   }
@@ -337,6 +364,10 @@ export class DurableIndex {
     };
   }
 
+  retainedDatabaseKeys(): readonly string[] {
+    return [...this.publishedKeys];
+  }
+
   async createWorkingCopy(path: string): Promise<void> {
     await rm(path, { force: true });
     await this.store.database.backup(path);
@@ -375,11 +406,14 @@ export class DurableIndex {
       }
       await assertFileSha256(verificationPath, sha256);
       validateStandaloneDatabase(verificationPath, metadata, counts);
+      const predecessors = this.publishedKeys
+        .filter((publishedKey) => publishedKey !== key)
+        .slice(0, RETAINED_PREDECESSORS);
       const manifest: DurableIndexManifest = {
         schema_version: INDEX_SCHEMA_VERSION,
         dataset: { repo: metadata.dataset_repo, revision: metadata.dataset_revision },
         projection: { contract_hash: metadata.contract_hash },
-        database: { key, sha256 },
+        database: { key, sha256, predecessors },
         counts,
       };
       const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
@@ -395,7 +429,8 @@ export class DurableIndex {
       ) {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
-      await this.pruneDatabases(key);
+      this.publishedKeys = [key, ...predecessors];
+      await this.pruneDatabases(this.publishedKeys);
       return manifest;
     } finally {
       await Promise.all([
@@ -447,18 +482,26 @@ export class DurableIndex {
     this.options.mirror.rememberSourceFile(latest.path, text);
   }
 
-  private async pruneDatabases(activeKey: string): Promise<void> {
-    const files = [...(await this.bucket.list(DATABASE_PREFIX))]
-      .filter((file) => file.path.endsWith(".sqlite"))
-      .sort((a, b) => (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? ""));
-    const keep = new Set<string>([activeKey]);
-    for (const file of files) {
-      if (keep.size >= RETAINED_PREDECESSORS + 1) break;
-      keep.add(file.path);
-    }
+  private async pruneDatabases(retainedKeys: readonly string[]): Promise<void> {
+    const files = [...(await this.bucket.list(DATABASE_PREFIX))].filter((file) =>
+      file.path.endsWith(".sqlite"),
+    );
+    const keep = new Set(retainedKeys);
     const stale = files.map((file) => file.path).filter((path) => !keep.has(path));
     if (stale.length > 0) await this.bucket.remove(stale);
   }
+}
+
+function configuredPredecessors(options: DurableIndexOptions): string[] {
+  return Array.from(options.predecessorKeys ?? []);
+}
+
+async function removeDatabaseFiles(path: string): Promise<void> {
+  await Promise.all([
+    rm(path, { force: true }),
+    rm(`${path}-wal`, { force: true }),
+    rm(`${path}-shm`, { force: true }),
+  ]);
 }
 
 function isConcurrentDatasetUpdate(error: unknown): boolean {

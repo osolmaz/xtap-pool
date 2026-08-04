@@ -167,7 +167,13 @@ describe("durable enrichment index", () => {
     expect(() =>
       durableIndexManifestSchema.parse({ ...firstManifest, unexpected: true }),
     ).toThrow();
-    const restored = await DurableIndex.restore(options("restored"));
+    const restoreOptions = options("restored");
+    await Promise.all([
+      writeFile(restoreOptions.databasePath, "stale database"),
+      writeFile(`${restoreOptions.databasePath}-wal`, "stale wal"),
+      writeFile(`${restoreOptions.databasePath}-shm`, "stale shm"),
+    ]);
+    const restored = await DurableIndex.restore(restoreOptions);
     expect(restored.store.count()).toBe(1);
     source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine("2", "other")}`);
     source.advanceRevision();
@@ -325,6 +331,30 @@ describe("durable enrichment index", () => {
     index.close();
   });
 
+  it("does not let failed publication uploads displace successful predecessors", async () => {
+    const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
+    source.files.set(path, tweetLine("1"));
+    const index = await DurableIndex.bootstrap(options("orphan-retention"));
+    const first = await index.publish();
+    for (let generation = 2; generation <= 5; generation += 1) {
+      source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine(String(generation))}`);
+      source.advanceRevision();
+      await index.advanceToLatest();
+      source.commitErrors.push(new Error("permission denied"));
+      await expect(index.publish()).rejects.toThrow("permission denied");
+    }
+    source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine("6")}`);
+    source.advanceRevision();
+    await index.advanceToLatest();
+    const final = await index.publish();
+
+    expect(final.database.predecessors).toEqual([first.database.key]);
+    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite")).sort()).toEqual(
+      [first.database.key, final.database.key].sort(),
+    );
+    index.close();
+  });
+
   it("retains the active database and three recent predecessors", async () => {
     const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
     source.files.set(path, tweetLine("1"));
@@ -343,9 +373,12 @@ describe("durable enrichment index", () => {
     const databases = [...bucket.files.keys()].filter((key) => key.startsWith("index/databases/"));
     expect(databases).toHaveLength(4);
     const current = JSON.parse(source.textFiles.get("index/current.json") ?? "{}") as {
-      database: { key: string };
+      database: { key: string; predecessors: string[] };
     };
-    expect(databases).toContain(current.database.key);
+    expect(current.database.predecessors).toHaveLength(3);
+    expect(databases.sort()).toEqual(
+      [current.database.key, ...current.database.predecessors].sort(),
+    );
     expect(bucket.removed).toHaveLength(2);
     index.close();
   });

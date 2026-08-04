@@ -64,7 +64,8 @@ The mutable dataset file `index/current.json` points to one immutable SQLite fil
   },
   "database": {
     "key": "index/databases/<sha256>.sqlite",
-    "sha256": "<sha256>"
+    "sha256": "<sha256>",
+    "predecessors": ["index/databases/<previous-sha256>.sqlite"]
   },
   "counts": {
     "tweets": 84571,
