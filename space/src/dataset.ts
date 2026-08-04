@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node
 import { dirname, isAbsolute, join, normalize, relative } from "node:path";
 
 import { commit, downloadFile, listFiles } from "@huggingface/hub";
+import { z } from "zod";
 
 import {
   attemptEventSchema,
@@ -48,6 +49,29 @@ type EnrichmentReplayCounts = Pick<EnrichmentRefresh, "rows" | "attempts" | "reg
 
 const REFRESH_SHARDS_PER_KIND = 4;
 const REFRESH_ATTEMPTS = 2;
+const legacyReceiptSchema = z
+  .object({
+    started_at: z.string().min(1),
+    finished_at: z.string().min(1),
+    units: z.number().int().nonnegative(),
+    calls: z.number().int().nonnegative(),
+    prompt_tokens: z.number().int().nonnegative(),
+    completion_tokens: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
+  })
+  .strict();
+const legacyEnrichmentRowSchema = z
+  .object({
+    unit_id: z.string().min(1),
+    tweet_ids: z.array(z.string().min(1)).min(1),
+    labels: z.array(z.string()),
+    free_labels: z.array(z.string()),
+    concepts: z.array(z.unknown()),
+    model: z.string().min(1),
+    taxonomy_version: z.number().int().min(1),
+    enriched_at: z.string().min(1),
+  })
+  .loose();
 
 export function isHubNotFound(error: unknown): boolean {
   return (
@@ -477,6 +501,45 @@ export class DatasetMirror {
  * rows are ignored, so the queue stays pending until durable reprocessing.
  */
 type EnrichmentShardKind = "receipt" | "attempt" | "registry" | "row";
+
+export function assertValidDatasetSourceContent(path: string, content: string): void {
+  const kind = datasetSourceKind(path);
+  const lines = content.split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (line.trim() === "") continue;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(line);
+    } catch {
+      throw new Error(`invalid JSON in ${path} at line ${String(index + 1)}`);
+    }
+    if (!validDatasetSourceRecord(kind, candidate)) {
+      throw new Error(`invalid ${kind} record in ${path} at line ${String(index + 1)}`);
+    }
+  }
+}
+
+function validDatasetSourceRecord(kind: DatasetSourceKind, candidate: unknown): boolean {
+  switch (kind) {
+    case "tweet":
+      return validateTweet(candidate).ok;
+    case "enrichment":
+      return parseEnrichmentRow(candidate) !== undefined || isLegacyEnrichmentRow(candidate);
+    case "attempt":
+      return attemptEventSchema.safeParse(candidate).success;
+    case "registry":
+      return freeLabelEventSchema.safeParse(candidate).success;
+    case "receipt":
+      return (
+        parseEnrichReceipt(candidate) !== undefined ||
+        legacyReceiptSchema.safeParse(candidate).success
+      );
+  }
+}
+
+function isLegacyEnrichmentRow(candidate: unknown): boolean {
+  return legacyEnrichmentRowSchema.safeParse(candidate).success;
+}
 
 export function datasetSourceKind(path: string): DatasetSourceKind {
   if (/^data\/[^/]+\/\d{4}\/\d{2}\/tweets-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) {
