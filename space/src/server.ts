@@ -46,7 +46,11 @@ let credentialRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let enrichmentRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
 [datasetCredential, inferenceCredential] = await Promise.all([
-  checkDatasetCredential({ token: config.hfToken, datasetRepo: config.datasetRepo }),
+  checkDatasetCredential({
+    token: config.hfToken,
+    datasetRepo: config.datasetRepo,
+    indexBucket: config.indexBucket,
+  }),
   checkInferenceCredential({
     enabled: config.enrichEnabled,
     token: config.inferenceToken,
@@ -80,10 +84,6 @@ const initialAdvance = await index.advanceToLatest();
 const store = index.store;
 const enrichStore = index.enrichStore;
 const unitStore = new UnitStore(store.database, config.taxonomyVersion);
-applyIndexStats();
-datasetState = { state: "ready" };
-enrichStore.releaseClaims();
-readiness = buildReadiness();
 let lastReceipt: import("@xtap-pool/shared").EnrichReceipt | undefined;
 function recordLastReceipt(receipt: import("@xtap-pool/shared").EnrichReceipt | undefined): void {
   if (receipt?.contract_hash !== enrichStore.currentContractHash()) return;
@@ -91,6 +91,10 @@ function recordLastReceipt(receipt: import("@xtap-pool/shared").EnrichReceipt | 
     lastReceipt = receipt;
   }
 }
+applyIndexStats();
+datasetState = { state: "ready" };
+enrichStore.releaseClaims();
+readiness = buildReadiness();
 const app = createApp({
   config,
   store,
@@ -342,6 +346,7 @@ async function retryUncertainCredentials(): Promise<void> {
     datasetCredential = await checkDatasetCredential({
       token: config.hfToken,
       datasetRepo: config.datasetRepo,
+      indexBucket: config.indexBucket,
     });
   }
   const datasetRecovered = !datasetWasReady && datasetCredentialOk(datasetCredential);
