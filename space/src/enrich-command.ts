@@ -105,12 +105,10 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
   });
   index.close();
   const publicationMirror = new DatasetMirror(hub, join(config.dataDir, "publication-mirror"));
-  const manifestBaselineSha256 = index.currentManifestBaselineSha256();
   const publication = DurableIndex.openLocal({
     ...indexOptions,
     databasePath: publicationBase,
     mirror: publicationMirror,
-    ...(manifestBaselineSha256 === undefined ? {} : { manifestBaselineSha256 }),
   });
   try {
     const finalAdvance = await publication.advanceToLatest();

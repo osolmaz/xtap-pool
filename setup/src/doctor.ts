@@ -351,21 +351,21 @@ async function checkIndexBucket(
   try {
     const base = client.hubUrl ?? "https://huggingface.co";
     const response = await (client.fetchFn ?? fetch)(
-      `${base}/buckets/${manifest.indexBucket}/resolve/index/current.json`,
+      `${base}/datasets/${manifest.datasetRepo}/resolve/main/index/current.json`,
       { headers: { authorization: `Bearer ${client.accessToken}` } },
     );
     checks.push(
       response.ok
-        ? pass("index_bucket.manifest", "The durable index manifest exists.")
+        ? pass("index.manifest", "The durable index manifest exists.")
         : fail(
-            "index_bucket.manifest",
+            "index.manifest",
             response.status === 404
               ? "The durable index manifest is missing."
               : `Could not read the durable index manifest (${String(response.status)}).`,
           ),
     );
   } catch (error) {
-    checks.push(fail("index_bucket.manifest", errorMessage(error)));
+    checks.push(fail("index.manifest", errorMessage(error)));
   }
 }
 

@@ -1059,7 +1059,7 @@ function handleReadRequest(url: string, options: FixtureOptions): Promise<Respon
   if (url.includes("/api/buckets/alice/xtap-pool-bucket")) {
     return Promise.resolve(Response.json({ private: options.indexBucketPrivate ?? true }));
   }
-  if (url.includes("/buckets/alice/xtap-pool-bucket/resolve/index/current.json")) {
+  if (url.includes("/datasets/alice/xtap-pool-data/resolve/main/index/current.json")) {
     return Promise.resolve(new Response("{}", { status: options.indexManifestStatus ?? 200 }));
   }
   if (url === "https://alice-xtap-pool.hf.space/healthz") {

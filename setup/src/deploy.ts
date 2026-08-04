@@ -33,6 +33,17 @@ export async function deployPool(
   await configureSpace(client, config);
 }
 
+export async function ensureIndexBucket(client: HubClient, indexBucket: string): Promise<boolean> {
+  const repo = { type: "bucket", name: indexBucket } as const;
+  const existed = await repoExists({
+    repo,
+    accessToken: client.accessToken,
+    ...hubOptions(client),
+  });
+  await ensureRepo(client, repo, "private");
+  return !existed;
+}
+
 export async function updateExistingPool(
   root: string,
   client: HubClient,

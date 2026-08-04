@@ -23,6 +23,7 @@ const CONTRACT = "a".repeat(64);
 class FakeSource implements DatasetSnapshotClient {
   revision = "1".repeat(40);
   files = new Map<string, string>();
+  textFiles = new Map<string, string>();
 
   currentRevision(): Promise<string> {
     return Promise.resolve(this.revision);
@@ -42,6 +43,19 @@ class FakeSource implements DatasetSnapshotClient {
     const content = this.files.get(path);
     if (content === undefined) return Promise.reject(new Error(`missing ${path}`));
     return Promise.resolve(Buffer.from(content));
+  }
+
+  readText(path: string): Promise<string | undefined> {
+    return Promise.resolve(this.textFiles.get(path));
+  }
+
+  commitText(path: string, content: string, parentRevision: string): Promise<string> {
+    if (parentRevision !== this.revision) {
+      return Promise.reject(new Error("parent commit does not match dataset HEAD"));
+    }
+    this.textFiles.set(path, content);
+    this.advanceRevision();
+    return Promise.resolve(this.revision);
   }
 
   advanceRevision(): void {
@@ -64,21 +78,10 @@ class FakeBucket implements DurableIndexBucketClient {
     return true;
   }
 
-  readText(path: string): Promise<string | undefined> {
-    return Promise.resolve(this.files.get(path)?.toString("utf8"));
-  }
-
   async uploadFile(path: string, source: string): Promise<void> {
     this.files.set(path, await readFile(source));
     this.clock += 1;
     this.uploaded.set(path, String(this.clock).padStart(8, "0"));
-  }
-
-  writeText(path: string, content: string): Promise<void> {
-    this.files.set(path, Buffer.from(content));
-    this.clock += 1;
-    this.uploaded.set(path, String(this.clock).padStart(8, "0"));
-    return Promise.resolve();
   }
 
   list(prefix: string): Promise<readonly BucketFile[]> {
@@ -263,23 +266,20 @@ describe("durable enrichment index", () => {
     await expect(index.advanceToLatest()).rejects.toThrow("unsupported dataset index source");
     index.close();
 
-    const manifest = JSON.parse(
-      bucket.files.get("index/current.json")?.toString("utf8") ?? "{}",
-    ) as {
+    const manifest = JSON.parse(source.textFiles.get("index/current.json") ?? "{}") as {
       database: { key: string };
     };
     bucket.files.set(manifest.database.key, Buffer.from("corrupt"));
     await expect(DurableIndex.restore(options("corrupt"))).rejects.toThrow("checksum mismatch");
   });
 
-  it("refuses to replace a manifest changed by another publisher", async () => {
+  it("refuses an atomic manifest commit after the dataset head changes", async () => {
     source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
     const index = await DurableIndex.bootstrap(options("race"));
-    const competing = '{"schema_version":1,"writer":"other"}\n';
-    bucket.files.set("index/current.json", Buffer.from(competing));
+    source.advanceRevision();
 
-    await expect(index.publish()).rejects.toThrow("manifest changed");
-    expect(bucket.files.get("index/current.json")?.toString("utf8")).toBe(competing);
+    await expect(index.publish()).rejects.toThrow("parent commit does not match");
+    expect(source.textFiles.has("index/current.json")).toBe(false);
     index.close();
   });
 
@@ -300,9 +300,7 @@ describe("durable enrichment index", () => {
     }
     const databases = [...bucket.files.keys()].filter((key) => key.startsWith("index/databases/"));
     expect(databases).toHaveLength(4);
-    const current = JSON.parse(
-      bucket.files.get("index/current.json")?.toString("utf8") ?? "{}",
-    ) as {
+    const current = JSON.parse(source.textFiles.get("index/current.json") ?? "{}") as {
       database: { key: string };
     };
     expect(databases).toContain(current.database.key);
