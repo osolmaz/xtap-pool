@@ -9,6 +9,7 @@ export {
   type TweetValidationResult,
 } from "./tweet.js";
 export {
+  DEFAULT_ENRICHMENT_MODEL,
   labelConfigSchema,
   enrichmentRowSchema,
   parseEnrichmentRow,

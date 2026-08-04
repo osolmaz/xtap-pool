@@ -54,7 +54,7 @@ describe("loadConfig", () => {
     expect(config.enrichEnabled).toBe(false);
     expect(config.enrichIntervalMs).toBe(60000);
     expect(config.enrichMaxConcurrentCalls).toBe(1);
-    expect(config.llmModel).toBe("zai-org/GLM-5.2");
+    expect(config.llmModel).toBe("zai-org/GLM-5.2:fireworks-ai");
     expect(config.taxonomyVersion).toBe(1);
   });
 

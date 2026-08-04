@@ -49,7 +49,7 @@ type EnrichmentReplayCounts = Pick<EnrichmentRefresh, "rows" | "attempts" | "reg
 const REFRESH_SHARDS_PER_KIND = 4;
 const REFRESH_ATTEMPTS = 2;
 
-function isNotFound(error: unknown): boolean {
+export function isHubNotFound(error: unknown): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
@@ -61,18 +61,23 @@ function isNotFound(error: unknown): boolean {
 function isMissingDatasetFile(error: unknown, path: string): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    isNotFound(error) ||
+    isHubNotFound(error) ||
     message.includes(`missing: ${path}`) ||
     message.includes(`dataset file not found: ${path}`)
   );
 }
 
-async function assertDatasetRepoReadable(
+export async function assertDatasetRepoReadable(
   repo: { type: "dataset"; name: string },
   accessToken: string,
+  revision?: string,
 ): Promise<void> {
   try {
-    for await (const _entry of listFiles({ repo, accessToken })) {
+    for await (const _entry of listFiles({
+      repo,
+      accessToken,
+      ...(revision === undefined ? {} : { revision }),
+    })) {
       return;
     }
   } catch (error) {
@@ -93,7 +98,7 @@ export function createHubClient(datasetRepo: string, accessToken: string): HubCl
           if (entry.type === "file" && entry.path.endsWith(".jsonl")) paths.push(entry.path);
         }
       } catch (error) {
-        if (isNotFound(error)) {
+        if (isHubNotFound(error)) {
           // A fresh pool can lack the requested tree. Verify the repo itself is
           // readable so auth failures do not look like an empty dataset.
           await assertDatasetRepoReadable(repo, accessToken);
@@ -110,7 +115,7 @@ export function createHubClient(datasetRepo: string, accessToken: string): HubCl
         await assertDatasetRepoReadable(repo, accessToken);
         throw new Error(`dataset file not found: ${path}`);
       } catch (error) {
-        if (isNotFound(error)) await assertDatasetRepoReadable(repo, accessToken);
+        if (isHubNotFound(error)) await assertDatasetRepoReadable(repo, accessToken);
         throw error;
       }
     },

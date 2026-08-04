@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { DEFAULT_ENRICHMENT_MODEL } from "@xtap-pool/shared";
 import { z } from "zod";
 
 import { createHubClient, DatasetMirror } from "./dataset.js";
@@ -12,7 +13,7 @@ const indexCommandConfigSchema = z.object({
   DATASET_REPO: z.string().min(1),
   INDEX_BUCKET: z.string().min(1),
   HF_TOKEN: z.string().min(1),
-  LLM_MODEL: z.string().min(1).default("zai-org/GLM-5.2"),
+  LLM_MODEL: z.string().min(1).default(DEFAULT_ENRICHMENT_MODEL),
   TAXONOMY_VERSION: z.coerce.number().int().min(1).default(1),
 });
 
