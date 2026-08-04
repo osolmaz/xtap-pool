@@ -262,6 +262,12 @@ describe("durable enrichment index", () => {
     const index = await DurableIndex.bootstrap(options("failures"));
     await index.publish();
 
+    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}not json\n`);
+    source.advanceRevision();
+    await expect(index.advanceToLatest()).rejects.toThrow("invalid JSON");
+    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}{}\n`);
+    source.advanceRevision();
+    await expect(index.advanceToLatest()).rejects.toThrow("invalid tweet record");
     source.files.set(path, `${tweetLine("changed")}${tweetLine("2")}`);
     source.advanceRevision();
     await expect(index.advanceToLatest()).rejects.toThrow("prefix changed");

@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DatasetMirror, parseJsonlTweets } from "../src/dataset.js";
+import {
+  assertValidDatasetSourceContent,
+  DatasetMirror,
+  parseJsonlTweets,
+} from "../src/dataset.js";
 import type { HubClient } from "../src/dataset.js";
 import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
@@ -112,6 +116,57 @@ describe("DatasetMirror.rebuild", () => {
     expect(store.query({}).records.map((record) => record.tweet.id)).toEqual(["new"]);
     expect(existsSync(join(dir, oldPath))).toBe(false);
     expect(existsSync(join(dir, newPath))).toBe(true);
+  });
+});
+
+describe("durable source validation", () => {
+  it("rejects malformed JSON and schema-invalid records for every source kind", () => {
+    expect(() => {
+      assertValidDatasetSourceContent("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", "not json\n");
+    }).toThrow("invalid JSON");
+    for (const path of [
+      "data/osolmaz/2026/08/tweets-2026-08-04.jsonl",
+      "enrichment/2026/08/enrichment-2026-08-04.jsonl",
+      "enrichment/attempts/2026/08/attempts-2026-08-04.jsonl",
+      "enrichment/registry/2026/08/registry-2026-08-04.jsonl",
+      "enrichment/receipts/2026-08-04.jsonl",
+    ]) {
+      expect(() => {
+        assertValidDatasetSourceContent(path, "{}\n");
+      }).toThrow("invalid");
+    }
+  });
+
+  it("accepts recognized previous enrichment and receipt contracts", () => {
+    expect(() => {
+      assertValidDatasetSourceContent(
+        "enrichment/2026/07/enrichment-2026-07-06.jsonl",
+        `${JSON.stringify({
+          unit_id: "1:someone",
+          tweet_ids: ["1"],
+          labels: ["ai"],
+          free_labels: ["gguf"],
+          concepts: [{ name: "vLLM", aliases: [] }],
+          model: "model",
+          taxonomy_version: 1,
+          enriched_at: "2026-07-06T00:00:00.000Z",
+        })}\n`,
+      );
+    }).not.toThrow();
+    expect(() => {
+      assertValidDatasetSourceContent(
+        "enrichment/receipts/2026-07-26.jsonl",
+        `${JSON.stringify({
+          started_at: "2026-07-26T00:00:00.000Z",
+          finished_at: "2026-07-26T00:01:00.000Z",
+          units: 1,
+          calls: 1,
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          failures: 0,
+        })}\n`,
+      );
+    }).not.toThrow();
   });
 });
 

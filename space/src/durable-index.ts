@@ -18,6 +18,7 @@ import { z } from "zod";
 
 import {
   assertDatasetRepoReadable,
+  assertValidDatasetSourceContent,
   DatasetMirror,
   datasetSourceKind,
   isHubNotFound,
@@ -455,12 +456,15 @@ export class DurableIndex {
     assertCompletePinnedSource(current, content);
     const suffix = sourceSuffix(current.path, content, previous);
     const decoder = new TextDecoder("utf-8", { fatal: true });
+    const fullText = decoder.decode(content);
+    const suffixText = decoder.decode(suffix);
+    assertValidDatasetSourceContent(current.path, suffixText);
     return {
       current,
       kind,
       fullContent: content,
-      fullText: decoder.decode(content),
-      suffixText: decoder.decode(suffix),
+      fullText,
+      suffixText,
       contentSha256: sha256Bytes(content),
       previousRows: previous?.row_count ?? 0,
     };
