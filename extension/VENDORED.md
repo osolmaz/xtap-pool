@@ -31,6 +31,13 @@ this directory, excluding the modifications below.
   `background.js` `probeHttp()` sends the cached token accordingly.
 - `tests/pool-sync.test.mjs` — **new**: node --test coverage for the queue,
   flush, backoff and connect flows.
+- `lib/scrape-receipts.js` and `lib/scrape-bridge.js` — **new**: durable
+  IndexedDB receipts for X list observations plus a cursor-based external port
+  used by the allowlisted Infinite Feed Scroller extension.
+- `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
+  coverage, replay, active-run and sender-allowlist coverage.
+- `background.js` records list-timeline receipts before capture deduplication and
+  forwards active-run observations through the external scrape port.
 - `background.js` flush — rebuffers batches on explicit host rejection or
   when no transport accepted the message (native fire-and-forget posts still
   count as delivered), and persists the local buffer across MV3 service-worker
