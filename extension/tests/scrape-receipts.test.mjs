@@ -99,6 +99,30 @@ describe('ScrapeReceiptStore', () => {
     assert.equal(observation.knownBeforeRun, false);
   });
 
+  it('retries a transient database open failure', async () => {
+    let attempts = 0;
+    const database = { close() {} };
+    const factory = {
+      open() {
+        attempts += 1;
+        const openRequest = { error: null, result: database };
+        queueMicrotask(() => {
+          if (attempts === 1) {
+            openRequest.error = new Error('profile locked');
+            openRequest.onerror();
+          } else {
+            openRequest.onsuccess();
+          }
+        });
+        return openRequest;
+      },
+    };
+    const store = new ScrapeReceiptStore(factory, databaseName());
+    await assert.rejects(store.open(), /profile locked/);
+    assert.equal(await store.open(), database);
+    assert.equal(attempts, 2);
+  });
+
   it('makes reopen idempotent and rejects a competing active run', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     const input = {

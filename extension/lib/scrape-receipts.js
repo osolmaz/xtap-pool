@@ -204,14 +204,32 @@ export class ScrapeReceiptStore {
 
   async open() {
     if (this.databasePromise) return this.databasePromise;
-    this.databasePromise = new Promise((resolve, reject) => {
+    const opening = new Promise((resolve, reject) => {
       const openRequest = this.indexedDB.open(this.databaseName, DATABASE_VERSION);
+      let settled = false;
       openRequest.onupgradeneeded = () => createSchema(openRequest.result);
-      openRequest.onsuccess = () => resolve(openRequest.result);
-      openRequest.onerror = () => reject(openRequest.error ?? new Error('failed to open receipt database'));
-      openRequest.onblocked = () => reject(new Error('receipt database upgrade is blocked'));
+      openRequest.onsuccess = () => {
+        if (settled) {
+          openRequest.result.close();
+          return;
+        }
+        settled = true;
+        resolve(openRequest.result);
+      };
+      openRequest.onerror = () => {
+        settled = true;
+        reject(openRequest.error ?? new Error('failed to open receipt database'));
+      };
+      openRequest.onblocked = () => {
+        settled = true;
+        reject(new Error('receipt database upgrade is blocked'));
+      };
     });
-    return this.databasePromise;
+    this.databasePromise = opening;
+    opening.catch(() => {
+      if (this.databasePromise === opening) this.databasePromise = null;
+    });
+    return opening;
   }
 
   async close() {
