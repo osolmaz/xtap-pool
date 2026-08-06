@@ -9,6 +9,7 @@ import {
   poolTogglePause,
   poolStatus,
 } from './lib/pool-sync.js';
+import { ScrapeReceiptBridge } from './lib/scrape-bridge.js';
 
 const NATIVE_HOST = 'com.xtap.host';
 const BATCH_SIZE = 50;
@@ -28,6 +29,8 @@ let debugLogging = false;
 let verboseLogging = false;
 let logBuffer = [];
 const isDevMode = !chrome.runtime.getManifest().update_url;
+const scrapeReceiptBridge = new ScrapeReceiptBridge();
+scrapeReceiptBridge.attach();
 let readyResolve;
 const ready = new Promise(r => { readyResolve = r; });
 
@@ -532,6 +535,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           if (missingAuthor > 0) warn += ` | ${missingAuthor} missing username`;
           if (missingText > 0) warn += ` | ${missingText} missing text`;
           console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warn}`);
+          try {
+            await scrapeReceiptBridge.recordGraphqlResponse({
+              endpoint: msg.endpoint,
+              requestUrl: msg.url,
+              tweets,
+            });
+          } catch (e) {
+            console.error('[xTap] Failed to record scrape receipts:', e);
+          }
           enqueueTweets(tweets, msg.endpoint);
         }
       } catch (e) {
