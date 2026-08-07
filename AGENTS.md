@@ -21,3 +21,4 @@ vanilla JS — keep upstream style, record changes in `extension/VENDORED.md`).
   client-supplied attribution fields.
 - Add a regression test for every bug fix.
 - Use Conventional Commits.
+- Never inject or execute code in a website's main world, replace or wrap website APIs, or modify page-owned code. Capture website signals through passive browser-level listeners from extension-owned contexts. The current vendored `content-main.js` fetch/XHR interception violates this boundary and must be replaced rather than extended or treated as precedent.
