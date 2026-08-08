@@ -21,6 +21,15 @@ export class ScrapeReceiptBridge {
   }
 
   attach() {
+    void this.attachAfterCutover();
+  }
+
+  async attachAfterCutover() {
+    try {
+      await this.store.finishCutover();
+    } catch {
+      // The first handshake will surface the IndexedDB failure to the client.
+    }
     this.runtime.onConnectExternal.addListener((port) => {
       this.accept(port);
     });

@@ -1,5 +1,6 @@
 const DATABASE_NAME = 'xtap-scrape-receipts';
 const DATABASE_VERSION = 1;
+const META_CUTOVER = 'cutoverInProgress';
 const META_SEQUENCE = 'captureSequence';
 const MAX_ACTIVE_RUNS = 2;
 
@@ -24,6 +25,11 @@ export class ScrapeReceiptStore {
     const listReceipts = transaction.objectStore('listReceipts');
     const meta = transaction.objectStore('meta');
     const runs = transaction.objectStore('runs');
+
+    if ((await readMeta(meta, META_CUTOVER)) === true) {
+      transaction.abort();
+      throw new Error('xTap scrape cutover is in progress');
+    }
 
     const allRuns = await request(runs.getAll());
     const existing = allRuns.find((run) => run.runId === runId);
@@ -180,12 +186,14 @@ export class ScrapeReceiptStore {
       .sort((left, right) => left.cursor - right.cursor);
   }
 
-  async failActiveRuns(finishedAtMs) {
+  async beginCutover(finishedAtMs) {
     if (!Number.isFinite(finishedAtMs)) throw new Error('invalid finish time');
 
     const database = await this.open();
-    const transaction = database.transaction('runs', 'readwrite');
+    const transaction = database.transaction(['meta', 'runs'], 'readwrite');
+    const meta = transaction.objectStore('meta');
     const runs = transaction.objectStore('runs');
+    writeMeta(meta, META_CUTOVER, true);
     const activeRuns = (await request(runs.getAll())).filter(
       (run) => run.state === 'running',
     );
@@ -197,6 +205,13 @@ export class ScrapeReceiptStore {
     }
     await transactionDone(transaction);
     return activeRuns.length;
+  }
+
+  async finishCutover() {
+    const database = await this.open();
+    const transaction = database.transaction('meta', 'readwrite');
+    writeMeta(transaction.objectStore('meta'), META_CUTOVER, false);
+    await transactionDone(transaction);
   }
 
   async finishRun(runId, state, finishedAtMs) {

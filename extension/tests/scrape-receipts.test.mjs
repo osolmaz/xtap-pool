@@ -195,7 +195,7 @@ describe('ScrapeReceiptStore', () => {
       startedAtMs: 2_000,
     });
 
-    assert.equal(await store.failActiveRuns(3_000), 2);
+    assert.equal(await store.beginCutover(3_000), 2);
     assert.deepEqual(await store.getRun(first.runId), {
       ...first,
       finishedAtMs: 3_000,
@@ -203,7 +203,27 @@ describe('ScrapeReceiptStore', () => {
       updatedAtMs: 3_000,
     });
     assert.equal((await store.getRun(second.runId)).state, 'failed');
-    assert.equal(await store.failActiveRuns(4_000), 0);
+    await assert.rejects(
+      store.beginRun({
+        listId: LIST_B,
+        sourceTabId: 303,
+        runId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+        startedAtMs: 4_000,
+      }),
+      /cutover is in progress/,
+    );
+    await store.finishCutover();
+    assert.equal(
+      (
+        await store.beginRun({
+          listId: LIST_B,
+          sourceTabId: 303,
+          runId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+          startedAtMs: 4_000,
+        })
+      ).state,
+      'running',
+    );
   });
 });
 
@@ -222,6 +242,26 @@ describe('extractListId', () => {
 });
 
 describe('ScrapeReceiptBridge', () => {
+  it('clears the cutover gate before accepting connections', async () => {
+    const events = [];
+    const store = {
+      async finishCutover() {
+        events.push('cutover-finished');
+      },
+    };
+    const runtime = {
+      onConnectExternal: {
+        addListener() {
+          events.push('listener-attached');
+        },
+      },
+    };
+    const bridge = new ScrapeReceiptBridge({ runtime, store });
+
+    await bridge.attachAfterCutover();
+    assert.deepEqual(events, ['cutover-finished', 'listener-attached']);
+  });
+
   it('rejects unknown extensions and streams observations to the scroller', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     const runtime = { onConnectExternal: { addListener() {} } };

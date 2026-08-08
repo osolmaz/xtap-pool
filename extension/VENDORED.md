@@ -36,7 +36,8 @@ this directory, excluding the modifications below.
   used by the allowlisted Infinite Feed Scroller extension.
 - `reload.html` and `reload.js` — **new**: extension-owned deployment page that
   reloads the unpacked extension through `chrome.runtime.reload()`. The explicit
-  `?fail-active=1` cutover option fails active receipt runs before reloading.
+  `?fail-active=1` cutover option gates new runs, fails active receipt runs,
+  and reloads; the new service worker clears the gate before accepting clients.
 - `cutover.html` and `cutover.js` — **new**: one-shot fresh-state page with a
   distinct URL so a cached older reload page cannot bypass active-run cleanup.
 - `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
