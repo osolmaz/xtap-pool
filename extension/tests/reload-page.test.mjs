@@ -8,6 +8,8 @@ test('the extension-owned reload page invokes the Chrome reload API', async () =
   const html = await readFile(new URL('reload.html', extensionRoot), 'utf8');
   const script = await readFile(new URL('reload.js', extensionRoot), 'utf8');
 
-  assert.match(html, /<script src="reload\.js"><\/script>/);
-  assert.equal(script.trim(), 'chrome.runtime.reload();');
+  assert.match(html, /<script src="reload\.js" type="module"><\/script>/);
+  assert.match(script, /params\.get\('fail-active'\) === '1'/);
+  assert.match(script, /await store\.failActiveRuns\(Date\.now\(\)\)/);
+  assert.match(script, /chrome\.runtime\.reload\(\)/);
 });

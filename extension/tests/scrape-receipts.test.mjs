@@ -179,6 +179,32 @@ describe('ScrapeReceiptStore', () => {
     });
     assert.equal(third.state, 'running');
   });
+
+  it('fails active runs for an explicit fresh-state cutover', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const first = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      startedAtMs: 1_000,
+    });
+    const second = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_B,
+      runId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+      startedAtMs: 2_000,
+    });
+
+    assert.equal(await store.failActiveRuns(3_000), 2);
+    assert.deepEqual(await store.getRun(first.runId), {
+      ...first,
+      finishedAtMs: 3_000,
+      state: 'failed',
+      updatedAtMs: 3_000,
+    });
+    assert.equal((await store.getRun(second.runId)).state, 'failed');
+    assert.equal(await store.failActiveRuns(4_000), 0);
+  });
 });
 
 describe('extractListId', () => {

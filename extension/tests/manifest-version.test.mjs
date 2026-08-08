@@ -6,5 +6,5 @@ const manifestUrl = new URL('../manifest.json', import.meta.url);
 
 test('concurrent scrape support ships with a new extension version', async () => {
   const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
-  assert.equal(manifest.version, '0.20.1');
+  assert.equal(manifest.version, '0.20.2');
 });
