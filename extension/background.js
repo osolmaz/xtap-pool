@@ -515,7 +515,7 @@ const IGNORED_ENDPOINTS = new Set([
   'useReadableMessagesSnapshotMutation', 'UsersByRestIds',
 ]);
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GRAPHQL_RESPONSE') {
     (async () => {
       await ready;
@@ -539,6 +539,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             await scrapeReceiptBridge.recordGraphqlResponse({
               endpoint: msg.endpoint,
               requestUrl: msg.url,
+              sourceTabId: sender?.tab?.id,
               tweets,
             });
           } catch (e) {
@@ -556,7 +557,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === 'POOL_CONNECT') {
     (async () => {
-      const result = await poolConnect(msg, _sender && _sender.url ? _sender.url : '');
+      const result = await poolConnect(msg, sender && sender.url ? sender.url : '');
       sendResponse(result);
     })();
     return true;
