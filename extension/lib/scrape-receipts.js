@@ -180,6 +180,25 @@ export class ScrapeReceiptStore {
       .sort((left, right) => left.cursor - right.cursor);
   }
 
+  async failActiveRuns(finishedAtMs) {
+    if (!Number.isFinite(finishedAtMs)) throw new Error('invalid finish time');
+
+    const database = await this.open();
+    const transaction = database.transaction('runs', 'readwrite');
+    const runs = transaction.objectStore('runs');
+    const activeRuns = (await request(runs.getAll())).filter(
+      (run) => run.state === 'running',
+    );
+    for (const run of activeRuns) {
+      run.finishedAtMs = finishedAtMs;
+      run.state = 'failed';
+      run.updatedAtMs = finishedAtMs;
+      runs.put(run);
+    }
+    await transactionDone(transaction);
+    return activeRuns.length;
+  }
+
   async finishRun(runId, state, finishedAtMs) {
     if (!isRunId(runId)) throw new Error('invalid run ID');
     if (!['aborted', 'completed', 'failed'].includes(state)) {
