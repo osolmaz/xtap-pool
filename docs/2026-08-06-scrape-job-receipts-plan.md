@@ -64,7 +64,7 @@ The exact window and streak remain visible in the job trace so later tuning can 
 
 The job page opens the xTap run before list navigation, which prevents the first timeline response from racing the receipt setup. A reconnect asks xTap to replay observations after the last applied cursor. The estimator can also rebuild from cursor zero after a full page restart.
 
-Only one xTap scrape run may be active at a time. Reopening the same run is idempotent. A second run receives a conflict instead of replacing the active run.
+This one-run rule was replaced by the coordinated [concurrent scrape jobs plan](https://github.com/osolmaz/infinite-feed-scroller/blob/main/docs/2026-08-09-concurrent-scrape-jobs-plan.md). xTap now permits two tab-bound runs. Reopening the same run is idempotent, and a third run receives a capacity error.
 
 ## Acceptance criteria
 

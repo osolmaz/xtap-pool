@@ -26,13 +26,14 @@ export class ScrapeReceiptBridge {
     });
   }
 
-  async recordGraphqlResponse({ endpoint, requestUrl, tweets }) {
+  async recordGraphqlResponse({ endpoint, requestUrl, sourceTabId, tweets }) {
     const listId = extractListId(endpoint, requestUrl);
     if (!listId) return [];
     const observations = await this.store.recordTimeline({
       endpoint,
       listId,
       observedAtMs: Date.now(),
+      sourceTabId,
       tweets,
     });
     if (observations.length === 0) return observations;
@@ -79,6 +80,7 @@ export class ScrapeReceiptBridge {
         const run = await this.store.beginRun({
           listId: message.listId,
           runId: message.runId,
+          sourceTabId: message.sourceTabId,
           startedAtMs: message.startedAtMs,
         });
         const observations = await this.store.readObservations(

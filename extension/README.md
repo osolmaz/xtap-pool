@@ -43,9 +43,9 @@ xTap is a Chrome extension that silently intercepts the GraphQL API responses X/
 
 ## Scrape job receipts
 
-xTap can provide capture receipts to the allowlisted [Infinite Feed Scroller](https://github.com/osolmaz/infinite-feed-scroller) extension. The scroller opens a run before loading an X list. xTap then stores the list's post IDs, post timestamps, first-seen times, and ordered run observations in browser IndexedDB.
+xTap can provide capture receipts to the allowlisted [Infinite Feed Scroller](https://github.com/osolmaz/infinite-feed-scroller) extension. The scroller binds a run to a blank source tab before navigating that tab to X. xTap then stores the list's post IDs, post timestamps, first-seen times, and ordered run observations in browser IndexedDB.
 
-This local index lets a job recover after an extension restart and tell whether it has reached posts captured during an earlier run of the same list. The external port never exposes tweet text or the pool token. xTap does not move the page and remains passive when no scrape run is open.
+Up to two runs can be active. Each GraphQL response is routed only to the run bound to its sender tab. Finishing one run does not affect the other. This local index lets a job recover after an extension restart and tell whether it has reached posts captured during an earlier run of the same list. The external port never exposes tweet text or the pool token. xTap does not move the page and remains passive when no scrape run is open.
 
 ## How It Works
 

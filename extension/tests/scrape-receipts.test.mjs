@@ -12,6 +12,8 @@ import {
 
 const LIST_A = '2080606393175064669';
 const LIST_B = '2080606393175064670';
+const TAB_A = 101;
+const TAB_B = 202;
 
 function tweet(id, createdAt = '2026-08-06T10:00:00.000Z') {
   return {
@@ -38,11 +40,13 @@ describe('ScrapeReceiptStore', () => {
       endpoint: 'ListLatestTweetsTimeline',
       listId: LIST_A,
       observedAtMs: 1_000,
+      sourceTabId: TAB_A,
       tweets: [tweet('1')],
     });
 
     const run = await store.beginRun({
       listId: LIST_A,
+      sourceTabId: TAB_A,
       runId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       startedAtMs: 2_000,
     });
@@ -53,6 +57,7 @@ describe('ScrapeReceiptStore', () => {
       endpoint: 'ListLatestTweetsTimeline',
       listId: LIST_A,
       observedAtMs: 3_000,
+      sourceTabId: TAB_A,
       tweets: [tweet('1'), tweet('2')],
     });
     assert.deepEqual(
@@ -81,10 +86,12 @@ describe('ScrapeReceiptStore', () => {
       endpoint: 'ListLatestTweetsTimeline',
       listId: LIST_B,
       observedAtMs: 1_000,
+      sourceTabId: TAB_A,
       tweets: [tweet('shared')],
     });
     const run = await store.beginRun({
       listId: LIST_A,
+      sourceTabId: TAB_A,
       runId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       startedAtMs: 2_000,
     });
@@ -94,6 +101,7 @@ describe('ScrapeReceiptStore', () => {
       endpoint: 'ListLatestTweetsTimeline',
       listId: LIST_A,
       observedAtMs: 3_000,
+      sourceTabId: TAB_A,
       tweets: [tweet('shared')],
     });
     assert.equal(observation.knownBeforeRun, false);
@@ -123,33 +131,53 @@ describe('ScrapeReceiptStore', () => {
     assert.equal(attempts, 2);
   });
 
-  it('makes reopen idempotent and rejects a competing active run', async () => {
+  it('allows two tab-bound runs and rejects a third', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
-    const input = {
+    const firstInput = {
       listId: LIST_A,
+      sourceTabId: TAB_A,
       runId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
       startedAtMs: 2_000,
     };
-    const first = await store.beginRun(input);
-    assert.deepEqual(await store.beginRun(input), first);
+    const first = await store.beginRun(firstInput);
+    assert.deepEqual(await store.beginRun(firstInput), first);
+
+    const second = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_B,
+      runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      startedAtMs: 3_000,
+    });
+    assert.equal(second.state, 'running');
+
+    const firstObservations = await store.recordTimeline({
+      endpoint: 'ListLatestTweetsTimeline',
+      listId: LIST_A,
+      observedAtMs: 3_500,
+      sourceTabId: TAB_A,
+      tweets: [tweet('first-tab')],
+    });
+    assert.deepEqual(firstObservations.map(({ runId }) => runId), [first.runId]);
+    assert.equal((await store.getRun(second.runId)).lastCursor, 0);
 
     await assert.rejects(
       store.beginRun({
         listId: LIST_B,
-        runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-        startedAtMs: 3_000,
+        sourceTabId: 303,
+        runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        startedAtMs: 4_000,
       }),
-      /already active/,
+      /two active scrape runs/,
     );
 
-    const finished = await store.finishRun(first.runId, 'completed', 4_000);
-    assert.equal(finished.state, 'completed');
-    const next = await store.beginRun({
+    await store.finishRun(first.runId, 'completed', 5_000);
+    const third = await store.beginRun({
       listId: LIST_B,
-      runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-      startedAtMs: 3_000,
+      sourceTabId: 303,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      startedAtMs: 4_000,
     });
-    assert.equal(next.state, 'running');
+    assert.equal(third.state, 'running');
   });
 });
 
@@ -184,6 +212,7 @@ describe('ScrapeReceiptBridge', () => {
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
       startedAtMs: 1_000,
       type: 'scrape:open',
     });
@@ -192,6 +221,7 @@ describe('ScrapeReceiptBridge', () => {
     await bridge.recordGraphqlResponse({
       endpoint: 'ListLatestTweetsTimeline',
       requestUrl: listUrl(),
+      sourceTabId: TAB_A,
       tweets: [tweet('9')],
     });
     const streamed = accepted.sent.find(

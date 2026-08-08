@@ -1,7 +1,7 @@
 const DATABASE_NAME = 'xtap-scrape-receipts';
 const DATABASE_VERSION = 1;
-const META_ACTIVE_RUN = 'activeRunId';
 const META_SEQUENCE = 'captureSequence';
+const MAX_ACTIVE_RUNS = 2;
 
 export const SCRAPE_PROTOCOL_VERSION = 1;
 export const SCRAPE_PORT_NAME = 'xtap-scrape-v1';
@@ -14,8 +14,8 @@ export class ScrapeReceiptStore {
     this.databasePromise = null;
   }
 
-  async beginRun({ runId, listId, startedAtMs }) {
-    validateRunInput({ runId, listId, startedAtMs });
+  async beginRun({ runId, listId, sourceTabId, startedAtMs }) {
+    validateRunInput({ runId, listId, sourceTabId, startedAtMs });
     const database = await this.open();
     const transaction = database.transaction(
       ['listReceipts', 'meta', 'runs'],
@@ -25,23 +25,40 @@ export class ScrapeReceiptStore {
     const meta = transaction.objectStore('meta');
     const runs = transaction.objectStore('runs');
 
-    const existing = await request(runs.get(runId));
+    const allRuns = await request(runs.getAll());
+    const existing = allRuns.find((run) => run.runId === runId);
     if (existing) {
       if (existing.listId !== listId || existing.startedAtMs !== startedAtMs) {
         transaction.abort();
         throw new Error('run ID already belongs to different parameters');
       }
+      if (existing.state === 'running' && existing.sourceTabId !== sourceTabId) {
+        const sourceInUse = allRuns.some(
+          (run) =>
+            run.runId !== runId &&
+            run.state === 'running' &&
+            run.sourceTabId === sourceTabId,
+        );
+        if (sourceInUse) {
+          transaction.abort();
+          throw new Error(`source tab ${sourceTabId} already belongs to an active scrape run`);
+        }
+        existing.sourceTabId = sourceTabId;
+        existing.updatedAtMs = Date.now();
+        runs.put(existing);
+      }
       await transactionDone(transaction);
       return existing;
     }
 
-    const activeRunId = await readMeta(meta, META_ACTIVE_RUN);
-    if (typeof activeRunId === 'string' && activeRunId !== runId) {
-      const activeRun = await request(runs.get(activeRunId));
-      if (activeRun?.state === 'running') {
-        transaction.abort();
-        throw new Error(`scrape run ${activeRunId} is already active`);
-      }
+    const activeRuns = allRuns.filter((run) => run.state === 'running');
+    if (activeRuns.some((run) => run.sourceTabId === sourceTabId)) {
+      transaction.abort();
+      throw new Error(`source tab ${sourceTabId} already belongs to an active scrape run`);
+    }
+    if (activeRuns.length >= MAX_ACTIVE_RUNS) {
+      transaction.abort();
+      throw new Error('xTap already has two active scrape runs');
     }
 
     const baselineSequence = (await readMeta(meta, META_SEQUENCE)) ?? 0;
@@ -55,19 +72,20 @@ export class ScrapeReceiptStore {
       listId,
       protocolVersion: SCRAPE_PROTOCOL_VERSION,
       runId,
+      sourceTabId,
       startedAtMs,
       state: 'running',
       updatedAtMs: Date.now(),
     };
     runs.put(run);
-    writeMeta(meta, META_ACTIVE_RUN, runId);
     await transactionDone(transaction);
     return run;
   }
 
-  async recordTimeline({ endpoint, listId, observedAtMs, tweets }) {
+  async recordTimeline({ endpoint, listId, observedAtMs, sourceTabId, tweets }) {
     if (endpoint !== 'ListLatestTweetsTimeline') return [];
     if (!isListId(listId) || !Number.isFinite(observedAtMs)) return [];
+    if (!isSourceTabId(sourceTabId)) return [];
     if (!Array.isArray(tweets) || tweets.length === 0) return [];
 
     const database = await this.open();
@@ -82,13 +100,12 @@ export class ScrapeReceiptStore {
     const runs = transaction.objectStore('runs');
 
     let sequence = (await readMeta(meta, META_SEQUENCE)) ?? 0;
-    const activeRunId = await readMeta(meta, META_ACTIVE_RUN);
-    const activeRun =
-      typeof activeRunId === 'string' ? await request(runs.get(activeRunId)) : undefined;
-    const run =
-      activeRun?.state === 'running' && activeRun.listId === listId
-        ? activeRun
-        : undefined;
+    const run = (await request(runs.getAll())).find(
+      (candidate) =>
+        candidate.state === 'running' &&
+        candidate.listId === listId &&
+        candidate.sourceTabId === sourceTabId,
+    );
     const emitted = [];
     const batchIds = new Set();
 
@@ -171,8 +188,7 @@ export class ScrapeReceiptStore {
     if (!Number.isFinite(finishedAtMs)) throw new Error('invalid finish time');
 
     const database = await this.open();
-    const transaction = database.transaction(['meta', 'runs'], 'readwrite');
-    const meta = transaction.objectStore('meta');
+    const transaction = database.transaction('runs', 'readwrite');
     const runs = transaction.objectStore('runs');
     const run = await request(runs.get(runId));
     if (!run) {
@@ -188,8 +204,6 @@ export class ScrapeReceiptStore {
     run.state = state;
     run.updatedAtMs = finishedAtMs;
     runs.put(run);
-    const activeRunId = await readMeta(meta, META_ACTIVE_RUN);
-    if (activeRunId === runId) writeMeta(meta, META_ACTIVE_RUN, null);
     await transactionDone(transaction);
     return run;
   }
@@ -303,9 +317,10 @@ function writeMeta(store, key, value) {
   store.put({ key, value });
 }
 
-function validateRunInput({ runId, listId, startedAtMs }) {
+function validateRunInput({ runId, listId, sourceTabId, startedAtMs }) {
   if (!isRunId(runId)) throw new Error('invalid run ID');
   if (!isListId(listId)) throw new Error('invalid list ID');
+  if (!isSourceTabId(sourceTabId)) throw new Error('invalid source tab ID');
   if (!Number.isFinite(startedAtMs)) throw new Error('invalid start time');
 }
 
@@ -315,6 +330,10 @@ function isRunId(value) {
 
 function isListId(value) {
   return typeof value === 'string' && /^\d{4,25}$/.test(value);
+}
+
+function isSourceTabId(value) {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function isTweet(value) {

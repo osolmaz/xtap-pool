@@ -36,8 +36,9 @@ this directory, excluding the modifications below.
   used by the allowlisted Infinite Feed Scroller extension.
 - `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
   coverage, replay, active-run and sender-allowlist coverage.
-- `background.js` records list-timeline receipts before capture deduplication and
-  forwards active-run observations through the external scrape port.
+- `background.js` records list-timeline receipts before capture deduplication,
+  passes the sender tab ID to the receipt bridge, and forwards observations only
+  to the matching tab-bound run. Up to two receipt runs may be active.
 - `background.js` flush — rebuffers batches on explicit host rejection or
   when no transport accepted the message (native fire-and-forget posts still
   count as delivered), and persists the local buffer across MV3 service-worker
