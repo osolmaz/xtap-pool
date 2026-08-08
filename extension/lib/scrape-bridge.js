@@ -18,21 +18,28 @@ export class ScrapeReceiptBridge {
     this.runtime = runtime;
     this.store = store;
     this.connections = new Set();
+    this.cutoverClearPromise = null;
   }
 
   attach() {
-    void this.attachAfterCutover();
-  }
-
-  async attachAfterCutover() {
-    try {
-      await this.store.finishCutover();
-    } catch {
-      // The first handshake will surface the IndexedDB failure to the client.
-    }
     this.runtime.onConnectExternal.addListener((port) => {
       this.accept(port);
     });
+    void this.ensureCutoverCleared().catch(() => {
+      // A later handshake retries and reports a persistent IndexedDB failure.
+    });
+  }
+
+  async ensureCutoverCleared() {
+    if (this.cutoverClearPromise) return this.cutoverClearPromise;
+    const clearing = this.store.finishCutover();
+    this.cutoverClearPromise = clearing;
+    try {
+      await clearing;
+    } catch (error) {
+      if (this.cutoverClearPromise === clearing) this.cutoverClearPromise = null;
+      throw error;
+    }
   }
 
   async recordGraphqlResponse({ endpoint, requestUrl, sourceTabId, tweets }) {
@@ -75,8 +82,18 @@ export class ScrapeReceiptBridge {
       this.connections.delete(connection);
     });
     port.onMessage.addListener((message) => {
-      void this.handleMessage(connection, message);
+      void this.handleMessageAfterCutover(connection, message);
     });
+  }
+
+  async handleMessageAfterCutover(connection, message) {
+    try {
+      await this.ensureCutoverCleared();
+    } catch (error) {
+      post(connection.port, scrapeError(message, error));
+      return;
+    }
+    await this.handleMessage(connection, message);
   }
 
   async handleMessage(connection, message) {
@@ -123,18 +140,22 @@ export class ScrapeReceiptBridge {
 
       throw new Error('unknown scrape protocol message');
     } catch (error) {
-      post(connection.port, {
-        error: error instanceof Error ? error.message : String(error),
-        protocolVersion: SCRAPE_PROTOCOL_VERSION,
-        runId: typeof message?.runId === 'string' ? message.runId : '',
-        type: 'scrape:error',
-      });
+      post(connection.port, scrapeError(message, error));
     }
   }
 }
 
 function normalizeCursor(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function scrapeError(message, error) {
+  return {
+    error: error instanceof Error ? error.message : String(error),
+    protocolVersion: SCRAPE_PROTOCOL_VERSION,
+    runId: typeof message?.runId === 'string' ? message.runId : '',
+    type: 'scrape:error',
+  };
 }
 
 function post(port, message) {

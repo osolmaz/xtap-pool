@@ -242,24 +242,65 @@ describe('extractListId', () => {
 });
 
 describe('ScrapeReceiptBridge', () => {
-  it('clears the cutover gate before accepting connections', async () => {
-    const events = [];
+  it('attaches synchronously and retries a transient cutover-clear failure', async () => {
+    let attempts = 0;
+    let listenerAttached = false;
     const store = {
       async finishCutover() {
-        events.push('cutover-finished');
+        attempts += 1;
+        if (attempts === 1) throw new Error('profile locked');
       },
     };
     const runtime = {
       onConnectExternal: {
         addListener() {
-          events.push('listener-attached');
+          listenerAttached = true;
         },
       },
     };
     const bridge = new ScrapeReceiptBridge({ runtime, store });
 
-    await bridge.attachAfterCutover();
-    assert.deepEqual(events, ['cutover-finished', 'listener-attached']);
+    bridge.attach();
+    assert.equal(listenerAttached, true);
+    await waitFor(() => bridge.cutoverClearPromise === null);
+    await bridge.ensureCutoverCleared();
+    assert.equal(attempts, 2);
+  });
+
+  it('queues a handshake until the cutover gate clears', async () => {
+    let clearGate;
+    const gate = new Promise((resolve) => {
+      clearGate = resolve;
+    });
+    const store = {
+      async beginRun(input) {
+        return { ...input, state: 'running' };
+      },
+      finishCutover() {
+        return gate;
+      },
+      async readObservations() {
+        return [];
+      },
+    };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({ runtime, store });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+
+    accepted.receive({
+      afterCursor: 0,
+      listId: LIST_A,
+      protocolVersion: 1,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      startedAtMs: 1_000,
+      type: 'scrape:open',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(accepted.sent.length, 0);
+    clearGate();
+    await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
   });
 
   it('rejects unknown extensions and streams observations to the scroller', async () => {
