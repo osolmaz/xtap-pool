@@ -10,7 +10,7 @@ test('the fresh-state page ends active runs before reloading', async () => {
 
   assert.match(html, /<script src="cutover\.js" type="module"><\/script>/);
   assert.ok(
-    script.indexOf('await store.failActiveRuns(Date.now())') <
+    script.indexOf('await store.beginCutover(Date.now())') <
       script.indexOf('chrome.runtime.reload()'),
   );
 });

@@ -4,7 +4,7 @@ try {
   const params = new URLSearchParams(window.location.search);
   if (params.get('fail-active') === '1') {
     const store = new ScrapeReceiptStore();
-    await store.failActiveRuns(Date.now());
+    await store.beginCutover(Date.now());
     await store.close();
   }
   chrome.runtime.reload();
