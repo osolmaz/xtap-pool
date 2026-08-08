@@ -12,7 +12,7 @@ this directory, excluding the modifications below.
 
 ## Local modifications
 
-- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.20.2`; added `alarms` and
+- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.20.3`; added `alarms` and
   `unlimitedStorage` permissions, `https://*.hf.space/*` host permission and
   the `pool-connect.js` content script.
 - `lib/pool-sync.js` — **new**: persistent sync queue + batched flush to the
@@ -37,6 +37,8 @@ this directory, excluding the modifications below.
 - `reload.html` and `reload.js` — **new**: extension-owned deployment page that
   reloads the unpacked extension through `chrome.runtime.reload()`. The explicit
   `?fail-active=1` cutover option fails active receipt runs before reloading.
+- `cutover.html` and `cutover.js` — **new**: one-shot fresh-state page with a
+  distinct URL so a cached older reload page cannot bypass active-run cleanup.
 - `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
   coverage, replay, active-run and sender-allowlist coverage.
 - `background.js` records list-timeline receipts before capture deduplication,
