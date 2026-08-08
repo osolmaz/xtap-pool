@@ -12,7 +12,7 @@ this directory, excluding the modifications below.
 
 ## Local modifications
 
-- `manifest.json` — renamed to `xtap-pool`, version bump; added `alarms` and
+- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.20.0`; added `alarms` and
   `unlimitedStorage` permissions, `https://*.hf.space/*` host permission and
   the `pool-connect.js` content script.
 - `lib/pool-sync.js` — **new**: persistent sync queue + batched flush to the
