@@ -1,9 +1,11 @@
 const statusEl = document.getElementById('status');
+const transportErrorEl = document.getElementById('transport-error');
 const sessionEl = document.getElementById('session-count');
 const alltimeEl = document.getElementById('alltime-count');
 const toggleBtn = document.getElementById('toggle');
 const outputDirInput = document.getElementById('output-dir');
 const saveDirBtn = document.getElementById('save-dir');
+const imageDownloadCheckbox = document.getElementById('image-download');
 const videoSection = document.getElementById('video-section');
 const videoLabel = document.getElementById('video-label');
 const ytdlpHint = document.getElementById('ytdlp-hint');
@@ -14,12 +16,16 @@ function render(state) {
   alltimeEl.textContent = state.allTimeCount.toLocaleString();
 
   if (state.connected) {
-    const mode = state.transport === 'http' ? ' (HTTP daemon)' : ' (Native host)';
-    statusEl.textContent = 'Saving to disk' + mode;
+    statusEl.textContent = 'Saving to disk';
     statusEl.className = 'status connected';
+    transportErrorEl.style.display = 'none';
   } else {
     statusEl.textContent = 'Not connected';
     statusEl.className = 'status disconnected';
+    if (state.transportError) {
+      transportErrorEl.textContent = state.transportError;
+      transportErrorEl.style.display = '';
+    }
   }
 
   if (state.captureEnabled) {
@@ -33,6 +39,8 @@ function render(state) {
   if (state.outputDir) {
     outputDirInput.value = state.outputDir;
   }
+
+  imageDownloadCheckbox.checked = !!state.imageDownload;
 
   currentTransport = state.transport;
 }
@@ -98,6 +106,13 @@ toggleBtn.addEventListener('click', () => {
   });
 });
 
+imageDownloadCheckbox.addEventListener('change', () => {
+  chrome.runtime.sendMessage({
+    type: 'SET_IMAGE_DOWNLOAD',
+    imageDownload: imageDownloadCheckbox.checked,
+  });
+});
+
 saveDirBtn.addEventListener('click', () => {
   const dir = outputDirInput.value.trim();
   saveDirBtn.textContent = '...';
@@ -142,7 +157,13 @@ function checkForVideo() {
 
       // Show video section
       const typeLabel = resp.mediaType === 'animated_gif' ? 'GIF' : 'Video';
-      const duration = resp.durationMs ? ` (${Math.round(resp.durationMs / 1000)}s)` : '';
+      let duration = '';
+      if (resp.durationMs) {
+        const totalSec = Math.round(resp.durationMs / 1000);
+        duration = totalSec >= 60
+          ? ` (${Math.floor(totalSec / 60)}m ${totalSec % 60}s)`
+          : ` (${totalSec}s)`;
+      }
       videoLabel.textContent = `${typeLabel} detected${duration}`;
       videoSection.style.display = '';
 
@@ -211,6 +232,10 @@ function pollDownload(downloadId) {
       } else if (resp.status === 'error') {
         clearInterval(pollTimer);
         showDownloadResult('error', resp.error || 'Download failed');
+      } else if (resp.status === 'unknown') {
+        // Daemon restarted and lost the download state — stop polling.
+        clearInterval(pollTimer);
+        showDownloadResult('error', 'Download state lost — try again');
       }
     });
   }, 500);
@@ -236,3 +261,4 @@ document.getElementById('open-options').addEventListener('click', () => {
 });
 
 refresh();
+setInterval(refresh, 2000);
