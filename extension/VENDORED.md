@@ -12,9 +12,9 @@ this directory, excluding the modifications below.
 
 ## Local modifications
 
-- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.20.3`; added `alarms` and
-  `unlimitedStorage` permissions, `https://*.hf.space/*` host permission and
-  the `pool-connect.js` content script.
+- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.21.0`; added `alarms`,
+  `debugger`, and `unlimitedStorage` permissions, the `https://*.hf.space/*`
+  host permission, and the `pool-connect.js` content script.
 - `lib/pool-sync.js` — **new**: persistent sync queue + batched flush to the
   pool Space's `/api/ingest` with backoff.
 - `pool-connect.js` — **new**: content script for the Space's `/connect` page;
@@ -40,11 +40,19 @@ this directory, excluding the modifications below.
   and reloads; the new service worker clears the gate before accepting clients.
 - `cutover.html` and `cutover.js` — **new**: one-shot fresh-state page with a
   distinct URL so a cached older reload page cannot bypass active-run cleanup.
+- `tests/graphql-capture.test.mjs` — **new**: debugger attachment, response-body
+  capture, operation extraction, and failed-request coverage.
 - `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
-  coverage, replay, active-run and sender-allowlist coverage.
-- `background.js` records list-timeline receipts before capture deduplication,
-  passes the sender tab ID to the receipt bridge, and forwards observations only
-  to the matching tab-bound run. Up to two receipt runs may be active.
+  coverage, search and live-list normalization, replay, typed errors, active-run,
+  and sender-allowlist coverage.
+- `lib/graphql-capture.js` — **new**: passively reads completed X GraphQL
+  responses through Chrome's Debugger Network domain without changing page-owned
+  JavaScript or the DOM. The old MAIN-world fetch/XHR patch and isolated bridge
+  were removed.
+- `background.js` sends debugger-captured list and search responses through one
+  parser and receipt path before normal capture deduplication. It passes the
+  exact Chrome tab ID and forwards observations only to the matching tab-bound
+  run. Up to two receipt runs may be active.
 - `background.js` flush — rebuffers batches on explicit host rejection or
   when no transport accepted the message (native fire-and-forget posts still
   count as delivered), and persists the local buffer across MV3 service-worker

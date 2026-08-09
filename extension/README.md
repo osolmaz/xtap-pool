@@ -43,9 +43,9 @@ xTap is a Chrome extension that silently intercepts the GraphQL API responses X/
 
 ## Scrape job receipts
 
-xTap can provide capture receipts to the allowlisted [Infinite Feed Scroller](https://github.com/osolmaz/infinite-feed-scroller) extension. The scroller binds a run to a blank source tab before navigating that tab to X. xTap then stores the list's post IDs, post timestamps, first-seen times, and ordered run observations in browser IndexedDB.
+xTap can provide capture receipts to the allowlisted [Infinite Feed Scroller](https://github.com/osolmaz/infinite-feed-scroller) extension. The scroller binds a run to a blank source tab before navigating that tab to X. xTap stores each post ID, post time, first-seen time, source endpoint, and ordered run observation in browser IndexedDB.
 
-Up to two runs can be active. Each GraphQL response is routed only to the run bound to its sender tab. Finishing one run does not affect the other. This local index lets a job recover after an extension restart and tell whether it has reached posts captured during an earlier run of the same list. The external port never exposes tweet text or the pool token. xTap does not move the page and remains passive when no scrape run is open.
+Live-list and search timelines use the same observation format. Up to two runs can be active. Each GraphQL response is routed only to the run bound to its Chrome tab, and finishing one run leaves the other running. The local index supports replay after an extension restart and records whether each list post was known before the run. The external port never exposes tweet text or the pool token.
 
 ## How It Works
 
@@ -54,25 +54,17 @@ Up to two runs can be active. Each GraphQL response is routed only to the run bo
                     │
                     ▼
      ┌────────────────────────────┐
-     │     content-main.js        │  MAIN world
-     │    patches fetch & XHR     │
+     │ Chrome Debugger Network API│  Browser-owned
+     │ reads completed responses  │
      └──────────────┬─────────────┘
-                    │ CustomEvent (random name)
-                    ▼
-     ┌────────────────────────────┐
-     │     content-bridge.js      │  ISOLATED world
-     │   relays to service worker │
-     └──────────────┬─────────────┘
-                    │ chrome.runtime.sendMessage
+                    │
                     ▼
      ┌────────────────────────────┐
      │     background.js          │  Service worker
-     │   parse, dedup, batch      │
+     │ parse, receipt, dedup, batch│
      └──────────┬─────────┬───────┘
                 │         │
           HTTP  │         │ native messaging
-      (primary) │         │ (token bootstrap
-                │         │  + data fallback)
                 ▼         ▼
      ┌──────────────┐  ┌──────────────┐
      │ xtap_daemon  │  │ xtap_host.py │
@@ -83,35 +75,24 @@ Up to two runs can be active. Each GraphQL response is routed only to the run bo
        tweets-YYYY-MM-DD.jsonl
 ```
 
-1. A MAIN world content script patches `fetch` and `XMLHttpRequest.open()` to observe GraphQL responses as they arrive
-2. Payloads are relayed via a random-named `CustomEvent` to an ISOLATED world bridge, which forwards them to the service worker
-3. The service worker parses, normalizes, deduplicates, and batches tweets
-4. Batches are sent to disk via one of two transports:
-   - **HTTP daemon**: a standalone `xtap_daemon.py` process on `127.0.0.1:17381`, managed by launchd (macOS), systemd (Linux), or Scheduled Task (Windows). On macOS, it runs outside Chrome's TCC sandbox and can write to protected paths like `~/Documents` and iCloud Drive
-   - **Native messaging**: `xtap_host.py` over Chrome's stdio protocol — used at startup to retrieve the daemon's auth token (`GET_TOKEN`), and as a data transport fallback if HTTP is unavailable
+1. The service worker attaches Chrome's Debugger Network domain to open X tabs.
+2. It reads completed GraphQL response bodies without changing page JavaScript or the DOM.
+3. The existing parser normalizes tweets, records tab-bound scrape receipts, deduplicates normal capture, and builds upload batches.
+4. The HTTP daemon remains the primary disk transport. Native messaging bootstraps its token and provides the existing fallback.
 
 ## Is This Safe to Use?
 
-X is [rolling out stricter detection for automation and bots](https://x.com/nikitabier/status/2022496540275937525). The key line: *"If a human is not tapping on the screen, the account and all associated accounts will likely be suspended."*
+xTap does not post, like, follow, scroll, or request extra X data. It records responses that Chrome received because of browsing in the attached tab.
 
-**xTap is not a bot.** It doesn't post, like, follow, scroll, or make any API calls on your behalf. It sits in the background and reads the responses X already sent to your browser while *you* browse normally. From X's server-side perspective, your account looks identical to any other user — because you *are* a normal user. There is no extra traffic to detect.
+X can still enforce its rules based on account activity, browsing patterns, or automated scrolling performed by another tool. Review those rules and use a suitable account before running long scrapes.
 
-The risk of automation enforcement applies to tools that *act* as you (auto-liking, auto-following, automated scrolling, headless browsers). xTap does none of that. It's the equivalent of keeping DevTools open and saving the Network tab — just automated into structured JSONL.
+### Browser behavior
 
-### Stealth Measures
+xTap reads responses that Chrome already received and does not send extra X requests for capture. The extension no longer replaces page fetch or XHR functions and leaves the page DOM unchanged.
 
-Even though passive interception is inherently low-risk, xTap avoids leaving unnecessary traces:
+Chrome shows its standard debugger notice while xTap is attached to an X tab. Opening DevTools or another debugger can detach xTap from that tab. Reload or revisit the tab to attach again.
 
-- **No extra network requests** — only reads responses the browser already received; nothing to spot in a network log
-- **Native-looking API patches** — `fetch` and `XMLHttpRequest.prototype.open` are patched with `toString()` overrides that return `[native code]`, passing the most common runtime integrity checks
-- **No expando properties** — XHR URL tracking uses a `WeakMap` instead of attaching properties to the XHR instance, which would be trivially detectable
-- **Random event channel** — the MAIN↔ISOLATED world bridge uses a `CustomEvent` with a per-page-load random name; the `<meta>` beacon that communicates the name is removed immediately after the bridge reads it
-- **Zero DOM footprint** — no injected UI, no page modifications; everything lives in the popup and service worker
-- **Zero console output in page context** — all logging happens in the service worker and parser, which run outside the page's JavaScript environment
-- **Minimal permissions** — only `storage` and `nativeMessaging`; no `webRequest`, no host permissions beyond `x.com` / `twitter.com` / `127.0.0.1`
-- **Jittered flush timing** — batches are flushed on a randomized interval to avoid a clockwork-regular pattern
-
-These measures don't make detection impossible — a determined page script could still compare prototype references or probe for patched behavior — but they avoid the low-hanging signals that fingerprinting scripts typically check. More importantly, there's nothing to detect server-side because xTap generates zero network activity of its own.
+Capture still has account and platform risk. xTap can observe automated scrolling performed by another tool, and X can enforce its rules based on that browsing behavior.
 
 ## Installation
 
@@ -269,9 +250,7 @@ For regular tweets, `is_article` and `article` are absent. For articles, `text` 
 ```
 xTap/
 ├── manifest.json              # Chrome MV3 extension manifest
-├── background.js              # Service worker — parsing, dedup, transport
-├── content-main.js            # MAIN world — patches fetch/XHR, emits events
-├── content-bridge.js          # ISOLATED world — relays events to service worker
+├── background.js              # Service worker: capture, parsing, receipts, transport
 ├── popup.html/js/css          # Extension popup UI
 ├── debug.html/js/css          # Debug dashboard (live events, transport health, parser sandbox)
 ├── icons/                     # Extension icons
@@ -290,7 +269,7 @@ xTap/
 
 ## Development
 
-After modifying extension files (`background.js`, `lib/`, `content-*.js`, `popup.*`), reload the extension at `chrome://extensions` and hard-reload any open X tabs.
+After modifying extension files (`background.js`, `lib/`, or `popup.*`), reload the extension at `chrome://extensions` and hard-reload any open X tabs. Chrome asks for the Debugger permission and shows its standard notice while an X tab is attached.
 
 **Debug dashboard:** Click "Debug Dashboard" in the popup to open a live view of capture events, transport health, and a parser sandbox for testing `extractTweets` against raw GraphQL JSON. Debug logging and discovery mode toggles are also here — enable debug logging to write timestamped service worker logs to `debug-YYYY-MM-DD.log`, or discovery mode to log endpoint response shapes to the console.
 

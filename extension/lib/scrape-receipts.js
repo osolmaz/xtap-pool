@@ -3,9 +3,21 @@ const DATABASE_VERSION = 1;
 const META_CUTOVER = 'cutoverInProgress';
 const META_SEQUENCE = 'captureSequence';
 const MAX_ACTIVE_RUNS = 2;
+const TIMELINE_ENDPOINTS = new Set([
+  'ListLatestTweetsTimeline',
+  'SearchTimeline',
+]);
 
 export const SCRAPE_PROTOCOL_VERSION = 1;
 export const SCRAPE_PORT_NAME = 'xtap-scrape-v1';
+
+export class ScrapeReceiptError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+    this.name = 'ScrapeReceiptError';
+  }
+}
 
 export class ScrapeReceiptStore {
   constructor(indexedDBFactory = globalThis.indexedDB, databaseName = DATABASE_NAME) {
@@ -28,7 +40,10 @@ export class ScrapeReceiptStore {
 
     if ((await readMeta(meta, META_CUTOVER)) === true) {
       transaction.abort();
-      throw new Error('xTap scrape cutover is in progress');
+      throw new ScrapeReceiptError(
+        'cutover-active',
+        'xTap scrape cutover is in progress',
+      );
     }
 
     const allRuns = await request(runs.getAll());
@@ -36,7 +51,10 @@ export class ScrapeReceiptStore {
     if (existing) {
       if (existing.listId !== listId || existing.startedAtMs !== startedAtMs) {
         transaction.abort();
-        throw new Error('run ID already belongs to different parameters');
+        throw new ScrapeReceiptError(
+          'run-conflict',
+          'run ID already belongs to different parameters',
+        );
       }
       if (existing.state === 'running' && existing.sourceTabId !== sourceTabId) {
         const sourceInUse = allRuns.some(
@@ -47,7 +65,10 @@ export class ScrapeReceiptStore {
         );
         if (sourceInUse) {
           transaction.abort();
-          throw new Error(`source tab ${sourceTabId} already belongs to an active scrape run`);
+          throw new ScrapeReceiptError(
+            'source-tab-active',
+            `source tab ${sourceTabId} already belongs to an active scrape run`,
+          );
         }
         existing.sourceTabId = sourceTabId;
         existing.updatedAtMs = Date.now();
@@ -60,11 +81,17 @@ export class ScrapeReceiptStore {
     const activeRuns = allRuns.filter((run) => run.state === 'running');
     if (activeRuns.some((run) => run.sourceTabId === sourceTabId)) {
       transaction.abort();
-      throw new Error(`source tab ${sourceTabId} already belongs to an active scrape run`);
+      throw new ScrapeReceiptError(
+        'source-tab-active',
+        `source tab ${sourceTabId} already belongs to an active scrape run`,
+      );
     }
     if (activeRuns.length >= MAX_ACTIVE_RUNS) {
       transaction.abort();
-      throw new Error('xTap already has two active scrape runs');
+      throw new ScrapeReceiptError(
+        'capacity-full',
+        'xTap already has two active scrape runs',
+      );
     }
 
     const baselineSequence = (await readMeta(meta, META_SEQUENCE)) ?? 0;
@@ -88,10 +115,9 @@ export class ScrapeReceiptStore {
     return run;
   }
 
-  async recordTimeline({ endpoint, listId, observedAtMs, sourceTabId, tweets }) {
-    if (endpoint !== 'ListLatestTweetsTimeline') return [];
-    if (!isListId(listId) || !Number.isFinite(observedAtMs)) return [];
-    if (!isSourceTabId(sourceTabId)) return [];
+  async recordTimeline({ endpoint, requestUrl, observedAtMs, sourceTabId, tweets }) {
+    if (!TIMELINE_ENDPOINTS.has(endpoint)) return [];
+    if (!Number.isFinite(observedAtMs) || !isSourceTabId(sourceTabId)) return [];
     if (!Array.isArray(tweets) || tweets.length === 0) return [];
 
     const database = await this.open();
@@ -108,10 +134,13 @@ export class ScrapeReceiptStore {
     let sequence = (await readMeta(meta, META_SEQUENCE)) ?? 0;
     const run = (await request(runs.getAll())).find(
       (candidate) =>
-        candidate.state === 'running' &&
-        candidate.listId === listId &&
-        candidate.sourceTabId === sourceTabId,
+        candidate.state === 'running' && candidate.sourceTabId === sourceTabId,
     );
+    const listId = run?.listId ?? extractListId(endpoint, requestUrl);
+    if (!isListId(listId)) {
+      await transactionDone(transaction);
+      return [];
+    }
     const emitted = [];
     const batchIds = new Set();
 
@@ -155,6 +184,7 @@ export class ScrapeReceiptStore {
           observedAtMs,
           postAt: tweet.created_at,
           runId: run.runId,
+          sourceEndpoint: endpoint,
           tweetId: tweet.id,
         };
         observations.put(observation);
@@ -227,11 +257,14 @@ export class ScrapeReceiptStore {
     const run = await request(runs.get(runId));
     if (!run) {
       transaction.abort();
-      throw new Error('unknown scrape run');
+      throw new ScrapeReceiptError('unknown-run', 'unknown scrape run');
     }
     if (run.state !== 'running' && run.state !== state) {
       transaction.abort();
-      throw new Error(`scrape run already ended as ${run.state}`);
+      throw new ScrapeReceiptError(
+        'run-terminal',
+        `scrape run already ended as ${run.state}`,
+      );
     }
 
     run.finishedAtMs = finishedAtMs;
@@ -289,14 +322,18 @@ export class ScrapeReceiptStore {
 }
 
 export function extractListId(endpoint, requestUrl) {
-  if (endpoint !== 'ListLatestTweetsTimeline' || typeof requestUrl !== 'string') {
+  if (!TIMELINE_ENDPOINTS.has(endpoint) || typeof requestUrl !== 'string') {
     return undefined;
   }
   try {
     const variables = new URL(requestUrl).searchParams.get('variables');
     if (!variables) return undefined;
     const parsed = JSON.parse(variables);
-    return isListId(parsed?.listId) ? parsed.listId : undefined;
+    if (endpoint === 'ListLatestTweetsTimeline') {
+      return isListId(parsed?.listId) ? parsed.listId : undefined;
+    }
+    const rawQuery = typeof parsed?.rawQuery === 'string' ? parsed.rawQuery : '';
+    return rawQuery.match(/(?:^|\s)list:(\d{4,25})(?:\s|$)/)?.[1];
   } catch {
     return undefined;
   }

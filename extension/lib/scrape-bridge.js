@@ -1,7 +1,7 @@
 import {
-  extractListId,
   SCRAPE_PORT_NAME,
   SCRAPE_PROTOCOL_VERSION,
+  ScrapeReceiptError,
   ScrapeReceiptStore,
 } from './scrape-receipts.js';
 
@@ -43,12 +43,10 @@ export class ScrapeReceiptBridge {
   }
 
   async recordGraphqlResponse({ endpoint, requestUrl, sourceTabId, tweets }) {
-    const listId = extractListId(endpoint, requestUrl);
-    if (!listId) return [];
     const observations = await this.store.recordTimeline({
       endpoint,
-      listId,
       observedAtMs: Date.now(),
+      requestUrl,
       sourceTabId,
       tweets,
     });
@@ -114,6 +112,10 @@ export class ScrapeReceiptBridge {
           normalizeCursor(message.afterCursor),
         );
         post(connection.port, {
+          capabilities: [
+            'search-timeline-observations',
+            'typed-errors',
+          ],
           observations,
           protocolVersion: SCRAPE_PROTOCOL_VERSION,
           run,
@@ -150,12 +152,27 @@ function normalizeCursor(value) {
 }
 
 function scrapeError(message, error) {
+  const failure = protocolFailure(error);
   return {
-    error: error instanceof Error ? error.message : String(error),
+    error: failure.message,
+    errorCode: failure.code,
     protocolVersion: SCRAPE_PROTOCOL_VERSION,
     runId: typeof message?.runId === 'string' ? message.runId : '',
     type: 'scrape:error',
   };
+}
+
+function protocolFailure(error) {
+  if (error instanceof ScrapeReceiptError) {
+    return { code: error.code, message: error.message };
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const code = message.startsWith('invalid ') ||
+    message === 'unsupported scrape protocol version' ||
+    message === 'unknown scrape protocol message'
+    ? 'invalid-request'
+    : 'internal-error';
+  return { code, message };
 }
 
 function post(port, message) {

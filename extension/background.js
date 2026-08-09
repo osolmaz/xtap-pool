@@ -1,4 +1,5 @@
 // xTap — Service Worker (background)
+import { GraphqlCapture } from './lib/graphql-capture.js';
 import { extractTweets } from './lib/tweet-parser.js';
 import {
   initPoolSync,
@@ -33,6 +34,8 @@ const scrapeReceiptBridge = new ScrapeReceiptBridge();
 scrapeReceiptBridge.attach();
 let readyResolve;
 const ready = new Promise(r => { readyResolve = r; });
+const graphqlCapture = new GraphqlCapture({ onResponse: handleGraphqlResponse });
+graphqlCapture.attach();
 
 // --- Recent tweets cache (for video download lookup) ---
 const MAX_RECENT_TWEETS = 1000;
@@ -515,46 +518,42 @@ const IGNORED_ENDPOINTS = new Set([
   'useReadableMessagesSnapshotMutation', 'UsersByRestIds',
 ]);
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'GRAPHQL_RESPONSE') {
-    (async () => {
-      await ready;
-      verboseLog(msg.endpoint, msg.data);
-      if (!captureEnabled) return;
-      if (IGNORED_ENDPOINTS.has(msg.endpoint)) {
-        if (verboseLogging) console.log(`[xTap:verbose] ${msg.endpoint} (ignored)`);
-        return;
-      }
-      try {
-        const tweets = extractTweets(msg.endpoint, msg.data);
-        for (const t of tweets) t.source_endpoint = msg.endpoint;
-        if (tweets.length > 0) {
-          const missingAuthor = tweets.filter(t => !t.author?.username).length;
-          const missingText = tweets.filter(t => !t.text).length;
-          let warn = '';
-          if (missingAuthor > 0) warn += ` | ${missingAuthor} missing username`;
-          if (missingText > 0) warn += ` | ${missingText} missing text`;
-          console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warn}`);
-          try {
-            await scrapeReceiptBridge.recordGraphqlResponse({
-              endpoint: msg.endpoint,
-              requestUrl: msg.url,
-              sourceTabId: sender?.tab?.id,
-              tweets,
-            });
-          } catch (e) {
-            console.error('[xTap] Failed to record scrape receipts:', e);
-          }
-          enqueueTweets(tweets, msg.endpoint);
-        }
-      } catch (e) {
-        console.error(`[xTap] Parse error for ${msg.endpoint}:`, e, '| data keys:', Object.keys(msg.data || {}).join(', '));
-        emitTraceEvent({ timestamp: Date.now(), endpoint: msg.endpoint, tweetId: null, status: 'PARSER_ERROR', reason: e.message });
-      }
-    })();
+async function handleGraphqlResponse(msg) {
+  await ready;
+  verboseLog(msg.endpoint, msg.data);
+  if (!captureEnabled) return;
+  if (IGNORED_ENDPOINTS.has(msg.endpoint)) {
+    if (verboseLogging) console.log(`[xTap:verbose] ${msg.endpoint} (ignored)`);
     return;
   }
+  try {
+    const tweets = extractTweets(msg.endpoint, msg.data);
+    for (const tweet of tweets) tweet.source_endpoint = msg.endpoint;
+    if (tweets.length === 0) return;
+    const missingAuthor = tweets.filter(tweet => !tweet.author?.username).length;
+    const missingText = tweets.filter(tweet => !tweet.text).length;
+    let warning = '';
+    if (missingAuthor > 0) warning += ` | ${missingAuthor} missing username`;
+    if (missingText > 0) warning += ` | ${missingText} missing text`;
+    console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warning}`);
+    try {
+      await scrapeReceiptBridge.recordGraphqlResponse({
+        endpoint: msg.endpoint,
+        requestUrl: msg.url,
+        sourceTabId: msg.sourceTabId,
+        tweets,
+      });
+    } catch (error) {
+      console.error('[xTap] Failed to record scrape receipts:', error);
+    }
+    enqueueTweets(tweets, msg.endpoint);
+  } catch (error) {
+    console.error(`[xTap] Parse error for ${msg.endpoint}:`, error, '| data keys:', Object.keys(msg.data || {}).join(', '));
+    emitTraceEvent({ timestamp: Date.now(), endpoint: msg.endpoint, tweetId: null, status: 'PARSER_ERROR', reason: error.message });
+  }
+}
 
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'POOL_CONNECT') {
     (async () => {
       const result = await poolConnect(msg, sender && sender.url ? sender.url : '');

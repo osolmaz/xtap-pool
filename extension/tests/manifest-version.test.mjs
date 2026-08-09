@@ -4,7 +4,14 @@ import { test } from 'node:test';
 
 const manifestUrl = new URL('../manifest.json', import.meta.url);
 
-test('concurrent scrape support ships with a new extension version', async () => {
+test('passive unified capture ships with a new extension version', async () => {
   const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
-  assert.equal(manifest.version, '0.20.3');
+  assert.equal(manifest.version, '0.21.0');
+  assert.ok(manifest.permissions.includes('debugger'));
+  assert.equal(
+    manifest.content_scripts.some((entry) =>
+      entry.matches.some((pattern) => pattern.includes('x.com')),
+    ),
+    false,
+  );
 });
