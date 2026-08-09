@@ -56,23 +56,12 @@ export class ScrapeReceiptStore {
           'run ID already belongs to different parameters',
         );
       }
-      if (existing.state === 'running' && existing.sourceTabId !== sourceTabId) {
-        const sourceInUse = allRuns.some(
-          (run) =>
-            run.runId !== runId &&
-            run.state === 'running' &&
-            run.sourceTabId === sourceTabId,
+      if (existing.sourceTabId !== sourceTabId) {
+        transaction.abort();
+        throw new ScrapeReceiptError(
+          'run-conflict',
+          'run ID already belongs to a different source tab',
         );
-        if (sourceInUse) {
-          transaction.abort();
-          throw new ScrapeReceiptError(
-            'source-tab-active',
-            `source tab ${sourceTabId} already belongs to an active scrape run`,
-          );
-        }
-        existing.sourceTabId = sourceTabId;
-        existing.updatedAtMs = Date.now();
-        runs.put(existing);
       }
       await transactionDone(transaction);
       return existing;

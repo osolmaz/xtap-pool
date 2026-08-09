@@ -30,12 +30,14 @@ let debugLogging = false;
 let verboseLogging = false;
 let logBuffer = [];
 const isDevMode = !chrome.runtime.getManifest().update_url;
-const scrapeReceiptBridge = new ScrapeReceiptBridge();
+const graphqlCapture = new GraphqlCapture({ onResponse: handleGraphqlResponse });
+const scrapeReceiptBridge = new ScrapeReceiptBridge({
+  ensureSourceCapture: (tabId) => graphqlCapture.ensureAttached(tabId),
+});
 scrapeReceiptBridge.attach();
+graphqlCapture.attach();
 let readyResolve;
 const ready = new Promise(r => { readyResolve = r; });
-const graphqlCapture = new GraphqlCapture({ onResponse: handleGraphqlResponse });
-graphqlCapture.attach();
 
 // --- Recent tweets cache (for video download lookup) ---
 const MAX_RECENT_TWEETS = 1000;

@@ -1,5 +1,6 @@
 const DEBUGGER_PROTOCOL_VERSION = '1.3';
 const GRAPHQL_PATH = '/i/api/graphql/';
+const MAX_PENDING_RESPONSES = 10_000;
 const X_URL_PATTERNS = ['*://*.x.com/*', '*://*.twitter.com/*'];
 
 export class GraphqlCapture {
@@ -56,7 +57,8 @@ export class GraphqlCapture {
   }
 
   async ensureAttached(tabId) {
-    if (!Number.isSafeInteger(tabId) || tabId < 0 || this.attachedTabs.has(tabId)) return;
+    if (!Number.isSafeInteger(tabId) || tabId < 0) return false;
+    if (this.attachedTabs.has(tabId)) return true;
     const pending = this.attachments.get(tabId);
     if (pending) return pending;
     const attaching = this.attachTab(tabId).finally(() => {
@@ -74,15 +76,17 @@ export class GraphqlCapture {
     } catch (error) {
       if (!isAlreadyAttachedError(error)) {
         this.logger.warn(`[xTap] Could not observe X tab ${tabId}: ${errorMessage(error)}`);
-        return;
+        return false;
       }
     }
     try {
       await this.debuggerApi.sendCommand({ tabId }, 'Network.enable');
       this.attachedTabs.add(tabId);
+      return true;
     } catch (error) {
       if (attachedHere) await this.safeDetach(tabId);
       this.logger.warn(`[xTap] Could not enable capture for X tab ${tabId}: ${errorMessage(error)}`);
+      return false;
     }
   }
 
@@ -111,7 +115,7 @@ export class GraphqlCapture {
     if (method === 'Network.responseReceived') {
       const url = params?.response?.url;
       const endpoint = extractGraphqlEndpoint(url);
-      if (endpoint) this.pendingResponses.set(key, { endpoint, requestId, tabId, url });
+      if (endpoint) this.rememberPending(key, { endpoint, requestId, tabId, url });
       return;
     }
     if (method === 'Network.loadingFailed') {
@@ -136,6 +140,13 @@ export class GraphqlCapture {
       sourceTabId: tabId,
       url: pending.url,
     });
+  }
+
+  rememberPending(key, response) {
+    this.pendingResponses.set(key, response);
+    if (this.pendingResponses.size <= MAX_PENDING_RESPONSES) return;
+    const oldestKey = this.pendingResponses.keys().next().value;
+    if (oldestKey !== undefined) this.pendingResponses.delete(oldestKey);
   }
 
   deletePendingForTab(tabId) {

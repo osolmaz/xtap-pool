@@ -178,6 +178,10 @@ describe('ScrapeReceiptStore', () => {
     };
     const first = await store.beginRun(firstInput);
     assert.deepEqual(await store.beginRun(firstInput), first);
+    await assert.rejects(
+      store.beginRun({ ...firstInput, sourceTabId: TAB_B }),
+      /different source tab/,
+    );
 
     const second = await store.beginRun({
       listId: LIST_A,
@@ -339,6 +343,38 @@ describe('ScrapeReceiptBridge', () => {
     assert.equal(accepted.sent.length, 0);
     clearGate();
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
+  });
+
+  it('rejects a run when passive capture is unavailable for its tab', async () => {
+    const store = { async finishCutover() {} };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({
+      ensureSourceCapture: async () => false,
+      runtime,
+      store,
+    });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+    accepted.receive({
+      afterCursor: 0,
+      listId: LIST_A,
+      protocolVersion: 1,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      startedAtMs: 1_000,
+      type: 'scrape:open',
+    });
+    await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:error'));
+    assert.deepEqual(
+      accepted.sent.find((message) => message.type === 'scrape:error'),
+      {
+        error: `xTap passive capture is unavailable for source tab ${TAB_A}`,
+        errorCode: 'internal-error',
+        protocolVersion: 1,
+        runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        type: 'scrape:error',
+      },
+    );
   });
 
   it('returns stable error codes to the scroller', async () => {

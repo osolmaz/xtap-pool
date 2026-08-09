@@ -10,11 +10,13 @@ export const SCROLLER_EXTENSION_ID = 'aahdialpkbjlbfjkpamfclbnlbinekal';
 export class ScrapeReceiptBridge {
   constructor({
     allowedExtensionId = SCROLLER_EXTENSION_ID,
+    ensureSourceCapture,
     runtime = globalThis.chrome?.runtime,
     store = new ScrapeReceiptStore(),
   } = {}) {
     if (!runtime) throw new Error('Chrome runtime is unavailable');
     this.allowedExtensionId = allowedExtensionId;
+    this.ensureSourceCapture = ensureSourceCapture;
     this.runtime = runtime;
     this.store = store;
     this.connections = new Set();
@@ -101,6 +103,13 @@ export class ScrapeReceiptBridge {
       }
       if (message.type === 'scrape:open') {
         connection.runId = message.runId;
+        if (this.ensureSourceCapture &&
+            !(await this.ensureSourceCapture(message.sourceTabId))) {
+          throw new ScrapeReceiptError(
+            'internal-error',
+            `xTap passive capture is unavailable for source tab ${message.sourceTabId}`,
+          );
+        }
         const run = await this.store.beginRun({
           listId: message.listId,
           runId: message.runId,
