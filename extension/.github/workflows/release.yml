@@ -20,8 +20,6 @@ jobs:
           zip -r "xtap-${VERSION}.zip" \
             manifest.json \
             background.js \
-            content-main.js \
-            content-bridge.js \
             popup.html popup.js popup.css \
             icons/ \
             lib/ \
