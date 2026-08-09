@@ -38,6 +38,17 @@ h1 {
   color: #facc15;
 }
 
+.transport-error {
+  font-size: 11px;
+  color: #f87171;
+  background: #3b1c1c;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 14px;
+  margin-top: -8px;
+  line-height: 1.4;
+}
+
 .stats {
   display: flex;
   gap: 16px;
@@ -188,6 +199,22 @@ button.paused {
 
 .save-btn.error {
   background: #b91c1c;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #e7e9ea;
+  cursor: pointer;
+}
+
+.settings-toggle input {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
 }
 
 .debug-link {

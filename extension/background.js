@@ -11,21 +11,30 @@ import {
   poolStatus,
 } from './lib/pool-sync.js';
 import { ScrapeReceiptBridge } from './lib/scrape-bridge.js';
+import { dedupTweet } from './lib/dedup.js';
 
 const NATIVE_HOST = 'com.xtap.host';
 const BATCH_SIZE = 50;
 const FLUSH_INTERVAL_MS = 30_000;
 const MAX_SEEN_IDS = 50_000;
 const HTTP_TIMEOUT_MS = 10_000;
+const MAX_BUFFER_SIZE = 2000;
+const IMAGE_BACKFILL_FLAG = '__xtap_image_backfill';
 
 let captureEnabled = true;
-let nativePort = null;
 let buffer = [];
 let flushTimer = null;
 let seenIds = new Set();
+// Session-only set of tweet IDs already forwarded for image-backfill this SW
+// lifetime. Lets us re-enter the daemon once per duplicate-with-photos so
+// images skipped at original capture time get downloaded, without spamming
+// the daemon on every scroll/re-navigation. Cleared on SW restart by design
+// — the downloader's per-file os.path.exists is the source of truth.
+let imageCheckedIds = new Set();
 let sessionCount = 0;
 let allTimeCount = 0;
 let outputDir = '';
+let imageDownload = false;
 let debugLogging = false;
 let verboseLogging = false;
 let logBuffer = [];
@@ -36,8 +45,13 @@ const scrapeReceiptBridge = new ScrapeReceiptBridge({
 });
 scrapeReceiptBridge.attach();
 graphqlCapture.attach();
+const hasSessionStorage = !!chrome.storage.session;
+const traceStorage = chrome.storage.session || chrome.storage.local;
+let stageSeq = 0;
+let _saveChain = Promise.resolve();
 let readyResolve;
 const ready = new Promise(r => { readyResolve = r; });
+const autoDumpedThisSession = new Set();
 
 // --- Recent tweets cache (for video download lookup) ---
 const MAX_RECENT_TWEETS = 1000;
@@ -46,7 +60,7 @@ const recentTweets = new Map();
 const activeDownloads = new Map();
 
 // --- Transport state ---
-// 'http' | 'native' | 'none'
+// 'http' | 'none'
 let transport = 'none';
 let httpToken = null;
 let httpPort = null;
@@ -54,37 +68,137 @@ let httpPort = null;
 // --- State persistence ---
 
 function seenIdsStorage() {
-  return isDevMode ? chrome.storage.session : chrome.storage.local;
+  return (isDevMode && hasSessionStorage) ? chrome.storage.session : chrome.storage.local;
 }
 
-async function saveState() {
-  const seenData = { seenIds: [...seenIds].slice(-MAX_SEEN_IDS) };
-  // The local-save buffer is persisted too: MV3 can suspend the worker before
-  // the periodic flush timer fires, and small (<BATCH_SIZE) batches would
-  // otherwise exist only in memory and be lost.
-  const bufferData = { localBuffer: buffer };
-  if (isDevMode) {
-    await Promise.all([
-      chrome.storage.session.set(seenData),
-      chrome.storage.local.set({ allTimeCount, captureEnabled, ...bufferData }),
-    ]);
-  } else {
-    await chrome.storage.local.set({ ...seenData, allTimeCount, captureEnabled, ...bufferData });
+// Staging uses session whenever available (ephemeral — cleared on browser restart).
+// seenIdsStorage() uses session only in dev mode. In production, seenIds goes to
+// local for persistence while WAL entries stay in session (they only need to survive
+// SW suspension, not browser restart). Firefox without session falls back to local.
+function stagingStorage() {
+  return hasSessionStorage ? chrome.storage.session : chrome.storage.local;
+}
+
+async function stagePayload(endpoint, data, metadata = {}) {
+  const key = `stg_${Date.now()}_${stageSeq++}`;
+  try {
+    await stagingStorage().set({
+      [key]: { endpoint, data, ...metadata, stagedAt: Date.now() },
+    });
+    return key;
+  } catch (e) {
+    console.warn('[xTap] Failed to stage payload (quota?):', e.message);
+    emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: null, status: 'STAGE_FAILED', reason: e.message });
+    return null;
+  }
+}
+
+async function clearStagedPayload(key) {
+  if (!key) return;
+  try {
+    await stagingStorage().remove(key);
+  } catch (e) {
+    console.warn('[xTap] Failed to clear staged payload:', e.message);
+  }
+}
+
+async function recoverStagedPayloads() {
+  let store;
+  try {
+    store = await stagingStorage().get(null);
+  } catch (e) {
+    console.warn('[xTap] Failed to read staging storage for recovery:', e.message);
+    return;
+  }
+  const keys = Object.keys(store).filter(k => k.startsWith('stg_')).sort((a, b) => {
+    const [, tsA, seqA] = a.split('_');
+    const [, tsB, seqB] = b.split('_');
+    return (tsA - tsB) || (seqA - seqB);
+  });
+  if (keys.length === 0) return;
+
+  const now = Date.now();
+  const TTL = 24 * 60 * 60 * 1000;
+  let recoveredCount = 0;
+
+  for (const key of keys) {
+    const entry = store[key];
+    let produced = false;
+    try {
+      if (!entry || !entry.data || (entry.stagedAt && now - entry.stagedAt > TTL)) {
+        await clearStagedPayload(key);
+        continue;
+      }
+      const tweets = extractTweets(entry.endpoint, entry.data);
+      for (const tweet of tweets) tweet.source_endpoint = entry.endpoint;
+      if (tweets.length > 0) {
+        await recordScrapeReceipts({
+          endpoint: entry.endpoint,
+          url: entry.requestUrl,
+          sourceTabId: entry.sourceTabId,
+        }, tweets);
+        enqueueTweets(tweets, entry.endpoint);
+        recoveredCount += tweets.length;
+        produced = true;
+      }
+    } catch (e) {
+      console.warn(`[xTap] Recovery parse error for ${key}:`, e.message);
+    }
+    // Persist buffer before clearing WAL entry — if SW dies mid-recovery,
+    // already-cleared entries must have their tweets in durable storage.
+    // If saveState fails, keep the WAL entry for retry on next startup.
+    if (produced && !(await saveState())) continue;
+    await clearStagedPayload(key);
+  }
+
+  if (recoveredCount > 0) {
+    emitTraceEvent({ timestamp: Date.now(), endpoint: 'recovery', tweetId: null, status: 'RECOVERY_COMPLETE', reason: `recovered ${recoveredCount} tweets from ${keys.length} staged payloads` });
+    console.log(`[xTap] Recovery: ${recoveredCount} tweets from ${keys.length} staged payloads`);
+  }
+}
+
+// Serialized via _saveChain so concurrent callers can't interleave writes
+// (back-to-back handlers would otherwise race, and an earlier snapshot could
+// land after a later one, rolling back buffered tweets).  Returns true on
+// success, false on storage error — callers gate WAL clears on this.
+function saveState() {
+  const p = _saveChain.then(() => _saveStateImpl());
+  _saveChain = p.catch(() => {});
+  return p;
+}
+
+async function _saveStateImpl() {
+  // seenIds and tweetBuffer are coupled in one write so a quota failure
+  // loses both rather than persisting seenIds without the buffer (which
+  // would create ghost-dedup entries that permanently block those tweets).
+  const seenArr = [...seenIds].slice(-MAX_SEEN_IDS);
+  try {
+    if (isDevMode && hasSessionStorage) {
+      await Promise.all([
+        chrome.storage.session.set({ seenIds: seenArr, tweetBuffer: buffer }),
+        chrome.storage.local.set({ allTimeCount, captureEnabled }),
+      ]);
+    } else {
+      await chrome.storage.local.set({ seenIds: seenArr, tweetBuffer: buffer, allTimeCount, captureEnabled });
+    }
+    return true;
+  } catch (e) {
+    console.warn('[xTap] Failed to persist state:', e.message);
+    return false;
   }
 }
 
 async function restoreState() {
   const [seenStored, stored] = await Promise.all([
-    seenIdsStorage().get(['seenIds']),
-    chrome.storage.local.get(['allTimeCount', 'captureEnabled', 'outputDir', 'debugLogging', 'verboseLogging', 'localBuffer']),
+    seenIdsStorage().get(['seenIds', 'tweetBuffer']),
+    chrome.storage.local.get(['allTimeCount', 'captureEnabled', 'outputDir', 'imageDownload', 'debugLogging', 'verboseLogging']),
   ]);
-  if (seenStored.seenIds) seenIds = new Set(seenStored.seenIds);
-  if (Array.isArray(stored.localBuffer) && stored.localBuffer.length > 0) {
-    buffer.push(...stored.localBuffer);
-  }
+  if (seenStored.seenIds) seenIds = new Set(seenStored.seenIds.filter(Boolean));
+  if (Array.isArray(seenStored.tweetBuffer)) buffer = seenStored.tweetBuffer;
   if (typeof stored.allTimeCount === 'number') allTimeCount = stored.allTimeCount;
   if (typeof stored.captureEnabled === 'boolean') captureEnabled = stored.captureEnabled;
   if (typeof stored.outputDir === 'string') outputDir = stored.outputDir;
+  if (typeof stored.imageDownload === 'boolean') imageDownload = stored.imageDownload;
   if (typeof stored.debugLogging === 'boolean') debugLogging = stored.debugLogging;
   if (typeof stored.verboseLogging === 'boolean') verboseLogging = stored.verboseLogging;
 }
@@ -95,11 +209,20 @@ const _origLog = console.log;
 const _origWarn = console.warn;
 const _origError = console.error;
 
+const MAX_LOG_BUFFER = 5000;
+
 function debugLog(level, args) {
   if (!debugLogging) return;
   const ts = new Date().toISOString();
-  const text = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  const text = args.map(a => {
+    if (typeof a === 'string') return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(' ');
   logBuffer.push(`${ts} [${level}] ${text}`);
+  // Cap so an unreachable daemon can't grow the buffer unboundedly.
+  if (logBuffer.length > MAX_LOG_BUFFER) {
+    logBuffer.splice(0, logBuffer.length - MAX_LOG_BUFFER);
+  }
 }
 
 console.log = (...args) => { _origLog(...args); debugLog('LOG', args); };
@@ -123,22 +246,30 @@ async function httpFetch(method, path, body) {
   opts.signal = controller.signal;
   try {
     const resp = await fetch(url, opts);
-    return await resp.json();
+    return { status: resp.status, data: await resp.json() };
   } finally {
     clearTimeout(timeout);
   }
 }
 
+// AbortSignal.timeout may not exist in all MV3 runtimes (e.g. older Firefox)
+function makeTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms); // timer self-clears when SW terminates
+  return controller.signal;
+}
+
 async function probeHttp(port, token) {
   try {
-    // Send the token so a daemon with a rotated secret answers 401 here,
-    // instead of the stale token wedging every subsequent tweet POST.
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch(`http://127.0.0.1:${port}/status`, {
       headers,
-      signal: AbortSignal.timeout(3000)
+      signal: makeTimeoutSignal(3000)
     });
-    if (!resp.ok) return false;
     const data = await resp.json();
     return data.ok === true;
   } catch {
@@ -172,8 +303,8 @@ async function getTokenViaNative() {
       }
     });
     port.onDisconnect.addListener(() => {
-      const err = chrome.runtime.lastError?.message;
-      if (err) console.warn(`[xTap] Native token bootstrap failed: ${err}`);
+      const err = chrome.runtime.lastError;
+      if (err) console.warn('[xTap] Native host disconnected:', err.message);
       finish(null);
     });
     try {
@@ -193,6 +324,7 @@ async function initTransport() {
       httpToken = cached.httpToken;
       httpPort = cached.httpPort;
       transport = 'http';
+      updateBadge(); // clear a stale '!' from a previous daemon-down session
       console.log('[xTap] Using HTTP transport (cached token)');
       return;
     }
@@ -207,118 +339,75 @@ async function initTransport() {
       httpPort = result.port;
       transport = 'http';
       await chrome.storage.local.set({ httpToken, httpPort });
+      updateBadge(); // clear a stale '!' from a previous daemon-down session
       console.log('[xTap] Using HTTP transport (token from native host)');
       return;
     }
   }
 
-  // 3. Fall back to native messaging
-  connectNative();
-  if (nativePort) {
-    transport = 'native';
-    console.log('[xTap] Using native messaging transport');
-  } else {
-    transport = 'none';
-    console.warn('[xTap] No transport available');
-  }
-}
-
-// --- Native messaging ---
-
-let disconnectCount = 0;
-let lastDisconnect = 0;
-
-function connectNative() {
-  if (nativePort) return;
-  try {
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST);
-    nativePort.onDisconnect.addListener(() => {
-      const err = chrome.runtime.lastError?.message || 'unknown';
-      const now = Date.now();
-      disconnectCount++;
-      const rapid = (now - lastDisconnect) < 5000;
-      lastDisconnect = now;
-      if (rapid) {
-        console.error(`[xTap] Native host disconnected rapidly (${disconnectCount}x): ${err} — possible crash loop`);
-      } else {
-        console.warn(`[xTap] Native host disconnected: ${err}`);
-      }
-      nativePort = null;
-    });
-    nativePort.onMessage.addListener((msg) => {
-      if (!msg.ok && msg.error) {
-        console.error(`[xTap] Host error: ${msg.error}`);
-      } else if (msg.count !== undefined) {
-        console.log(`[xTap] Host wrote ${msg.count} tweets`);
-        disconnectCount = 0;
-      }
-    });
-    console.log('[xTap] Connected to native host');
-  } catch (e) {
-    console.error('[xTap] Failed to connect native host:', e);
-    nativePort = null;
-  }
+  // 3. No transport available
+  transport = 'none';
+  console.warn('[xTap] No transport available — daemon may not be running');
+  updateTransportBadge();
 }
 
 // --- Unified send ---
 
 async function sendToHost(msg) {
-  if (transport === 'http') {
-    try {
-      let path, body;
-      if (msg.type === 'TEST_PATH') {
-        path = '/test-path';
-        body = { outputDir: msg.outputDir };
-      } else if (msg.type === 'LOG') {
-        path = '/log';
-        body = { lines: msg.lines };
-        if (msg.outputDir) body.outputDir = msg.outputDir;
-      } else if (msg.type === 'DUMP') {
-        path = '/dump';
-        body = { filename: msg.filename, content: msg.content };
-        if (msg.outputDir) body.outputDir = msg.outputDir;
-      } else if (msg.type === 'CHECK_YTDLP') {
-        path = '/check-ytdlp';
-        body = {};
-      } else if (msg.type === 'DOWNLOAD_VIDEO') {
-        path = '/download-video';
-        body = { tweetUrl: msg.tweetUrl, directUrl: msg.directUrl, postDate: msg.postDate };
-        if (msg.outputDir) body.outputDir = msg.outputDir;
-      } else if (msg.type === 'DOWNLOAD_STATUS') {
-        path = '/download-status';
-        body = { downloadId: msg.downloadId };
-      } else {
-        path = '/tweets';
-        body = { tweets: msg.tweets };
-        if (msg.outputDir) body.outputDir = msg.outputDir;
-      }
-      const resp = await httpFetch('POST', path, body);
-      return resp;
-    } catch (e) {
-      console.warn('[xTap] HTTP send failed, falling back to native:', e.message);
-      // Fall back to native
-      transport = 'native';
-      connectNative();
-      // Fall through to native send below
-    }
+  if (transport !== 'http') {
+    console.warn('[xTap] No transport available, message dropped');
+    return null;
   }
 
-  if (transport === 'native' || nativePort) {
-    if (!nativePort) connectNative();
-    if (nativePort) {
-      try {
-        nativePort.postMessage(msg);
-        return null; // native messaging is fire-and-forget for non-response messages
-      } catch (e) {
-        console.error('[xTap] Native send failed:', e);
-        nativePort = null;
-        return null;
-      }
-    }
+  let path, body;
+  if (msg.type === 'TEST_PATH') {
+    path = '/test-path';
+    body = { outputDir: msg.outputDir };
+  } else if (msg.type === 'LOG') {
+    path = '/log';
+    body = { lines: msg.lines };
+    if (msg.outputDir) body.outputDir = msg.outputDir;
+  } else if (msg.type === 'DUMP') {
+    path = '/dump';
+    body = { filename: msg.filename, content: msg.content };
+    if (msg.outputDir) body.outputDir = msg.outputDir;
+  } else if (msg.type === 'CHECK_YTDLP') {
+    path = '/check-ytdlp';
+    body = {};
+  } else if (msg.type === 'DOWNLOAD_VIDEO') {
+    path = '/download-video';
+    body = { tweetUrl: msg.tweetUrl, directUrl: msg.directUrl, postDate: msg.postDate };
+    if (msg.outputDir) body.outputDir = msg.outputDir;
+  } else if (msg.type === 'DOWNLOAD_STATUS') {
+    path = '/download-status';
+    body = { downloadId: msg.downloadId };
+  } else {
+    path = '/tweets';
+    body = { tweets: msg.tweets };
+    if (msg.outputDir) body.outputDir = msg.outputDir;
+    if (msg.imageDownload) body.image_download = true;
   }
 
-  console.warn('[xTap] No transport available, message dropped');
-  return null;
+  try {
+    const { status, data } = await httpFetch('POST', path, body);
+    if (status === 401 || status === 403) {
+      // The daemon is alive but our token is stale (e.g. rotated by a
+      // reinstall). Reset the transport so the next flush re-probes and
+      // fetches a fresh token via the native host — otherwise we'd retry
+      // the same dead credentials forever.
+      console.error(`[xTap] Daemon rejected credentials (HTTP ${status}), resetting transport`);
+      transport = 'none';
+      updateTransportBadge();
+      return null;
+    }
+    if (data && typeof data === 'object') data.httpStatus = status;
+    return data;
+  } catch (e) {
+    console.error('[xTap] HTTP send failed:', e.message);
+    transport = 'none';
+    updateTransportBadge();
+    return null;
+  }
 }
 
 // --- Batching & flushing ---
@@ -326,6 +415,31 @@ async function sendToHost(msg) {
 function scheduledFlush() {
   if (buffer.length > 0 || logBuffer.length > 0) flush();
 }
+
+// The setTimeout flush timer dies with the service worker (MV3 kills it ~30s
+// after the last event), stranding the final partial batch until a later
+// session. A chrome.alarms backstop survives SW termination and wakes the SW
+// to deliver whatever is still buffered, then clears itself.
+const FLUSH_ALARM = 'xtap-flush';
+let flushAlarmSet = false;
+
+function ensureFlushAlarm() {
+  if (flushAlarmSet || !chrome.alarms) return;
+  flushAlarmSet = true;
+  chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: 1 });
+}
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== FLUSH_ALARM) return;
+  (async () => {
+    await ready;
+    if (buffer.length > 0 || logBuffer.length > 0) await flush();
+    if (buffer.length === 0 && logBuffer.length === 0) {
+      chrome.alarms.clear(FLUSH_ALARM);
+      flushAlarmSet = false;
+    }
+  })();
+});
 
 async function flushLogs() {
   if (logBuffer.length === 0) return;
@@ -336,35 +450,141 @@ async function flushLogs() {
   await sendToHost(message);
 }
 
+let lastReprobe = 0;
+const REPROBE_COOLDOWN_MS = 30_000;
+
+async function reprobeTransport() {
+  const now = Date.now();
+  if (now - lastReprobe < REPROBE_COOLDOWN_MS) return false;
+  lastReprobe = now;
+  console.log('[xTap] Re-probing HTTP daemon...');
+  // Try cached credentials first (fast path)
+  if (httpToken && httpPort) {
+    const alive = await probeHttp(httpPort, httpToken);
+    if (alive) {
+      transport = 'http';
+      updateBadge();
+      console.log('[xTap] HTTP daemon recovered (cached token)');
+      return true;
+    }
+  }
+  // Try getting a fresh token via native host
+  const result = await getTokenViaNative();
+  if (result) {
+    const alive = await probeHttp(result.port, result.token);
+    if (alive) {
+      httpToken = result.token;
+      httpPort = result.port;
+      transport = 'http';
+      await chrome.storage.local.set({ httpToken, httpPort });
+      updateBadge();
+      console.log('[xTap] HTTP daemon recovered (fresh token)');
+      return true;
+    }
+  }
+  // Fallback: check chrome.storage.local (token may have been written by
+  // a prior session or injected externally for testing)
+  const stored = await chrome.storage.local.get(['httpToken', 'httpPort']);
+  if (stored.httpToken && stored.httpPort) {
+    const alive = await probeHttp(stored.httpPort, stored.httpToken);
+    if (alive) {
+      httpToken = stored.httpToken;
+      httpPort = stored.httpPort;
+      transport = 'http';
+      updateBadge();
+      console.log('[xTap] HTTP daemon recovered (stored token)');
+      return true;
+    }
+  }
+  return false;
+}
+
+// Cap per POST so a backlog (e.g. after a daemon outage) can't exceed the
+// daemon's 10 MB body limit and wedge in a 413-retry loop.
+const MAX_TWEETS_PER_POST = 200;
+let flushInFlight = false;
+
+function tweetForHost(tweet) {
+  if (!tweet || !tweet[IMAGE_BACKFILL_FLAG]) return tweet;
+  const { [IMAGE_BACKFILL_FLAG]: _ignored, ...clean } = tweet;
+  return clean;
+}
+
+function isBufferedImageBackfill(tweet) {
+  return !!(tweet && tweet[IMAGE_BACKFILL_FLAG]);
+}
+
+// Remove the delivered/dropped tweets by object identity, never by position.
+// An overflow eviction in enqueueTweets can splice the buffer front while
+// flush() awaits the POST, so buffer[0..batch.length) may no longer be the
+// tweets we sent — a positional splice would then discard never-sent tweets
+// (their ids are already in seenIds, so the loss is permanent). Reassigning
+// `buffer` is safe: no other code runs between the await and here.
+function removeDelivered(batch) {
+  const delivered = new Set(batch);
+  buffer = buffer.filter(t => !delivered.has(t));
+}
+
 async function flush() {
   if (buffer.length === 0 && logBuffer.length === 0) return;
 
   if (transport === 'none') {
-    // Try to establish a transport
-    connectNative();
-    if (nativePort) transport = 'native';
+    if (!(await reprobeTransport())) return;
   }
 
-  if (buffer.length > 0) {
-    const batch = buffer.splice(0);
-    const message = { tweets: batch };
-    if (outputDir) message.outputDir = outputDir;
-
+  if (buffer.length > 0 && !flushInFlight) {
+    flushInFlight = true;
     try {
-      const resp = await sendToHost(message);
-      // Native messaging is fire-and-forget: a null response with a live
-      // port means the batch was posted. Rebuffer only on an explicit
-      // rejection or when no transport accepted the message at all.
-      const nativePosted = resp === null && nativePort;
-      if (!nativePosted && (!resp || !resp.ok)) {
-        console.error('[xTap] Host rejected tweets, buffering back:', resp ? resp.error : 'no transport');
-        buffer.unshift(...batch);
+      // Send from the front without removing — the batch stays in `buffer`
+      // (and thus in persisted state) until the daemon acks, so SW death
+      // mid-POST can't lose it. The daemon dedups by ID, so a death after
+      // the POST but before the ack only costs a duplicate send, not data.
+      let postCap = MAX_TWEETS_PER_POST;
+      let splitRemaining = 0;
+      while (buffer.length > 0) {
+        const batch = buffer.slice(0, postCap);
+        const message = { tweets: batch.map(tweetForHost) };
+        if (outputDir) message.outputDir = outputDir;
+        if (imageDownload) message.imageDownload = true;
+
+        const resp = await sendToHost(message);
+        if (!resp || !resp.ok) {
+          // 413: the batch is too large in bytes (count cap doesn't bound
+          // huge article tweets). Retrying it unchanged would wedge the
+          // queue forever — halve and retry; a single tweet that alone
+          // exceeds the daemon's body limit can never be delivered, so
+          // drop it with a trace event.
+          if (resp?.httpStatus === 413) {
+            if (batch.length > 1) {
+              postCap = Math.max(1, Math.floor(batch.length / 2));
+              splitRemaining = batch.length;
+              continue;
+            }
+            const oversized = batch[0];
+            removeDelivered([oversized]);
+            console.error(`[xTap] Dropping tweet ${oversized.id}: exceeds daemon body limit`);
+            emitTraceEvent({ timestamp: Date.now(), endpoint: 'flush', tweetId: oversized.id, status: 'DROPPED_OVERSIZED', reason: 'single tweet exceeds daemon body limit' });
+            postCap = MAX_TWEETS_PER_POST; // only the fat batch pays the split cost
+            splitRemaining = 0;
+            await saveState();
+            continue;
+          }
+          // Anything else: batch stays buffered for the next flush.
+          console.error('[xTap] Host rejected tweets:', resp?.error || 'no response');
+          break;
+        }
+        removeDelivered(batch);
+        if (splitRemaining > 0) {
+          splitRemaining -= batch.length;
+          if (splitRemaining <= 0) {
+            postCap = MAX_TWEETS_PER_POST; // restore after a fat batch forced a split
+            splitRemaining = 0;
+          }
+        }
+        await saveState();
       }
-      saveState();
-    } catch (e) {
-      console.error('[xTap] Send failed, buffering tweets back:', e);
-      buffer.unshift(...batch);
-      saveState();
+    } finally {
+      flushInFlight = false;
     }
   }
 
@@ -385,7 +605,7 @@ function emitTraceEvent(event) {
   if (!traceFlushTimer) {
     traceFlushTimer = setTimeout(() => {
       traceFlushTimer = null;
-      chrome.storage.session.set({ lastEvents: traceEvents });
+      traceStorage.set({ lastEvents: traceEvents });
     }, 500);
   }
 }
@@ -393,6 +613,10 @@ function emitTraceEvent(event) {
 function enqueueTweets(tweets, endpoint = 'unknown') {
   let newCount = 0;
   const poolBatch = [];
+  let queuedCount = 0;
+  let backfillCount = 0;
+  let skippedCount = 0;
+  let droppedBackfillCount = 0;
   for (const tweet of tweets) {
     // Always cache for video lookup (even dupes — updates with latest data)
     if (tweet.id) {
@@ -404,16 +628,30 @@ function enqueueTweets(tweets, endpoint = 'unknown') {
       }
     }
 
-    // Article tweets bypass dedup — they enrich a previously captured stub
-    if (seenIds.has(tweet.id) && !tweet.is_article) {
+    const wasSeen = !!(tweet.id && seenIds.has(tweet.id));
+    if (!dedupTweet(tweet, seenIds, { imageBackfill: imageDownload, imageCheckedIds })) {
+      skippedCount++;
       emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: tweet.id, status: 'DEDUPLICATED', reason: 'seenIds' });
       continue;
     }
-    seenIds.add(tweet.id);
+
+    const isImageBackfill = wasSeen && !tweet.is_article;
+    if (isImageBackfill) {
+      backfillCount++;
+      tweet[IMAGE_BACKFILL_FLAG] = true;
+    } else {
+      newCount++;
+    }
     buffer.push(tweet);
-    poolBatch.push(tweet);
-    newCount++;
-    emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: tweet.id, status: 'ACCEPTED', reason: null });
+    if (!isImageBackfill) poolBatch.push(tweet);
+    queuedCount++;
+    emitTraceEvent({
+      timestamp: Date.now(),
+      endpoint,
+      tweetId: tweet.id,
+      status: isImageBackfill ? 'IMAGE_BACKFILL' : 'ACCEPTED',
+      reason: null,
+    });
   }
 
   // FIFO eviction if seenIds grows too large
@@ -421,29 +659,56 @@ function enqueueTweets(tweets, endpoint = 'unknown') {
     const arr = [...seenIds];
     seenIds = new Set(arr.slice(arr.length - MAX_SEEN_IDS));
   }
-
-  const dupeCount = tweets.length - newCount;
-  if (dupeCount > 0) {
-    console.log(`[xTap] Dedup: ${newCount} new, ${dupeCount} duplicates skipped (seenIds: ${seenIds.size})`);
+  if (imageCheckedIds.size > MAX_SEEN_IDS) {
+    const arr = [...imageCheckedIds];
+    imageCheckedIds = new Set(arr.slice(arr.length - MAX_SEEN_IDS));
   }
 
   sessionCount += newCount;
   allTimeCount += newCount;
   updateBadge();
-  saveState();
+  if (queuedCount > 0) ensureFlushAlarm();
+
+  if (buffer.length > MAX_BUFFER_SIZE) {
+    let droppedOldestCount = 0;
+    while (buffer.length > MAX_BUFFER_SIZE) {
+      const backfillIndex = buffer.findIndex(isBufferedImageBackfill);
+      if (backfillIndex !== -1) {
+        const [dropped] = buffer.splice(backfillIndex, 1);
+        if (dropped?.id) imageCheckedIds.delete(dropped.id);
+        droppedBackfillCount++;
+      } else {
+        buffer.shift();
+        droppedOldestCount++;
+      }
+    }
+    const droppedTotal = droppedOldestCount + droppedBackfillCount;
+    console.warn(`[xTap] Buffer overflow: dropped ${droppedTotal} tweets (${droppedBackfillCount} image backfill, ${droppedOldestCount} oldest; cap: ${MAX_BUFFER_SIZE})`);
+    emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: null, status: 'BUFFER_OVERFLOW', reason: `dropped ${droppedTotal}` });
+  }
 
   // Pool sync is additive: local saving above is untouched.
   poolEnqueue(poolBatch);
 
-  if (buffer.length >= BATCH_SIZE) flush();
+  if (skippedCount > 0 || backfillCount > 0 || droppedBackfillCount > 0) {
+    console.log(`[xTap] Dedup: ${newCount} new, ${backfillCount} image backfill, ${skippedCount} duplicates skipped, ${droppedBackfillCount} backfill dropped (seenIds: ${seenIds.size})`);
+  }
 }
 
 // --- Badge ---
 
 function updateBadge() {
+  if (transport === 'none') return; // don't overwrite error badge
   const text = sessionCount > 0 ? String(sessionCount) : '';
   chrome.action.setBadgeText({ text });
   chrome.action.setBadgeBackgroundColor({ color: '#1D9BF0' });
+}
+
+function updateTransportBadge() {
+  if (transport === 'none') {
+    chrome.action.setBadgeText({ text: '!' });
+    chrome.action.setBadgeBackgroundColor({ color: '#E0245E' });
+  }
 }
 
 // --- Verbose logging (discovery mode) ---
@@ -471,7 +736,17 @@ function verboseLog(endpoint, data) {
   const shape = summarizeShape(data);
   console.log(`[xTap:verbose] ${endpoint} response shape: ${shape}`);
 
-  // Dump full JSON to file for reverse engineering.
+  // Auto-dump first response per endpoint per session (for agentic fixture creation)
+  if (!autoDumpedThisSession.has(endpoint)) {
+    autoDumpedThisSession.add(endpoint);
+    const ts = Date.now();
+    const filename = `dump-${endpoint}-${ts}.json`;
+    const content = JSON.stringify({ endpoint, data }, null, 2);
+    sendToHost({ type: 'DUMP', filename, content, outputDir: outputDir || undefined });
+    console.log(`[xTap:autodump] ${endpoint} → ${filename}`);
+  }
+
+  // Manual dump: target a specific endpoint or tweet IDs for multi-sample capture.
   // Configure via console:
   //   chrome.storage.local.set({verboseDumpIds: ['1234567890']})   — dump responses containing these IDs
   //   chrome.storage.local.set({verboseDumpEndpoint: 'TweetDetail'}) — dump all responses for this endpoint
@@ -498,7 +773,7 @@ function verboseLog(endpoint, data) {
     if (shouldDump) {
       const ts = Date.now();
       const filename = `dump-${endpoint}-${ts}.json`;
-      const content = JSON.stringify(data, null, 2);
+      const content = JSON.stringify({ endpoint, data }, null, 2);
       sendToHost({ type: 'DUMP', filename, content, outputDir: outputDir || undefined });
       console.log(`[xTap:dump] ${endpoint} (${reason}) → ${filename} (${content.length} chars)`);
     }
@@ -518,7 +793,24 @@ const IGNORED_ENDPOINTS = new Set([
   'UserSuperFollowTweets', 'NotificationsTimeline', 'AuthenticatePeriscope',
   'BookmarkFoldersSlice', 'EditBookmarkFolder', 'fetchPostQuery',
   'useReadableMessagesSnapshotMutation', 'UsersByRestIds',
+  'CreatorStudioTabBarItemQuery', 'DelegatedAccountListQuery',
+  'HandleShareBannerQuery', 'isEligibleForVoButtonUpsellQuery',
+  'useEligibleForHandleShareBannerQuery', 'useRelayDelegateDataPendingQuery',
 ]);
+
+async function recordScrapeReceipts(msg, tweets) {
+  if (!Number.isInteger(msg.sourceTabId) || typeof msg.url !== 'string') return;
+  try {
+    await scrapeReceiptBridge.recordGraphqlResponse({
+      endpoint: msg.endpoint,
+      requestUrl: msg.url,
+      sourceTabId: msg.sourceTabId,
+      tweets,
+    });
+  } catch (error) {
+    console.error('[xTap] Failed to record scrape receipts:', error);
+  }
+}
 
 async function handleGraphqlResponse(msg) {
   await ready;
@@ -528,30 +820,32 @@ async function handleGraphqlResponse(msg) {
     if (verboseLogging) console.log(`[xTap:verbose] ${msg.endpoint} (ignored)`);
     return;
   }
+
+  const stageKey = await stagePayload(msg.endpoint, msg.data, {
+    requestUrl: msg.url,
+    sourceTabId: msg.sourceTabId,
+  });
   try {
     const tweets = extractTweets(msg.endpoint, msg.data);
     for (const tweet of tweets) tweet.source_endpoint = msg.endpoint;
-    if (tweets.length === 0) return;
-    const missingAuthor = tweets.filter(tweet => !tweet.author?.username).length;
-    const missingText = tweets.filter(tweet => !tweet.text).length;
-    let warning = '';
-    if (missingAuthor > 0) warning += ` | ${missingAuthor} missing username`;
-    if (missingText > 0) warning += ` | ${missingText} missing text`;
-    console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warning}`);
-    try {
-      await scrapeReceiptBridge.recordGraphqlResponse({
-        endpoint: msg.endpoint,
-        requestUrl: msg.url,
-        sourceTabId: msg.sourceTabId,
-        tweets,
-      });
-    } catch (error) {
-      console.error('[xTap] Failed to record scrape receipts:', error);
+    if (tweets.length > 0) {
+      const missingAuthor = tweets.filter(tweet => !tweet.author?.username).length;
+      const missingText = tweets.filter(tweet => !tweet.text).length;
+      let warning = '';
+      if (missingAuthor > 0) warning += ` | ${missingAuthor} missing username`;
+      if (missingText > 0) warning += ` | ${missingText} missing text`;
+      console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warning}`);
+      await recordScrapeReceipts(msg, tweets);
+      enqueueTweets(tweets, msg.endpoint);
+      if (await saveState()) await clearStagedPayload(stageKey);
+    } else {
+      await clearStagedPayload(stageKey);
     }
-    enqueueTweets(tweets, msg.endpoint);
+    if (buffer.length >= BATCH_SIZE) flush();
   } catch (error) {
     console.error(`[xTap] Parse error for ${msg.endpoint}:`, error, '| data keys:', Object.keys(msg.data || {}).join(', '));
     emitTraceEvent({ timestamp: Date.now(), endpoint: msg.endpoint, tweetId: null, status: 'PARSER_ERROR', reason: error.message });
+    await clearStagedPayload(stageKey);
   }
 }
 
@@ -603,9 +897,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         connected: transport !== 'none',
         buffered: buffer.length,
         outputDir,
+        imageDownload,
         debugLogging,
         verboseLogging,
-        transport
+        transport,
+        transportError: transport === 'none'
+          ? 'Daemon not running. Check ~/.xtap/daemon-stderr.log'
+          : null,
+        discoveredEndpoints: [...autoDumpedThisSession],
       });
     })();
     return true;
@@ -633,46 +932,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'SET_OUTPUT_DIR') {
     const newDir = msg.outputDir || '';
-    if (newDir && transport !== 'none') {
+    if (newDir && transport === 'http') {
       sendToHost({ type: 'TEST_PATH', outputDir: newDir }).then((resp) => {
-        if (transport === 'http' && resp) {
-          // HTTP transport returns response directly
-          if (resp.ok) {
-            outputDir = newDir;
-            chrome.storage.local.set({ outputDir });
-            sendResponse({ outputDir });
-          } else {
-            sendResponse({ error: resp.error || 'Cannot write to that directory' });
-          }
-        } else if (transport === 'native') {
-          // Native transport: set up listener for response
-          const listener = (nativeResp) => {
-            if (nativeResp.type !== 'TEST_PATH') return;
-            nativePort.onMessage.removeListener(listener);
-            if (nativeResp.ok) {
-              outputDir = newDir;
-              chrome.storage.local.set({ outputDir });
-              sendResponse({ outputDir });
-            } else {
-              sendResponse({ error: nativeResp.error || 'Cannot write to that directory' });
-            }
-          };
-          if (nativePort) {
-            nativePort.onMessage.addListener(listener);
-          } else {
-            sendResponse({ error: 'No transport available' });
-          }
+        if (resp?.ok) {
+          outputDir = newDir;
+          chrome.storage.local.set({ outputDir });
+          sendResponse({ outputDir });
         } else {
-          sendResponse({ error: 'No transport available' });
+          sendResponse({ error: resp?.error || 'Cannot write to that directory' });
         }
       }).catch((e) => {
         sendResponse({ error: e.message });
       });
+    } else if (newDir && transport === 'none') {
+      sendResponse({ error: 'Daemon not running' });
     } else {
       outputDir = newDir;
       chrome.storage.local.set({ outputDir });
       sendResponse({ outputDir });
     }
+    return true;
+  }
+
+  if (msg.type === 'SET_IMAGE_DOWNLOAD') {
+    const wasOff = !imageDownload;
+    imageDownload = !!msg.imageDownload;
+    if (wasOff && imageDownload) imageCheckedIds.clear();
+    chrome.storage.local.set({ imageDownload });
+    sendResponse({ imageDownload });
     return true;
   }
 
@@ -747,8 +1034,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           type: 'DOWNLOAD_STATUS',
           downloadId: msg.downloadId,
         });
-        // Clean up finished downloads from active map
-        if (resp?.status === 'done' || resp?.status === 'error') {
+        // Clean up finished downloads from active map. 'unknown' means the
+        // daemon restarted and lost the download — stop resuming it.
+        if (resp?.status === 'done' || resp?.status === 'error' || resp?.status === 'unknown') {
           for (const [tid, did] of activeDownloads) {
             if (did === msg.downloadId) { activeDownloads.delete(tid); break; }
           }
@@ -764,7 +1052,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // --- Init ---
 
-chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+if (typeof chrome.storage.session?.setAccessLevel === 'function') {
+  chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' });
+}
 
 // Periodic pool flush that survives service-worker sleep.
 chrome.alarms.create('xtap-pool-flush', { periodInMinutes: 1 });
@@ -772,18 +1062,26 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'xtap-pool-flush') poolFlush();
 });
 
-restoreState().then(async () => {
-  updateBadge();
+// Graceful degradation: if restoreState fails (e.g. storage unavailable), continue
+// with defaults so the extension still captures tweets.
+restoreState().catch((error) => {
+  console.error('[xTap] Failed to restore state:', error);
+}).then(async () => {
   await initPoolSync();
+  await recoverStagedPayloads();
   await initTransport();
-  // Resolve `ready` only after the pool queue and transport are restored, so
-  // early GraphQL messages cannot race initialization or flush into a
-  // not-yet-connected transport.
   readyResolve();
+  updateBadge();
+  // Deliver anything restored or recovered before MV3 idles the worker.
+  if (buffer.length > 0 || logBuffer.length > 0) {
+    if (buffer.length > 0) ensureFlushAlarm();
+    flush();
+  }
   function scheduleNextFlush() {
     const jitter = Math.random() * FLUSH_INTERVAL_MS * 0.5;
     flushTimer = setTimeout(() => { scheduledFlush(); scheduleNextFlush(); }, FLUSH_INTERVAL_MS + jitter);
   }
   scheduleNextFlush();
-  console.log(`[xTap] Service worker started (${isDevMode ? 'dev' : 'production'} mode, seenIds in ${isDevMode ? 'session' : 'local'} storage)`);
+  const seenStorageLabel = (isDevMode && hasSessionStorage) ? 'session' : 'local';
+  console.log(`[xTap] Service worker started (${isDevMode ? 'dev' : 'production'} mode, seenIds in ${seenStorageLabel} storage)`);
 });

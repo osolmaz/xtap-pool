@@ -221,6 +221,20 @@ describe('normalizeTweet', () => {
     assert.equal(t.article.title, 'My Article');
   });
 
+  it('skips article stubs without full content', () => {
+    const raw = makeRawTweet({
+      article: {
+        article_results: {
+          result: {
+            title: 'Stub only',
+            preview_text: 'Preview only',
+          },
+        },
+      },
+    });
+    assert.equal(normalizeTweet(raw), null);
+  });
+
   it('converts created_at to ISO format', () => {
     const raw = makeRawTweet();
     const t = normalizeTweet(raw);
@@ -598,6 +612,40 @@ describe('extractTweets', () => {
     const tweets = extractTweets('TweetResultByRestId', data);
     assert.equal(tweets.length, 1);
     assert.equal(tweets[0].is_article, true);
+  });
+
+  it('TweetResultByRestId with article stub returns no tweet', () => {
+    const raw = makeRawTweet({
+      article: {
+        article_results: {
+          result: {
+            title: 'Stub only',
+            preview_text: 'Preview only',
+          },
+        },
+      },
+    });
+    const data = {
+      data: { tweetResult: { result: raw } },
+    };
+    const tweets = extractTweets('TweetResultByRestId', data);
+    assert.deepStrictEqual(tweets, []);
+  });
+
+  it('timeline article stub returns no tweet', () => {
+    const raw = makeRawTweet({
+      article: {
+        article_results: {
+          result: {
+            title: 'Stub only',
+            preview_text: 'Preview only',
+          },
+        },
+      },
+    });
+    const data = makeTimelineResponse(raw);
+    const tweets = extractTweets('HomeTimeline', data);
+    assert.deepStrictEqual(tweets, []);
   });
 
   it('skips cursor entries', () => {
@@ -988,5 +1036,111 @@ describe('normalizeTweet URLs', () => {
     assert.equal(t.urls[0].display, 'example.com');
     assert.equal(t.urls[0].expanded, 'https://example.com');
     assert.equal(t.urls[0].shortened, 'https://t.co/abc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quoted tweets — the inline quoted payload must be captured, not just its ID
+// ---------------------------------------------------------------------------
+
+function makeQuotedRawTweet() {
+  return makeRawTweet({
+    rest_id: '200',
+    core: {
+      user_results: {
+        result: {
+          rest_id: 'u2',
+          core: { screen_name: 'quoteduser', name: 'Quoted User' },
+          legacy: { followers_count: 7, verified: false },
+        },
+      },
+    },
+    legacy: {
+      id_str: '200',
+      user_id_str: 'u2',
+      full_text: 'the quoted text',
+      conversation_id_str: '200',
+    },
+  });
+}
+
+describe('quoted tweet extraction', () => {
+  it('extracts the quoted tweet alongside the quoting tweet', () => {
+    const quoting = makeRawTweet({
+      legacy: { quoted_status_id_str: '200' },
+      quoted_status_result: { result: makeQuotedRawTweet() },
+    });
+    const tweets = extractTweets('HomeTimeline', makeTimelineResponse(quoting));
+
+    assert.equal(tweets.length, 2);
+    const main = tweets.find(t => t.id === '100');
+    const quoted = tweets.find(t => t.id === '200');
+    assert.ok(main);
+    assert.ok(quoted, 'inline quoted tweet payload was discarded');
+    assert.equal(main.quoted_tweet_id, '200');
+    assert.equal(quoted.text, 'the quoted text');
+    assert.equal(quoted.author.username, 'quoteduser');
+  });
+
+  it('unwraps TweetWithVisibilityResults-wrapped quoted tweets', () => {
+    const quoting = makeRawTweet({
+      legacy: { quoted_status_id_str: '200' },
+      quoted_status_result: {
+        result: { __typename: 'TweetWithVisibilityResults', tweet: makeQuotedRawTweet() },
+      },
+    });
+    const tweets = extractTweets('HomeTimeline', makeTimelineResponse(quoting));
+    assert.equal(tweets.length, 2);
+    assert.ok(tweets.some(t => t.id === '200'));
+  });
+
+  it('ignores tombstoned quoted tweets', () => {
+    const quoting = makeRawTweet({
+      legacy: { quoted_status_id_str: '200' },
+      quoted_status_result: { result: { __typename: 'TweetTombstone' } },
+    });
+    const tweets = extractTweets('HomeTimeline', makeTimelineResponse(quoting));
+    assert.equal(tweets.length, 1);
+    assert.equal(tweets[0].id, '100');
+  });
+
+  it('extracts the quoted tweet for TweetResultByRestId responses', () => {
+    const quoting = makeRawTweet({
+      legacy: { quoted_status_id_str: '200' },
+      quoted_status_result: { result: makeQuotedRawTweet() },
+    });
+    const data = { data: { tweetResult: { result: quoting } } };
+    const tweets = extractTweets('TweetResultByRestId', data);
+    assert.equal(tweets.length, 2);
+    assert.ok(tweets.some(t => t.id === '200'));
+  });
+
+  it('extracts the quoted tweet carried by a retweeted original', () => {
+    const original = makeRawTweet({
+      rest_id: '300',
+      legacy: { id_str: '300', quoted_status_id_str: '200' },
+      quoted_status_result: { result: makeQuotedRawTweet() },
+    });
+    const rt = makeRawTweet({
+      legacy: { retweeted_status_result: { result: original } },
+    });
+    const tweets = extractTweets('HomeTimeline', makeTimelineResponse(rt));
+    assert.ok(tweets.some(t => t.id === '200'),
+      'quoted payload on the retweeted original was discarded');
+  });
+
+  it('does not emit the quoted tweet twice when wrapper and original both carry it', () => {
+    const original = makeRawTweet({
+      rest_id: '300',
+      legacy: { id_str: '300' },
+      quoted_status_result: { result: makeQuotedRawTweet() },
+    });
+    const rt = makeRawTweet({
+      quoted_status_result: { result: makeQuotedRawTweet() },
+      legacy: { retweeted_status_result: { result: original } },
+    });
+    const tweets = extractTweets('HomeTimeline', makeTimelineResponse(rt));
+    assert.equal(tweets.filter(t => t.id === '200').length, 1,
+      'same quoted tweet must be emitted once per entry');
   });
 });

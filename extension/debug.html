@@ -18,6 +18,7 @@
         <tr><td class="label">Session count</td><td id="h-session">—</td></tr>
         <tr><td class="label">All-time count</td><td id="h-alltime">—</td></tr>
         <tr><td class="label">Buffer size</td><td id="h-buffer">—</td></tr>
+        <tr id="h-error-row" style="display: none;"><td class="label">Error</td><td id="h-error" class="status-error">—</td></tr>
       </table>
       <div class="toggle-row">
         <label><input type="checkbox" id="debug-toggle"> Debug logging to file</label>
@@ -25,6 +26,11 @@
       <div class="toggle-row">
         <label><input type="checkbox" id="verbose-toggle"> Discovery mode (verbose endpoint logging)</label>
       </div>
+    </section>
+
+    <section class="panel" id="discovered-section" style="display: none;">
+      <h2>Discovered Endpoints</h2>
+      <div id="discovered-list" class="discovered-list"></div>
     </section>
 
     <section class="panel">

@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""xTap Native Messaging Host — receives tweets from the Chrome extension and appends to JSONL."""
+"""xTap Native Messaging Host — token bootstrap for the Chrome/Firefox extension.
+
+This minimal host exists solely to pass the HTTP daemon's auth token to the
+browser extension via native messaging.  All tweet/log/dump I/O goes through
+the HTTP daemon (xtap_daemon.py).
+"""
 
 import json
 import os
 import struct
 import sys
+import traceback
+from datetime import datetime
 
-from xtap_core import (DEFAULT_OUTPUT_DIR, load_seen_ids, resolve_output_dir,
-                       write_tweets, write_log, write_dump, test_path)
-
-XTAP_PORT = 17381
+XTAP_PORT = int(os.environ.get('XTAP_DAEMON_PORT', 17381))
 XTAP_DIR = os.path.expanduser('~/.xtap')
 XTAP_SECRET = os.path.join(XTAP_DIR, 'secret')
+XTAP_ERROR_LOG = os.path.join(XTAP_DIR, 'host-error.log')
 
-MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 32 MiB guard
+MAX_MESSAGE_BYTES = 1 * 1024 * 1024  # 1 MiB guard
 
 
 def read_exact(stream, size):
@@ -27,6 +32,16 @@ def read_exact(stream, size):
     return buf
 
 
+def drain_exact(stream, size):
+    """Discard exactly *size* bytes so the next frame starts at a boundary."""
+    remaining = size
+    while remaining > 0:
+        chunk = stream.read(min(65536, remaining))
+        if not chunk:
+            raise EOFError('unexpected end of stream')
+        remaining -= len(chunk)
+
+
 def read_message():
     try:
         header = read_exact(sys.stdin.buffer, 4)
@@ -34,6 +49,10 @@ def read_message():
         raise EOFError('stdin closed')
     length = struct.unpack('<I', header)[0]
     if length > MAX_MESSAGE_BYTES:
+        # Drain the payload before raising — leaving it in the pipe would make
+        # the next read interpret payload bytes as a length header, and the
+        # stream would never realign.
+        drain_exact(sys.stdin.buffer, length)
         raise ValueError(f'message too large: {length} bytes')
     data = read_exact(sys.stdin.buffer, length)
     return json.loads(data)
@@ -46,12 +65,7 @@ def send_message(msg):
     sys.stdout.buffer.flush()
 
 
-def main():
-    out_dir = DEFAULT_OUTPUT_DIR
-    seen_ids = None
-    custom_dirs = set()
-    storage_ready = False
-
+def _main():
     while True:
         try:
             msg = read_message()
@@ -61,66 +75,35 @@ def main():
             send_message({'ok': False, 'error': str(e)})
             continue
 
-        # GET_TOKEN does not require storage
         if msg.get('type') == 'GET_TOKEN':
             try:
-                _handle_message(msg, out_dir, seen_ids, custom_dirs)
+                with open(XTAP_SECRET, 'r', encoding='utf-8') as f:
+                    token = f.read().strip()
+                send_message({'ok': True, 'token': token, 'port': XTAP_PORT})
+            except FileNotFoundError:
+                send_message({'ok': False, 'error': 'Daemon not installed (~/.xtap/secret not found)'})
             except Exception as e:
                 send_message({'ok': False, 'error': str(e)})
-            continue
-
-        # Lazy storage init on first non-GET_TOKEN message
-        if not storage_ready:
-            os.makedirs(out_dir, exist_ok=True)
-            seen_ids = load_seen_ids(out_dir)
-            storage_ready = True
-
-        try:
-            _handle_message(msg, out_dir, seen_ids, custom_dirs)
-        except Exception as e:
-            send_message({'ok': False, 'error': str(e)})
+        else:
+            send_message({
+                'ok': False,
+                'error': f'Unsupported message type: {msg.get("type")}. '
+                         'All data is handled by the HTTP daemon.'
+            })
 
 
-def _handle_message(msg, default_dir, seen_ids, custom_dirs):
-    # Handle GET_TOKEN: return daemon auth token for HTTP transport bootstrap
-    if msg.get('type') == 'GET_TOKEN':
-        try:
-            with open(XTAP_SECRET, 'r') as f:
-                token = f.read().strip()
-            send_message({'ok': True, 'token': token, 'port': XTAP_PORT})
-        except FileNotFoundError:
-            send_message({'ok': False, 'error': 'Daemon not installed (~/.xtap/secret not found)'})
-        return
-
-    # Resolve output directory
-    msg_dir = msg.get('outputDir', '').strip()
-    out_dir = resolve_output_dir(msg_dir, default_dir, seen_ids, custom_dirs)
-
-    # Handle path test
-    if msg.get('type') == 'TEST_PATH':
-        test_path(out_dir)
-        send_message({'ok': True, 'type': 'TEST_PATH'})
-        return
-
-    # Handle dump (discovery mode)
-    if msg.get('type') == 'DUMP':
-        filename = msg.get('filename', 'dump.json')
-        content = msg.get('content', '')
-        path = write_dump(filename, content, out_dir)
-        send_message({'ok': True, 'path': path})
-        return
-
-    # Handle log messages
-    if msg.get('type') == 'LOG':
-        lines = msg.get('lines', [])
-        logged = write_log(lines, out_dir)
-        send_message({'ok': True, 'logged': logged})
-        return
-
-    # Handle tweet messages
-    tweets = msg.get('tweets', [])
-    count, dupes = write_tweets(tweets, out_dir, seen_ids)
-    send_message({'ok': True, 'count': count, 'dupes': dupes})
+def main():
+    try:
+        _main()
+    except Exception:
+        os.makedirs(XTAP_DIR, exist_ok=True)
+        with open(XTAP_ERROR_LOG, 'a', encoding='utf-8') as f:
+            f.write(f'\n--- {datetime.now().isoformat()} ---\n')
+            f.write(f'Python: {sys.version}\n')
+            f.write(f'Script: {os.path.abspath(__file__)}\n')
+            f.write(f'sys.path: {sys.path}\n')
+            traceback.print_exc(file=f)
+        raise
 
 
 if __name__ == '__main__':

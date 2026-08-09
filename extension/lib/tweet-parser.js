@@ -17,8 +17,7 @@ export function extractTweets(endpoint, data) {
     if (!result) return [];
     const raw = unwrapTweetResult(result);
     if (!raw) return [];
-    const tweet = normalizeTweet(raw);
-    return tweet ? [tweet] : [];
+    return normalizeWithQuoted(raw);
   }
 
   const instructions = findInstructions(endpoint, data);
@@ -64,6 +63,8 @@ const INSTRUCTION_PATHS = {
   UserTweetsAndReplies: ['data', 'user', 'result', 'timeline', 'timeline', 'instructions'],
   UserMedia: ['data', 'user', 'result', 'timeline', 'timeline', 'instructions'],
   UserLikes: ['data', 'user', 'result', 'timeline', 'timeline', 'instructions'],
+  UserArticlesTweets: ['data', 'user', 'result', 'timeline', 'timeline', 'instructions'],
+  UserHighlightsTweets: ['data', 'user', 'result', 'timeline', 'timeline', 'instructions'],
   TweetDetail: ['data', 'threaded_conversation_with_injections_v2', 'instructions'],
   SearchTimeline: ['data', 'search_by_raw_query', 'search_timeline', 'timeline', 'instructions'],
   ListLatestTweetsTimeline: ['data', 'list', 'tweets_timeline', 'timeline', 'instructions'],
@@ -149,8 +150,7 @@ function extractTweetsFromEntry(entry, skippedTypes) {
 
   // Single tweet item
   if (content.entryType === 'TimelineTimelineItem' || content.__typename === 'TimelineTimelineItem') {
-    const tweet = extractFromItemContent(content.itemContent);
-    if (tweet) tweets.push(tweet);
+    tweets.push(...extractFromItemContent(content.itemContent));
     return tweets;
   }
 
@@ -159,8 +159,7 @@ function extractTweetsFromEntry(entry, skippedTypes) {
     const items = content.items || [];
     for (const item of items) {
       const itemContent = item.item?.itemContent || item.itemContent;
-      const tweet = extractFromItemContent(itemContent);
-      if (tweet) tweets.push(tweet);
+      tweets.push(...extractFromItemContent(itemContent));
     }
     return tweets;
   }
@@ -168,8 +167,7 @@ function extractTweetsFromEntry(entry, skippedTypes) {
   // Fallback: try itemContent directly (may be at content.itemContent or content.item.itemContent)
   const fallbackItemContent = content.itemContent || content.item?.itemContent;
   if (fallbackItemContent) {
-    const tweet = extractFromItemContent(fallbackItemContent);
-    if (tweet) tweets.push(tweet);
+    tweets.push(...extractFromItemContent(fallbackItemContent));
     return tweets;
   }
 
@@ -185,7 +183,7 @@ function extractTweetsFromEntry(entry, skippedTypes) {
 }
 
 function extractFromItemContent(itemContent) {
-  if (!itemContent) return null;
+  if (!itemContent) return [];
 
   // Track non-tweet item types we encounter
   if (itemContent.itemType !== 'TimelineTweet' && itemContent.__typename !== 'TimelineTweet') {
@@ -195,19 +193,51 @@ function extractFromItemContent(itemContent) {
       extractFromItemContent._seenTypes.add(itemType);
       console.log(`[xTap:parser] Skipping non-tweet itemType: "${itemType}"`);
     }
-    return null;
+    return [];
   }
 
   const tweetResults = itemContent.tweet_results;
   if (!tweetResults?.result) {
     console.warn('[xTap:parser] TimelineTweet has no tweet_results.result | keys:', Object.keys(itemContent).join(', '));
-    return null;
+    return [];
   }
 
   const raw = unwrapTweetResult(tweetResults.result);
-  if (!raw) return null;
+  if (!raw) return [];
 
-  return normalizeTweet(raw);
+  return normalizeWithQuoted(raw);
+}
+
+/**
+ * Normalize a tweet plus any inline quoted tweet it carries. X delivers the
+ * full quoted payload at quoted_status_result.result — capturing only
+ * legacy.quoted_status_id_str would discard the quoted content entirely.
+ */
+function normalizeWithQuoted(raw) {
+  const out = [];
+  const tweet = normalizeTweet(raw);
+  if (!tweet) return out;
+  out.push(tweet);
+
+  // For retweets the quoted payload sits on the retweeted original.
+  const sources = [raw];
+  const rtResult = raw.legacy?.retweeted_status_result?.result;
+  if (rtResult) {
+    const rtRaw = unwrapTweetResult(rtResult);
+    if (rtRaw) sources.push(rtRaw);
+  }
+  for (const source of sources) {
+    const quotedResult = source.quoted_status_result?.result;
+    if (!quotedResult) continue;
+    const quotedRaw = unwrapTweetResult(quotedResult);
+    if (!quotedRaw) continue;
+    const quoted = normalizeTweet(quotedRaw);
+    // Dedupe by id — a retweet-of-a-quote can carry the same quoted payload
+    // on both the wrapper and the original, and article tweets bypass all
+    // downstream dedup layers.
+    if (quoted && !out.some(t => t.id === quoted.id)) out.push(quoted);
+  }
+  return out;
 }
 
 /**
@@ -252,6 +282,12 @@ export function normalizeTweet(raw) {
     return null;
   }
 
+  const tweetId = legacy.id_str || raw.rest_id;
+  if (isArticleStub(raw)) {
+    console.log(`[xTap:parser] Skipping article tweet ${tweetId || '(no id)'} without content_state.blocks`);
+    return null;
+  }
+
   const userResult = raw.core?.user_results?.result;
   const userCore = userResult?.core;      // X nests name/screen_name here
   const userLegacy = userResult?.legacy;  // follower_count, verified, etc.
@@ -267,7 +303,6 @@ export function normalizeTweet(raw) {
   const media = extractMedia(legacy);
   const urls = extractUrls(legacy);
 
-  const tweetId = legacy.id_str || raw.rest_id;
   const username = userCore?.screen_name || userLegacy?.screen_name;
 
   const tweet = {
@@ -337,18 +372,17 @@ export function normalizeTweet(raw) {
  * Articles use Draft.js block format in content_state.
  */
 export function extractArticle(raw) {
-  const articleResult = raw.article?.article_results?.result;
+  const articleResult = getArticleResult(raw);
   if (!articleResult) return null;
 
   // Timeline endpoints return article stubs with only title/preview_text.
   // Require content_state to be present — full data comes from TweetResultByRestId.
-  const contentState = articleResult.content_state;
-  if (!contentState?.blocks?.length) return null;
+  if (!hasArticleContent(articleResult)) return null;
 
   const tweetId = raw.legacy?.id_str || raw.rest_id;
   const title = articleResult.title || null;
-  const blocks = contentState.blocks;
-  const entityMap = contentState.entityMap || [];
+  const blocks = articleResult.content_state.blocks;
+  const entityMap = articleResult.content_state.entityMap || [];
 
   // Build mediaId → {url, filename} from media_entities
   const mediaEntities = articleResult.media_entities || [];
@@ -405,6 +439,20 @@ export function extractArticle(raw) {
   const media = [...mediaById.values()];
 
   return { title, text, blocks, media };
+}
+
+function getArticleResult(raw) {
+  return raw.article?.article_results?.result || null;
+}
+
+function hasArticleContent(articleResult) {
+  return Array.isArray(articleResult?.content_state?.blocks) &&
+    articleResult.content_state.blocks.length > 0;
+}
+
+function isArticleStub(raw) {
+  const articleResult = getArticleResult(raw);
+  return !!articleResult && !hasArticleContent(articleResult);
 }
 
 /**

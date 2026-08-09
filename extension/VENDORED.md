@@ -3,7 +3,7 @@
 This directory vendors the xTap Chrome extension.
 
 - Upstream: https://github.com/mkubicek/xTap
-- Vendored at commit: `61c1cb483fff90a9aa48588621a9f8ee03bddf1f`
+- Vendored at commit: `9eba39a3c972649f07df98c3874cac6de38b383f` (`v0.24.0`)
 - License: MIT (see `LICENSE`, unchanged)
 
 Keep upstream code style (vanilla JS, MV3, no bundler) so future re-syncs
@@ -12,23 +12,25 @@ this directory, excluding the modifications below.
 
 ## Local modifications
 
-- `manifest.json` — renamed to `xtap-pool`, version bumped to `0.21.0`; added `alarms`,
-  `debugger`, and `unlimitedStorage` permissions, the `https://*.hf.space/*`
-  host permission, and the `pool-connect.js` content script.
+- `manifest.json` — renamed to `xtap-pool`; added `debugger` and
+  `unlimitedStorage` permissions, the `https://*.hf.space/*` host permission,
+  and the `pool-connect.js` content script.
+- Firefox manifests, build scripts, page-interception tests, and browser E2E
+  harness are omitted. Firefox does not implement Chrome's extension debugger
+  API, and this fork does not fall back to page-owned fetch/XHR interception.
 - `lib/pool-sync.js` — **new**: persistent sync queue + batched flush to the
   pool Space's `/api/ingest` with backoff.
 - `pool-connect.js` — **new**: content script for the Space's `/connect` page;
   hands the pool token to the service worker (no copy-paste).
-- `background.js` — imports `lib/pool-sync.js`; `enqueueTweets()` also feeds
-  the pool queue; new `POOL_*` message handlers; `chrome.alarms` periodic
-  flush; `initPoolSync()` during startup.
+- `background.js` — imports `lib/pool-sync.js`; new captures also feed the pool
+  queue; new `POOL_*` message handlers; a `chrome.alarms` periodic pool flush;
+  `initPoolSync()` during startup. Upstream's durable staging, coupled
+  dedup/buffer persistence, image backfill, bounded splitting, startup flush,
+  and HTTP-only transport remain in place around the pool path.
 - `popup.html` / `popup.js` — added the "Pool sync" section (status, connect,
   sync-now, pause) and an Options link.
 - `options.html` / `options.js` — **new**: configure the pool Space URL and
   paste a token manually (fallback for the automatic handoff).
-- `native-host/xtap_daemon.py` — `/status` validates a supplied bearer token
-  (401 on mismatch) so the extension detects rotated daemon secrets;
-  `background.js` `probeHttp()` sends the cached token accordingly.
 - `tests/pool-sync.test.mjs` — **new**: node --test coverage for the queue,
   flush, backoff and connect flows.
 - `lib/scrape-receipts.js` and `lib/scrape-bridge.js` — **new**: durable
@@ -50,15 +52,12 @@ this directory, excluding the modifications below.
   JavaScript or the DOM. The old MAIN-world fetch/XHR patch and isolated bridge
   were removed.
 - `background.js` sends debugger-captured list and search responses through one
-  parser and receipt path before normal capture deduplication. It passes the
-  exact Chrome tab ID and forwards observations only to the matching tab-bound
-  run. Up to two receipt runs may be active.
-- `background.js` flush — rebuffers batches on explicit host rejection or
-  when no transport accepted the message (native fire-and-forget posts still
-  count as delivered), and persists the local buffer across MV3 service-worker
-  suspensions.
+  parser and receipt path before normal capture deduplication. It stages the
+  exact request URL and Chrome tab ID so recovery replays tab-bound receipts
+  before clearing the write-ahead record. Observations go only to the matching
+  run, and up to two receipt runs may be active.
 - `lib/tweet-parser.js` — accepts object-shaped Draft.js `entityMap`s in
   addition to X's array-of-pairs shape (+ regression test).
-- `native-host/xtap_core.py` — all text file handles opened with
-  `encoding="utf-8"` so emoji/CJK tweets save on non-UTF-8 locales.
+- `.github/workflows/release.yml` — packages the pool settings, connection,
+  reload, and cutover pages; omits unsupported Firefox artifacts.
 - Removed upstream `AGENTS.md` / `CLAUDE.md` (superseded by the repo root's).
