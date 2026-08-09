@@ -32,6 +32,28 @@ describe('GraphqlCapture', () => {
     assert.deepEqual(browser.detachments, [20]);
   });
 
+  it('cancels an in-flight attachment when a tab leaves X', async () => {
+    const browser = fakeBrowser();
+    let releaseAttach;
+    browser.debuggerApi.attach = () => new Promise((resolve) => {
+      releaseAttach = resolve;
+    });
+    const capture = new GraphqlCapture({
+      debuggerApi: browser.debuggerApi,
+      logger: quietLogger(),
+      onResponse() {},
+      tabs: browser.tabs,
+    });
+
+    const attaching = capture.ensureAttached(31);
+    const detaching = capture.detachTab(31);
+    releaseAttach();
+    assert.equal(await attaching, false);
+    await detaching;
+    assert.deepEqual(browser.detachments, [31]);
+    assert.equal(capture.attachedTabs.has(31), false);
+  });
+
   it('reports when passive capture cannot attach to a source tab', async () => {
     const browser = fakeBrowser();
     browser.debuggerApi.attach = async () => {

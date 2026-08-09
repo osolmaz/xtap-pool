@@ -17,6 +17,7 @@ export class GraphqlCapture {
     this.onResponse = onResponse;
     this.logger = logger;
     this.attachedTabs = new Set();
+    this.attachmentRevisions = new Map();
     this.attachments = new Map();
     this.pendingResponses = new Map();
   }
@@ -39,9 +40,7 @@ export class GraphqlCapture {
       else if (changeInfo.url) void this.detachTab(tabId);
     });
     this.tabs.onRemoved.addListener((tabId) => {
-      this.attachedTabs.delete(tabId);
-      this.attachments.delete(tabId);
-      this.deletePendingForTab(tabId);
+      void this.detachTab(tabId);
     });
     void this.attachExistingTabs();
   }
@@ -61,14 +60,15 @@ export class GraphqlCapture {
     if (this.attachedTabs.has(tabId)) return true;
     const pending = this.attachments.get(tabId);
     if (pending) return pending;
-    const attaching = this.attachTab(tabId).finally(() => {
+    const revision = this.attachmentRevisions.get(tabId) ?? 0;
+    const attaching = this.attachTab(tabId, revision).finally(() => {
       if (this.attachments.get(tabId) === attaching) this.attachments.delete(tabId);
     });
     this.attachments.set(tabId, attaching);
     return attaching;
   }
 
-  async attachTab(tabId) {
+  async attachTab(tabId, revision) {
     let attachedHere = false;
     try {
       await this.debuggerApi.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
@@ -81,6 +81,10 @@ export class GraphqlCapture {
     }
     try {
       await this.debuggerApi.sendCommand({ tabId }, 'Network.enable');
+      if ((this.attachmentRevisions.get(tabId) ?? 0) !== revision) {
+        if (attachedHere) await this.safeDetach(tabId);
+        return false;
+      }
       this.attachedTabs.add(tabId);
       return true;
     } catch (error) {
@@ -91,9 +95,12 @@ export class GraphqlCapture {
   }
 
   async detachTab(tabId) {
-    if (!this.attachedTabs.has(tabId)) return;
-    this.attachedTabs.delete(tabId);
+    const revision = (this.attachmentRevisions.get(tabId) ?? 0) + 1;
+    this.attachmentRevisions.set(tabId, revision);
+    const pending = this.attachments.get(tabId);
+    if (pending) await pending;
     this.deletePendingForTab(tabId);
+    if (!this.attachedTabs.delete(tabId)) return;
     await this.safeDetach(tabId);
   }
 
