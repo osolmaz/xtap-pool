@@ -1,9 +1,15 @@
 {
   "manifest_version": 3,
   "name": "xtap-pool",
-  "version": "0.20.3",
+  "version": "0.21.0",
   "description": "Passively captures tweets from X/Twitter as you browse and pools them with friends via a private Hugging Face Space",
-  "permissions": ["storage", "nativeMessaging", "alarms", "unlimitedStorage"],
+  "permissions": [
+    "alarms",
+    "debugger",
+    "nativeMessaging",
+    "storage",
+    "unlimitedStorage"
+  ],
   "host_permissions": [
     "*://*.x.com/*",
     "*://*.twitter.com/*",
@@ -15,18 +21,6 @@
     "type": "module"
   },
   "content_scripts": [
-    {
-      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
-      "js": ["content-main.js"],
-      "world": "MAIN",
-      "run_at": "document_start"
-    },
-    {
-      "matches": ["*://*.x.com/*", "*://*.twitter.com/*"],
-      "js": ["content-bridge.js"],
-      "world": "ISOLATED",
-      "run_at": "document_start"
-    },
     {
       "matches": ["https://*.hf.space/*"],
       "js": ["pool-connect.js"],

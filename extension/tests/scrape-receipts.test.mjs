@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { indexedDB } from 'fake-indexeddb';
 import {
   extractListId,
+  ScrapeReceiptError,
   ScrapeReceiptStore,
 } from '../lib/scrape-receipts.js';
 import {
@@ -32,14 +33,21 @@ function listUrl(listId = LIST_A) {
   return `https://x.com/i/api/graphql/hash/ListLatestTweetsTimeline?variables=${variables}`;
 }
 
+function searchUrl(listId = LIST_A) {
+  const variables = encodeURIComponent(
+    JSON.stringify({ rawQuery: `list:${listId} until:2026-08-07` }),
+  );
+  return `https://x.com/i/api/graphql/hash/SearchTimeline?variables=${variables}`;
+}
+
 describe('ScrapeReceiptStore', () => {
   it('persists list coverage and replays ordered run observations', async () => {
     const name = databaseName();
     const store = new ScrapeReceiptStore(indexedDB, name);
     await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      listId: LIST_A,
       observedAtMs: 1_000,
+      requestUrl: listUrl(LIST_A),
       sourceTabId: TAB_A,
       tweets: [tweet('1')],
     });
@@ -55,8 +63,8 @@ describe('ScrapeReceiptStore', () => {
 
     const observations = await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      listId: LIST_A,
       observedAtMs: 3_000,
+      requestUrl: listUrl(LIST_A),
       sourceTabId: TAB_A,
       tweets: [tweet('1'), tweet('2')],
     });
@@ -80,12 +88,41 @@ describe('ScrapeReceiptStore', () => {
     assert.equal((await reopened.getRun(run.runId)).lastCursor, 2);
   });
 
+  it('records search timeline observations against the tab-bound run', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const run = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: 'abababab-abab-4bab-8bab-abababababab',
+      startedAtMs: 2_000,
+    });
+    const observations = await store.recordTimeline({
+      endpoint: 'SearchTimeline',
+      observedAtMs: 3_000,
+      requestUrl: searchUrl(LIST_B),
+      sourceTabId: TAB_A,
+      tweets: [tweet('search-result', '2026-06-01T00:00:00.000Z')],
+    });
+    assert.deepEqual(observations, [
+      {
+        captureSequence: 1,
+        cursor: 1,
+        knownBeforeRun: false,
+        observedAtMs: 3_000,
+        postAt: '2026-06-01T00:00:00.000Z',
+        runId: run.runId,
+        sourceEndpoint: 'SearchTimeline',
+        tweetId: 'search-result',
+      },
+    ]);
+  });
+
   it('tracks prior coverage per list instead of globally', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      listId: LIST_B,
       observedAtMs: 1_000,
+      requestUrl: listUrl(LIST_B),
       sourceTabId: TAB_A,
       tweets: [tweet('shared')],
     });
@@ -99,8 +136,8 @@ describe('ScrapeReceiptStore', () => {
 
     const [observation] = await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      listId: LIST_A,
       observedAtMs: 3_000,
+      requestUrl: listUrl(LIST_A),
       sourceTabId: TAB_A,
       tweets: [tweet('shared')],
     });
@@ -152,8 +189,8 @@ describe('ScrapeReceiptStore', () => {
 
     const firstObservations = await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      listId: LIST_A,
       observedAtMs: 3_500,
+      requestUrl: listUrl(LIST_A),
       sourceTabId: TAB_A,
       tweets: [tweet('first-tab')],
     });
@@ -228,8 +265,9 @@ describe('ScrapeReceiptStore', () => {
 });
 
 describe('extractListId', () => {
-  it('reads the list ID only from list-timeline requests', () => {
+  it('reads list IDs from supported timeline requests outside an active run', () => {
     assert.equal(extractListId('ListLatestTweetsTimeline', listUrl()), LIST_A);
+    assert.equal(extractListId('SearchTimeline', searchUrl()), LIST_A);
     assert.equal(extractListId('HomeTimeline', listUrl()), undefined);
     assert.equal(
       extractListId(
@@ -303,6 +341,39 @@ describe('ScrapeReceiptBridge', () => {
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
   });
 
+  it('returns stable error codes to the scroller', async () => {
+    const store = {
+      async beginRun() {
+        throw new ScrapeReceiptError('capacity-full', 'two runs are active');
+      },
+      async finishCutover() {},
+    };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({ runtime, store });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+    accepted.receive({
+      afterCursor: 0,
+      listId: LIST_A,
+      protocolVersion: 1,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      startedAtMs: 1_000,
+      type: 'scrape:open',
+    });
+    await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:error'));
+    assert.deepEqual(
+      accepted.sent.find((message) => message.type === 'scrape:error'),
+      {
+        error: 'two runs are active',
+        errorCode: 'capacity-full',
+        protocolVersion: 1,
+        runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        type: 'scrape:error',
+      },
+    );
+  });
+
   it('rejects unknown extensions and streams observations to the scroller', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     const runtime = { onConnectExternal: { addListener() {} } };
@@ -324,6 +395,11 @@ describe('ScrapeReceiptBridge', () => {
       type: 'scrape:open',
     });
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
+    const opened = accepted.sent.find((message) => message.type === 'scrape:opened');
+    assert.deepEqual(opened.capabilities, [
+      'search-timeline-observations',
+      'typed-errors',
+    ]);
 
     await bridge.recordGraphqlResponse({
       endpoint: 'ListLatestTweetsTimeline',
