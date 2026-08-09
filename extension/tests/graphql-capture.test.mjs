@@ -32,6 +32,21 @@ describe('GraphqlCapture', () => {
     assert.deepEqual(browser.detachments, [20]);
   });
 
+  it('reports when passive capture cannot attach to a source tab', async () => {
+    const browser = fakeBrowser();
+    browser.debuggerApi.attach = async () => {
+      throw new Error('permission denied');
+    };
+    const capture = new GraphqlCapture({
+      debuggerApi: browser.debuggerApi,
+      logger: quietLogger(),
+      onResponse() {},
+      tabs: browser.tabs,
+    });
+
+    assert.equal(await capture.ensureAttached(31), false);
+  });
+
   it('reads a completed GraphQL response without changing the page', async () => {
     const browser = fakeBrowser();
     const received = [];
