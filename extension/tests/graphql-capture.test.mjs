@@ -30,6 +30,10 @@ describe('GraphqlCapture', () => {
     browser.updateTab(20, 'https://example.com/');
     await browser.idle();
     assert.deepEqual(browser.detachments, [20]);
+
+    browser.startUnknownNavigation(10);
+    await browser.idle();
+    assert.deepEqual(browser.detachments, [20, 10]);
   });
 
   it('cancels an in-flight attachment when a tab leaves X', async () => {
@@ -165,6 +169,12 @@ describe('extractGraphqlEndpoint', () => {
       'ListLatestTweetsTimeline',
     );
     assert.equal(extractGraphqlEndpoint('https://x.com/home'), undefined);
+    assert.equal(
+      extractGraphqlEndpoint(
+        'https://example.com/i/api/graphql/hash/SearchTimeline',
+      ),
+      undefined,
+    );
     assert.equal(extractGraphqlEndpoint('invalid'), undefined);
   });
 });
@@ -232,6 +242,11 @@ function fakeBrowser(existingTabs = []) {
   state.idle = async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await Promise.all(pending.splice(0));
+  };
+  state.startUnknownNavigation = (tabId) => {
+    for (const listener of tabUpdateListeners) {
+      listener(tabId, { status: 'loading' }, { id: tabId });
+    }
   };
   state.updateTab = (tabId, url) => {
     for (const listener of tabUpdateListeners) {

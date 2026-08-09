@@ -36,8 +36,11 @@ export class GraphqlCapture {
     });
     this.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       const url = changeInfo.url ?? tab.url;
-      if (isXUrl(url)) void this.ensureAttached(tabId);
-      else if (changeInfo.url) void this.detachTab(tabId);
+      if (isXUrl(url)) {
+        void this.ensureAttached(tabId);
+      } else if (changeInfo.url || changeInfo.status === 'loading') {
+        void this.detachTab(tabId);
+      }
     });
     this.tabs.onRemoved.addListener((tabId) => {
       void this.detachTab(tabId);
@@ -168,6 +171,7 @@ export function extractGraphqlEndpoint(url) {
   if (typeof url !== 'string') return undefined;
   try {
     const parsed = new URL(url);
+    if (!isXHostname(parsed.hostname)) return undefined;
     if (!parsed.pathname.includes(GRAPHQL_PATH)) return undefined;
     const parts = parsed.pathname.split('/');
     const graphqlIndex = parts.indexOf('graphql');
@@ -186,12 +190,15 @@ function decodeResponseBody(value) {
 function isXUrl(value) {
   if (typeof value !== 'string') return false;
   try {
-    const hostname = new URL(value).hostname;
-    return hostname === 'x.com' || hostname.endsWith('.x.com') ||
-      hostname === 'twitter.com' || hostname.endsWith('.twitter.com');
+    return isXHostname(new URL(value).hostname);
   } catch {
     return false;
   }
+}
+
+function isXHostname(hostname) {
+  return hostname === 'x.com' || hostname.endsWith('.x.com') ||
+    hostname === 'twitter.com' || hostname.endsWith('.twitter.com');
 }
 
 function isAlreadyAttachedError(error) {
