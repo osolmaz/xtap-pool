@@ -165,6 +165,10 @@ describe("pinned storage migration", () => {
     );
     expect(state.bucket.files.size).toBe(0);
     expect(() => createPinnedDatasetSource(DATASET, REVISION, "")).toThrow("HF_TOKEN");
+    const originalToken = process.env["HF_TOKEN"];
+    delete process.env["HF_TOKEN"];
+    expect(() => createPinnedDatasetSource(DATASET, REVISION)).toThrow("HF_TOKEN");
+    if (originalToken !== undefined) process.env["HF_TOKEN"] = originalToken;
   });
 
   it("rejects malformed, deleted, duplicated, and changed source rows", async () => {
