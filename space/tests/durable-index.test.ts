@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BucketLog, sha256 } from "../src/bucket-log.js";
 import type { BucketObject, RawBucketClient } from "../src/bucket-log.js";
@@ -192,6 +192,58 @@ describe("DurableIndex", () => {
     });
     expect(restoredLog.latestReceipt()?.finished_at).toBe("2026-08-12T12:01:00.000Z");
     restored.close();
+  });
+
+  it("replays new segments by transaction time instead of category key", async () => {
+    const tweet = makePooled({ id: "88", captured_at: "2026-08-12T12:00:00.000Z" });
+    await log.putSegment({
+      schema_version: 1,
+      transaction_id: "00000000-0000-4000-8000-000000000002",
+      created_at: "2026-08-12T12:00:00.000Z",
+      operations: [
+        {
+          path: "data/osolmaz/2026/08/tweets-2026-08-12.jsonl",
+          mode: "append",
+          lines: [JSON.stringify(tweet)],
+        },
+      ],
+    });
+    await log.putSegment({
+      schema_version: 1,
+      transaction_id: "00000000-0000-4000-8000-000000000003",
+      created_at: "2026-08-12T12:01:00.000Z",
+      operations: [
+        {
+          path: "enrichment/attempts/2026/08/attempts-2026-08-12.jsonl",
+          mode: "append",
+          lines: [
+            JSON.stringify({
+              unit_id: "88:someone",
+              input_hash: "stale",
+              contract_hash: CONTRACT,
+              attempt: 1,
+              outcome: "transient_failure",
+              at: "2026-08-12T12:01:00.000Z",
+              error_message: "retry",
+              error_class: "other",
+            }),
+          ],
+        },
+      ],
+    });
+
+    const order: string[] = [];
+    const applySegment = log.applySegment.bind(log);
+    vi.spyOn(log, "applySegment").mockImplementation((segment, store, enrich) => {
+      order.push(segment.operations[0]?.path ?? "");
+      return applySegment(segment, store, enrich);
+    });
+    const index = await DurableIndex.bootstrap(options("replay-order"));
+
+    expect(order.map((path) => path.split("/")[0])).toEqual(["data", "enrichment"]);
+    expect(index.stats().tweetRows).toBe(1);
+    expect(index.stats().attemptEvents).toBe(1);
+    index.close();
   });
 
   it("reads only new segment bodies while advancing the live head", async () => {
