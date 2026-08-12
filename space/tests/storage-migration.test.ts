@@ -230,10 +230,11 @@ describe("pinned storage migration", () => {
     );
     expect(state.bucket.files.size).toBe(0);
     expect(() => createPinnedDatasetSource(DATASET, REVISION, "")).toThrow("HF_TOKEN");
+    process.env["HF_TOKEN"] = "restore-after-test";
     const originalToken = process.env["HF_TOKEN"];
     delete process.env["HF_TOKEN"];
     expect(() => createPinnedDatasetSource(DATASET, REVISION)).toThrow("HF_TOKEN");
-    if (originalToken !== undefined) process.env["HF_TOKEN"] = originalToken;
+    process.env["HF_TOKEN"] = originalToken;
   });
 
   it("rejects malformed, deleted, duplicated, and changed source rows", async () => {
@@ -253,6 +254,17 @@ describe("pinned storage migration", () => {
     await expect(
       verifyPinnedDataset(options(deleted, `${deleted.report}.deleted`)),
     ).rejects.toThrow("exactly the pinned import segments");
+
+    const pathContributor = fixture();
+    const fallbackTweet = makePooled({ id: "2" }) as unknown as Record<string, unknown>;
+    delete fallbackTweet["contributed_by"];
+    pathContributor.source.files.set(
+      "data/osolmaz/2026/08/tweets-2026-08-13.jsonl",
+      bytes(`${JSON.stringify(fallbackTweet)}\n`),
+    );
+    await expect(importPinnedDataset(options(pathContributor))).resolves.toMatchObject({
+      reconciliation: { unique_tweet_identities: 2 },
+    });
 
     const duplicate = fixture();
     const tweetPath = "data/osolmaz/2026/08/tweets-2026-08-12.jsonl";
