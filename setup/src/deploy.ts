@@ -20,7 +20,10 @@ import { captureCommand } from "./process.js";
 import { collectUploadFiles, createSpaceStage } from "./stage.js";
 
 type DeleteOperation = { operation: "delete"; path: string };
-type ConfigureSpaceOptions = { initializeGeneratedSecrets?: boolean };
+type ConfigureSpaceOptions = {
+  initializeGeneratedSecrets?: boolean;
+  allowLegacyDatasetRemoval?: boolean;
+};
 
 export async function deployPool(
   root: string,
@@ -57,6 +60,7 @@ export async function updateExistingPool(
   await configureSpace(client, config, { initializeGeneratedSecrets: false });
 }
 
+// eslint-disable-next-line complexity -- Configuration validates the legacy cutover gate and applies independent optional defaults.
 export async function configureSpace(
   client: HubClient,
   config: SetupConfig,
@@ -64,6 +68,11 @@ export async function configureSpace(
 ): Promise<void> {
   const initializeGeneratedSecrets = options.initializeGeneratedSecrets ?? true;
   const variables = await getSpaceVariables(client, config.spaceRepo);
+  if (variables.has("DATASET_REPO") && options.allowLegacyDatasetRemoval !== true) {
+    throw new Error(
+      "legacy DATASET_REPO is still configured; complete and verify the pinned Bucket import before cutover",
+    );
+  }
   if (variables.has("DATASET_REPO")) {
     await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
   }

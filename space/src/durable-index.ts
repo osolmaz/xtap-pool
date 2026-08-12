@@ -236,6 +236,7 @@ export class DurableIndex {
       staged.push({ file, segment: await this.options.log.loadSegment(file) });
     }
 
+    staged.sort(compareReplayOrder);
     let rowsApplied = 0;
     const apply = this.store.database.transaction(() => {
       for (const item of staged) {
@@ -493,6 +494,16 @@ function ensureIndexTables(db: Database.Database): void {
 function sourceRows(db: Database.Database): Map<string, SegmentRow> {
   const rows = db.prepare("SELECT * FROM source_segments").all() as SegmentRow[];
   return new Map(rows.map((row) => [row.key, row]));
+}
+
+function compareReplayOrder(
+  left: { file: BucketSnapshotFile; segment: Awaited<ReturnType<BucketLog["loadSegment"]>> },
+  right: { file: BucketSnapshotFile; segment: Awaited<ReturnType<BucketLog["loadSegment"]>> },
+): number {
+  const time = left.segment.created_at.localeCompare(right.segment.created_at);
+  if (time !== 0) return time;
+  const transaction = left.segment.transaction_id.localeCompare(right.segment.transaction_id);
+  return transaction !== 0 ? transaction : left.file.key.localeCompare(right.file.key);
 }
 
 function snapshotFileFromRow(row: SegmentRow): BucketSnapshotFile {

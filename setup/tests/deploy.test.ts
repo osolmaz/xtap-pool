@@ -52,7 +52,7 @@ describe("setup deployment helpers", () => {
         allowedUsers: ["alice"],
         poolAdmins: ["alice"],
       },
-      { initializeGeneratedSecrets: false },
+      { initializeGeneratedSecrets: false, allowLegacyDatasetRemoval: true },
     );
 
     expect(requests[0]).toMatchObject({
@@ -76,6 +76,30 @@ describe("setup deployment helpers", () => {
       ENRICH_ENABLED: "false",
       ...ENRICHMENT_JOB_DEFAULT_VARIABLES,
     });
+  });
+
+  it("blocks a legacy update until the pinned Bucket import is verified", async () => {
+    const fetchFn: typeof fetch = (_input, init) =>
+      Promise.resolve(
+        init?.method === "GET"
+          ? Response.json({ DATASET_REPO: { value: "alice/legacy" } })
+          : new Response(null, { status: 204 }),
+      );
+
+    await expect(
+      configureSpace(
+        { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+        {
+          namespace: "alice",
+          spaceRepo: "alice/xtap-pool",
+          rawBucket: "alice/xtap-pool-data",
+          indexBucket: "alice/xtap-pool-bucket",
+          allowedUsers: ["alice"],
+          poolAdmins: ["alice"],
+        },
+        { initializeGeneratedSecrets: false },
+      ),
+    ).rejects.toThrow("complete and verify the pinned Bucket import");
   });
 });
 
