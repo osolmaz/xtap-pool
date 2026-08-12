@@ -61,6 +61,8 @@ import json
 import os
 import re
 
+from huggingface_hub import HfApi
+
 with open(os.environ["PINNED_IMPORT_REPORT"], encoding="utf-8") as handle:
     report = json.load(handle)
 if report.get("reconciliation", {}).get("passed") is not True:
@@ -72,7 +74,23 @@ if not isinstance(target.get("objects"), int) or target["objects"] < 1:
     raise SystemExit("pinned import report has no imported objects")
 if re.fullmatch(r"[a-f0-9]{64}", str(target.get("snapshot_revision", ""))) is None:
     raise SystemExit("pinned import report has no valid snapshot revision")
-print("Verified the pinned import report before index bootstrap.")
+source = report.get("source", {})
+source_repo = str(source.get("dataset", ""))
+source_revision = str(source.get("revision", ""))
+if re.fullmatch(r"[a-f0-9]{40}", source_revision) is None:
+    raise SystemExit("pinned import report has no valid dataset revision")
+api = HfApi()
+variables = dict(api.get_space_variables(os.environ["SPACE_REPO"]))
+if "DATASET_REPO" in variables:
+    raise SystemExit(
+        "legacy writers are not cut over: pause the Space, suspend enrichment, "
+        "pin and import the final dataset revision, then remove DATASET_REPO in the "
+        "coordinated cutover before using this deployment script"
+    )
+current_revision = api.dataset_info(source_repo).sha
+if current_revision != source_revision:
+    raise SystemExit("dataset advanced after the pinned import; quiesce writers and re-import")
+print("Verified the pinned final revision and completed legacy writer cutover.")
 PY
 fi
 
