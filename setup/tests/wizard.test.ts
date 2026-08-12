@@ -46,6 +46,43 @@ describe("index bootstrap contract", () => {
         Promise.resolve(revision),
       ),
     ).rejects.toThrow("does not prove");
+    for (const invalid of [
+      { schema_version: 2 },
+      { reconciliation: { passed: false } },
+      { source: { revision: "short" } },
+      { source: { objects: 0 } },
+      { target: { snapshot_revision: "short" } },
+      { target: { objects: 0 } },
+    ]) {
+      await writeFile(
+        path,
+        JSON.stringify({
+          schema_version: 1,
+          source: { dataset: "alice/xtap-pool-data", revision, objects: 3 },
+          target: {
+            bucket: "alice/xtap-pool-data",
+            snapshot_revision: "a".repeat(64),
+            objects: 4,
+          },
+          reconciliation: { passed: true },
+          ...invalid,
+        }),
+      );
+      await expect(
+        assertCutoverReport(path, "alice/xtap-pool-data", "alice/xtap-pool-data", () =>
+          Promise.resolve(revision),
+        ),
+      ).rejects.toThrow("does not prove");
+    }
+    await writeFile(
+      path,
+      JSON.stringify({
+        schema_version: 1,
+        source: { dataset: "alice/xtap-pool-data", revision, objects: 3 },
+        target: { bucket: "alice/xtap-pool-data", snapshot_revision: "a".repeat(64), objects: 4 },
+        reconciliation: { passed: true },
+      }),
+    );
     await expect(
       assertCutoverReport(path, "alice/xtap-pool-data", "alice/xtap-pool-data", () =>
         Promise.resolve("c".repeat(40)),
