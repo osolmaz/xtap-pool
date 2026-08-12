@@ -6,24 +6,11 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import Database from "better-sqlite3";
-import {
-  commit,
-  datasetInfo,
-  deleteFiles,
-  downloadFile,
-  listFiles,
-  uploadFile,
-} from "@huggingface/hub";
+import { deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/hub";
 import { z } from "zod";
 
-import {
-  assertDatasetRepoReadable,
-  assertValidDatasetSourceContent,
-  DatasetMirror,
-  datasetSourceKind,
-  isHubNotFound,
-} from "./dataset.js";
-import type { DatasetSourceKind } from "./dataset.js";
+import { BucketLog } from "./bucket-log.js";
+import type { BucketSnapshot, BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
 
@@ -31,10 +18,8 @@ const INDEX_SCHEMA_VERSION = 1;
 const CURRENT_MANIFEST_KEY = "index/current.json";
 const DATABASE_PREFIX = "index/databases";
 const RETAINED_PREDECESSORS = 3;
-const MAX_PUBLICATION_ATTEMPTS = 5;
-const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const REVISION_PATTERN = /^[a-f0-9]{7,64}$/;
-const DATABASE_KEY_PATTERN = /^index\/databases\/[a-f0-9]{64}\.sqlite$/;
+const SHA256 = /^[a-f0-9]{64}$/u;
+const DATABASE_KEY = /^index\/databases\/([a-f0-9]{64})\.sqlite$/u;
 
 const indexCountsSchema = z
   .object({
@@ -43,119 +28,51 @@ const indexCountsSchema = z
     enrichments: z.number().int().nonnegative(),
     attempt_events: z.number().int().nonnegative(),
     registry_events: z.number().int().nonnegative(),
+    receipts: z.number().int().nonnegative(),
   })
   .strict();
 
 export const durableIndexManifestSchema = z
   .object({
     schema_version: z.literal(INDEX_SCHEMA_VERSION),
-    dataset: z
-      .object({ repo: z.string().min(1), revision: z.string().regex(REVISION_PATTERN) })
-      .strict(),
-    projection: z.object({ contract_hash: z.string().regex(SHA256_PATTERN) }).strict(),
+    source: z.object({ bucket: z.string().min(3), revision: z.string().regex(SHA256) }).strict(),
+    projection: z.object({ contract_hash: z.string().regex(SHA256) }).strict(),
     database: z
       .object({
-        key: z.string().regex(DATABASE_KEY_PATTERN),
-        sha256: z.string().regex(SHA256_PATTERN),
-        predecessors: z
-          .array(z.string().regex(DATABASE_KEY_PATTERN))
-          .max(RETAINED_PREDECESSORS)
-          .refine((keys) => new Set(keys).size === keys.length, "predecessors must be unique"),
+        key: z.string().regex(DATABASE_KEY),
+        sha256: z.string().regex(SHA256),
+        predecessors: z.array(z.string().regex(DATABASE_KEY)).max(RETAINED_PREDECESSORS),
       })
       .strict(),
     counts: indexCountsSchema,
   })
   .strict()
   .superRefine((manifest, context) => {
-    const expected = `${DATABASE_PREFIX}/${manifest.database.sha256}.sqlite`;
-    if (manifest.database.key !== expected) {
+    if (manifest.database.key !== `${DATABASE_PREFIX}/${manifest.database.sha256}.sqlite`) {
       context.addIssue({
         code: "custom",
         path: ["database", "key"],
-        message: `database key must be ${expected}`,
+        message: "database key must match its checksum",
       });
     }
-    if (manifest.database.predecessors.includes(manifest.database.key)) {
+    const keys = [manifest.database.key, ...manifest.database.predecessors];
+    if (new Set(keys).size !== keys.length) {
       context.addIssue({
         code: "custom",
         path: ["database", "predecessors"],
-        message: "predecessors must not include the active database",
+        message: "database keys must be unique",
       });
     }
   });
 
 export type DurableIndexManifest = z.infer<typeof durableIndexManifestSchema>;
 export type DurableIndexCounts = z.infer<typeof indexCountsSchema>;
-
-export type DatasetSourceFile = {
-  path: string;
-  oid: string;
-  size: number;
-};
-
-export type DatasetSnapshotClient = {
-  currentRevision(): Promise<string>;
-  listJsonlFiles(revision: string): Promise<readonly DatasetSourceFile[]>;
-  downloadFile(path: string, revision: string): Promise<Uint8Array>;
-  readText(path: string, revision: string): Promise<string | undefined>;
-  commitText(path: string, content: string, parentRevision: string): Promise<string>;
-};
-
-export type BucketFile = { path: string; uploadedAt?: string };
-
-export type DurableIndexBucketClient = {
-  download(path: string, destination: string): Promise<boolean>;
-  uploadFile(path: string, source: string): Promise<void>;
-  list(prefix: string): Promise<readonly BucketFile[]>;
-  remove(paths: readonly string[]): Promise<void>;
-};
-
-type SourceFileRow = {
-  path: string;
-  kind: DatasetSourceKind;
-  oid: string;
-  byte_length: number;
-  content_sha256: string;
-  row_count: number;
-};
-
-type IndexMetadataRow = {
-  schema_version: number;
-  dataset_repo: string;
-  dataset_revision: string;
-  contract_hash: string;
-};
-
-type StagedSourceFile = {
-  current: DatasetSourceFile;
-  kind: DatasetSourceKind;
-  fullContent: Uint8Array;
-  fullText: string;
-  suffixText: string;
-  contentSha256: string;
-  previousRows: number;
-};
-
-export type DurableIndexOptions = {
-  datasetRepo: string;
-  indexBucket: string;
-  accessToken: string;
-  databasePath: string;
-  mirror: DatasetMirror;
-  taxonomyVersion: number;
-  contractHash: string;
-  sourceClient?: DatasetSnapshotClient;
-  bucketClient?: DurableIndexBucketClient;
-  predecessorKeys?: readonly string[];
-};
-
 export type IndexAdvance = {
   revision: string;
   filesChanged: number;
   rowsApplied: number;
   counts: DurableIndexCounts;
 };
-
 export type DurableIndexStats = {
   tweetFiles: number;
   tweetRows: number;
@@ -163,20 +80,56 @@ export type DurableIndexStats = {
   enrichmentRows: number;
   attemptEvents: number;
   registryEvents: number;
+  receipts: number;
+};
+export type BucketFile = { path: string; uploadedAt?: string };
+
+export type DurableIndexBucketClient = {
+  download(path: string, destination: string): Promise<boolean>;
+  uploadFile(path: string, source: string): Promise<void>;
+  readText(path: string): Promise<string | undefined>;
+  writeText(path: string, content: string): Promise<void>;
+  list(prefix: string): Promise<readonly BucketFile[]>;
+  remove(paths: readonly string[]): Promise<void>;
 };
 
-/**
- * Restored local SQLite projection backed by an immutable Bucket generation.
- * The dataset stays authoritative; this class only advances strict append-only
- * JSONL inputs and publishes verified replacement generations.
- */
+export type DurableIndexOptions = {
+  rawBucket: string;
+  indexBucket: string;
+  accessToken: string;
+  databasePath: string;
+  log: BucketLog;
+  taxonomyVersion: number;
+  contractHash: string;
+  bucketClient?: DurableIndexBucketClient;
+  predecessorKeys?: readonly string[];
+};
+
+type MetadataRow = {
+  schema_version: number;
+  raw_bucket: string;
+  raw_snapshot_revision: string;
+  contract_hash: string;
+};
+type SegmentRow = {
+  key: string;
+  oid: string;
+  byte_length: number;
+  content_sha256: string;
+  tweet_rows: number;
+  enrichment_rows: number;
+  attempt_rows: number;
+  registry_rows: number;
+  receipt_rows: number;
+};
+
+/** Verified SQLite projection of one exact immutable raw Bucket snapshot. */
 export class DurableIndex {
   readonly store: TweetStore;
   readonly enrichStore: EnrichStore;
 
-  private constructor(
+  constructor(
     private readonly options: DurableIndexOptions,
-    private readonly source: DatasetSnapshotClient,
     private readonly bucket: DurableIndexBucketClient,
     store: TweetStore,
     enrichStore: EnrichStore,
@@ -187,16 +140,12 @@ export class DurableIndex {
   }
 
   static async restore(options: DurableIndexOptions): Promise<DurableIndex> {
-    const source =
-      options.sourceClient ?? createDatasetSnapshotClient(options.datasetRepo, options.accessToken);
     const bucket =
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
-    const manifestRevision = await source.currentRevision();
-    const rawManifest = await source.readText(CURRENT_MANIFEST_KEY, manifestRevision);
-    if (rawManifest === undefined) {
-      throw new Error("durable index manifest is missing; run the index bootstrap command");
-    }
+    const rawManifest = await bucket.readText(CURRENT_MANIFEST_KEY);
+    if (rawManifest === undefined)
+      throw new Error("durable index manifest is missing; run index bootstrap");
     const manifest = parseManifest(rawManifest, options);
     await mkdir(dirname(options.databasePath), { recursive: true });
     const staged = `${options.databasePath}.${randomUUID()}.download`;
@@ -205,163 +154,183 @@ export class DurableIndex {
         throw new Error(`durable index database is missing: ${manifest.database.key}`);
       }
       await assertFileSha256(staged, manifest.database.sha256);
+      validateStandaloneDatabase(staged, manifest, options);
       await removeDatabaseFiles(options.databasePath);
       await rename(staged, options.databasePath);
     } finally {
       await rm(staged, { force: true });
     }
-    const store = new TweetStore(options.databasePath);
-    const enrichStore = new EnrichStore(
-      store.database,
-      options.taxonomyVersion,
-      (): Date => new Date(),
-      options.contractHash,
-    );
-    ensureIndexTables(store.database);
-    validateDatabase(store.database, manifest, options);
-    const index = new DurableIndex(options, source, bucket, store, enrichStore, [
-      manifest.database.key,
-      ...manifest.database.predecessors,
-    ]);
-    await index.loadLatestReceipt(manifest.dataset.revision);
-    return index;
-  }
-
-  static openLocal(options: DurableIndexOptions): DurableIndex {
-    if (!existsSync(options.databasePath)) {
-      throw new Error(`durable index working database is missing: ${options.databasePath}`);
-    }
-    const source =
-      options.sourceClient ?? createDatasetSnapshotClient(options.datasetRepo, options.accessToken);
-    const bucket =
-      options.bucketClient ??
-      createDurableIndexBucketClient(options.indexBucket, options.accessToken);
-    const store = new TweetStore(options.databasePath);
-    const enrichStore = new EnrichStore(
-      store.database,
-      options.taxonomyVersion,
-      (): Date => new Date(),
-      options.contractHash,
-    );
-    ensureIndexTables(store.database);
-    assertDatabaseIntegrity(store.database);
-    const metadata = readMetadata(store.database);
-    if (
-      metadata?.schema_version !== INDEX_SCHEMA_VERSION ||
-      metadata.dataset_repo !== options.datasetRepo ||
-      metadata.contract_hash !== options.contractHash
-    ) {
-      store.close();
-      throw new Error("durable index working database provenance mismatch");
-    }
-    return new DurableIndex(
-      options,
-      source,
-      bucket,
-      store,
-      enrichStore,
-      configuredPredecessors(options),
-    );
+    const snapshot = await options.log.loadSnapshot(manifest.source.revision);
+    await options.log.hydrateMetadata(snapshot);
+    return open(options, bucket, [manifest.database.key, ...manifest.database.predecessors]);
   }
 
   static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
-    const source =
-      options.sourceClient ?? createDatasetSnapshotClient(options.datasetRepo, options.accessToken);
     const bucket =
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
     await mkdir(dirname(options.databasePath), { recursive: true });
     await removeDatabaseFiles(options.databasePath);
-    const store = new TweetStore(options.databasePath);
-    const enrichStore = new EnrichStore(
-      store.database,
-      options.taxonomyVersion,
-      (): Date => new Date(),
-      options.contractHash,
-    );
-    ensureIndexTables(store.database);
-    const index = new DurableIndex(options, source, bucket, store, enrichStore, []);
+    const index = open(options, bucket, []);
     await index.advanceToLatest();
     return index;
   }
 
+  static openLocal(options: DurableIndexOptions): DurableIndex {
+    if (!existsSync(options.databasePath))
+      throw new Error(`durable index working database is missing: ${options.databasePath}`);
+    const bucket =
+      options.bucketClient ??
+      createDurableIndexBucketClient(options.indexBucket, options.accessToken);
+    const index = open(options, bucket, [...(options.predecessorKeys ?? [])]);
+    const metadata = readMetadata(index.store.database);
+    if (
+      metadata === undefined ||
+      metadata.schema_version !== INDEX_SCHEMA_VERSION ||
+      metadata.raw_bucket !== options.rawBucket ||
+      metadata.contract_hash !== options.contractHash
+    ) {
+      index.close();
+      throw new Error("durable index working database provenance mismatch");
+    }
+    assertDatabaseIntegrity(index.store.database);
+    return index;
+  }
+
   async advanceToLatest(): Promise<IndexAdvance> {
-    return this.advanceToRevision(await this.source.currentRevision());
+    const { revision } = await this.options.log.createSnapshot();
+    return this.advanceToRevision(revision);
   }
 
   async advanceToRevision(revision: string): Promise<IndexAdvance> {
-    if (!REVISION_PATTERN.test(revision)) throw new Error(`invalid dataset revision: ${revision}`);
-    const currentFiles = [...(await this.source.listJsonlFiles(revision))].sort((a, b) =>
-      sourceOrder(a.path, b.path),
-    );
-    const previous = sourceFileRows(this.store.database);
-    const currentPaths = new Set(currentFiles.map((file) => file.path));
-    const deleted = [...previous.keys()].filter((path) => !currentPaths.has(path));
-    if (deleted.length > 0) {
-      throw new Error(`dataset source files were deleted: ${deleted.slice(0, 3).join(", ")}`);
+    const snapshot = await this.options.log.loadSnapshot(revision);
+    const previous = sourceRows(this.store.database);
+    for (const file of snapshot.files) {
+      await this.options.log.loadSegment(file);
     }
-    const staged: StagedSourceFile[] = [];
-    for (const file of currentFiles) {
-      const old = previous.get(file.path);
-      if (old?.oid === file.oid && old.byte_length === file.size) continue;
-      staged.push(await this.stageSourceFile(file, old, revision));
+    const currentKeys = new Set(snapshot.files.map((file) => file.key));
+    const deleted = [...previous.keys()].filter((key) => !currentKeys.has(key));
+    if (deleted.length > 0)
+      throw new Error(`raw Bucket source segments were deleted: ${deleted.slice(0, 3).join(", ")}`);
+
+    const staged: {
+      file: BucketSnapshotFile;
+      segment: Awaited<ReturnType<BucketLog["loadSegment"]>>;
+    }[] = [];
+    for (const file of snapshot.files) {
+      const old = previous.get(file.key);
+      if (old !== undefined) {
+        if (
+          old.oid !== file.oid ||
+          old.byte_length !== file.size ||
+          old.content_sha256 !== file.content_sha256
+        ) {
+          throw new Error(`raw Bucket source segment changed: ${file.key}`);
+        }
+        continue;
+      }
+      staged.push({ file, segment: await this.options.log.loadSegment(file) });
     }
 
     let rowsApplied = 0;
     const apply = this.store.database.transaction(() => {
-      for (const file of staged) {
-        const applied = this.options.mirror.applySourceContent(
-          file.current.path,
-          file.suffixText,
-          this.store,
-          this.enrichStore,
-        );
-        if (applied.kind !== file.kind)
-          throw new Error(`source kind changed: ${file.current.path}`);
-        rowsApplied += applied.rows;
-        upsertSourceFile(this.store.database, {
-          path: file.current.path,
-          kind: file.kind,
-          oid: file.current.oid,
-          byte_length: file.fullContent.byteLength,
-          content_sha256: file.contentSha256,
-          row_count: file.previousRows + applied.rows,
-        });
+      for (const item of staged) {
+        const counts = this.options.log.applySegment(item.segment, this.store, this.enrichStore);
+        rowsApplied += totalSourceRows(counts);
+        insertSourceRow(this.store.database, item.file, counts);
       }
       writeMetadata(this.store.database, {
         schema_version: INDEX_SCHEMA_VERSION,
-        dataset_repo: this.options.datasetRepo,
-        dataset_revision: revision,
+        raw_bucket: this.options.rawBucket,
+        raw_snapshot_revision: revision,
         contract_hash: this.options.contractHash,
       });
     });
     apply();
-    for (const file of staged) {
-      this.options.mirror.rememberSourceFile(file.current.path, file.fullText);
-    }
-    await this.loadLatestReceipt(revision, currentFiles);
-    const counts = databaseCounts(this.store.database);
     assertDatabaseIntegrity(this.store.database);
-    return { revision, filesChanged: staged.length, rowsApplied, counts };
+    return {
+      revision,
+      filesChanged: staged.length,
+      rowsApplied,
+      counts: databaseCounts(this.store.database),
+    };
+  }
+
+  async publishLatest(): Promise<{ advance: IndexAdvance; manifest: DurableIndexManifest }> {
+    const advance = await this.advanceToLatest();
+    return { advance, manifest: await this.publish() };
+  }
+
+  async publish(): Promise<DurableIndexManifest> {
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new Error("durable index metadata is missing");
+    assertDatabaseIntegrity(this.store.database);
+    const counts = databaseCounts(this.store.database);
+    const publishPath = `${this.options.databasePath}.${randomUUID()}.publish`;
+    const verifyPath = `${this.options.databasePath}.${randomUUID()}.verify`;
+    try {
+      await this.store.database.backup(publishPath);
+      const sha = await fileSha256(publishPath);
+      const key = `${DATABASE_PREFIX}/${sha}.sqlite`;
+      const predecessors = this.publishedKeys
+        .filter((value) => value !== key)
+        .slice(0, RETAINED_PREDECESSORS);
+      const manifest: DurableIndexManifest = {
+        schema_version: 1,
+        source: { bucket: metadata.raw_bucket, revision: metadata.raw_snapshot_revision },
+        projection: { contract_hash: metadata.contract_hash },
+        database: { key, sha256: sha, predecessors },
+        counts,
+      };
+      validateStandaloneDatabase(publishPath, manifest, this.options);
+      await this.bucket.uploadFile(key, publishPath);
+      if (!(await this.bucket.download(key, verifyPath)))
+        throw new Error(`uploaded durable index database is unavailable: ${key}`);
+      await assertFileSha256(verifyPath, sha);
+      validateStandaloneDatabase(verifyPath, manifest, this.options);
+      const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
+      await this.bucket.writeText(CURRENT_MANIFEST_KEY, encoded);
+      const stored = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+      if (
+        stored === undefined ||
+        JSON.stringify(parseManifest(stored, this.options)) !== JSON.stringify(manifest)
+      ) {
+        throw new Error("durable index manifest read-back did not match the published generation");
+      }
+      this.publishedKeys = [key, ...predecessors];
+      await this.pruneDatabases(this.publishedKeys);
+      return manifest;
+    } finally {
+      await Promise.all([rm(publishPath, { force: true }), rm(verifyPath, { force: true })]);
+    }
   }
 
   stats(): DurableIndexStats {
-    const rows = this.store.database
-      .prepare(
-        `SELECT kind, COUNT(*) AS files, COALESCE(SUM(row_count), 0) AS rows
-         FROM source_files GROUP BY kind`,
-      )
-      .all() as { kind: DatasetSourceKind; files: number; rows: number }[];
-    const byKind = new Map(rows.map((row) => [row.kind, row]));
-    const tweets = sourceKindStats(byKind, "tweet");
-    const enrichments = sourceKindStats(byKind, "enrichment");
+    const count = (
+      column: keyof Pick<
+        SegmentRow,
+        "tweet_rows" | "enrichment_rows" | "attempt_rows" | "registry_rows" | "receipt_rows"
+      >,
+    ): number =>
+      (
+        this.store.database
+          .prepare(`SELECT COALESCE(SUM(${column}), 0) AS n FROM source_segments`)
+          .get() as { n: number }
+      ).n;
+    const files = (column: "tweet_rows" | "enrichment_rows"): number =>
+      (
+        this.store.database
+          .prepare(`SELECT COUNT(*) AS n FROM source_segments WHERE ${column} > 0`)
+          .get() as { n: number }
+      ).n;
     return {
-      tweetFiles: tweets.files,
-      tweetRows: tweets.rows,
-      enrichmentFiles: enrichments.files,
-      enrichmentRows: enrichments.rows,
-      attemptEvents: sourceKindStats(byKind, "attempt").rows,
-      registryEvents: sourceKindStats(byKind, "registry").rows,
+      tweetFiles: files("tweet_rows"),
+      tweetRows: count("tweet_rows"),
+      enrichmentFiles: files("enrichment_rows"),
+      enrichmentRows: count("enrichment_rows"),
+      attemptEvents: count("attempt_rows"),
+      registryEvents: count("registry_rows"),
+      receipts: count("receipt_rows"),
     };
   }
 
@@ -374,266 +343,17 @@ export class DurableIndex {
     await this.store.database.backup(path);
   }
 
-  async publishLatest(): Promise<{
-    advance: IndexAdvance;
-    manifest: DurableIndexManifest;
-  }> {
-    for (let attempt = 1; attempt <= MAX_PUBLICATION_ATTEMPTS; attempt += 1) {
-      const advance = await this.advanceToLatest();
-      try {
-        return { advance, manifest: await this.publish() };
-      } catch (error) {
-        if (attempt === MAX_PUBLICATION_ATTEMPTS || !isConcurrentDatasetUpdate(error)) throw error;
-      }
-    }
-    throw new Error("durable index publication retry invariant failed");
-  }
-
-  async publish(): Promise<DurableIndexManifest> {
-    const metadata = readMetadata(this.store.database);
-    if (metadata === undefined) throw new Error("durable index metadata is missing");
-    assertDatabaseIntegrity(this.store.database);
-    const counts = databaseCounts(this.store.database);
-    const publicationPath = `${this.options.databasePath}.${randomUUID()}.publish`;
-    const verificationPath = `${this.options.databasePath}.${randomUUID()}.verify`;
-    try {
-      await this.store.database.backup(publicationPath);
-      validateStandaloneDatabase(publicationPath, metadata, counts);
-      const sha256 = await fileSha256(publicationPath);
-      const key = `${DATABASE_PREFIX}/${sha256}.sqlite`;
-      await this.bucket.uploadFile(key, publicationPath);
-      if (!(await this.bucket.download(key, verificationPath))) {
-        throw new Error(`uploaded durable index database is unavailable: ${key}`);
-      }
-      await assertFileSha256(verificationPath, sha256);
-      validateStandaloneDatabase(verificationPath, metadata, counts);
-      const predecessors = this.publishedKeys
-        .filter((publishedKey) => publishedKey !== key)
-        .slice(0, RETAINED_PREDECESSORS);
-      const manifest: DurableIndexManifest = {
-        schema_version: INDEX_SCHEMA_VERSION,
-        dataset: { repo: metadata.dataset_repo, revision: metadata.dataset_revision },
-        projection: { contract_hash: metadata.contract_hash },
-        database: { key, sha256, predecessors },
-        counts,
-      };
-      const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
-      const manifestRevision = await this.source.commitText(
-        CURRENT_MANIFEST_KEY,
-        encoded,
-        metadata.dataset_revision,
-      );
-      const active = await this.source.readText(CURRENT_MANIFEST_KEY, manifestRevision);
-      if (
-        active === undefined ||
-        JSON.stringify(parseManifest(active, this.options)) !== JSON.stringify(manifest)
-      ) {
-        throw new Error("durable index manifest read-back did not match the published generation");
-      }
-      this.publishedKeys = [key, ...predecessors];
-      await this.pruneDatabases(this.publishedKeys);
-      return manifest;
-    } finally {
-      await Promise.all([
-        rm(publicationPath, { force: true }),
-        rm(verificationPath, { force: true }),
-      ]);
-    }
-  }
-
   close(): void {
     this.store.close();
   }
 
-  private async stageSourceFile(
-    current: DatasetSourceFile,
-    previous: SourceFileRow | undefined,
-    revision: string,
-  ): Promise<StagedSourceFile> {
-    const kind = datasetSourceKind(current.path);
-    assertSourceKind(current.path, kind, previous);
-    const content = await this.source.downloadFile(current.path, revision);
-    assertCompletePinnedSource(current, content);
-    const suffix = sourceSuffix(current.path, content, previous);
-    const decoder = new TextDecoder("utf-8", { fatal: true });
-    const fullText = decoder.decode(content);
-    const suffixText = decoder.decode(suffix);
-    assertValidDatasetSourceContent(current.path, suffixText);
-    return {
-      current,
-      kind,
-      fullContent: content,
-      fullText,
-      suffixText,
-      contentSha256: sha256Bytes(content),
-      previousRows: previous?.row_count ?? 0,
-    };
-  }
-
-  private async loadLatestReceipt(
-    revision: string,
-    knownFiles?: readonly DatasetSourceFile[],
-  ): Promise<void> {
-    const files = knownFiles ?? (await this.source.listJsonlFiles(revision));
-    const latest = files
-      .filter((file) => datasetSourceKind(file.path) === "receipt")
-      .sort((a, b) => a.path.localeCompare(b.path))
-      .at(-1);
-    if (latest === undefined) return;
-    const content = await this.source.downloadFile(latest.path, revision);
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
-    this.options.mirror.applySourceContent(latest.path, text, this.store, this.enrichStore);
-    this.options.mirror.rememberSourceFile(latest.path, text);
-  }
-
-  private async pruneDatabases(retainedKeys: readonly string[]): Promise<void> {
-    const files = [...(await this.bucket.list(DATABASE_PREFIX))].filter((file) =>
-      file.path.endsWith(".sqlite"),
+  private async pruneDatabases(retained: readonly string[]): Promise<void> {
+    const keep = new Set(retained);
+    const files = await this.bucket.list(DATABASE_PREFIX);
+    await this.bucket.remove(
+      files.map((file) => file.path).filter((path) => DATABASE_KEY.test(path) && !keep.has(path)),
     );
-    const keep = new Set(retainedKeys);
-    const stale = files.map((file) => file.path).filter((path) => !keep.has(path));
-    if (stale.length > 0) await this.bucket.remove(stale);
   }
-}
-
-function configuredPredecessors(options: DurableIndexOptions): string[] {
-  return Array.from(options.predecessorKeys ?? []);
-}
-
-async function removeDatabaseFiles(path: string): Promise<void> {
-  await Promise.all([
-    rm(path, { force: true }),
-    rm(`${path}-wal`, { force: true }),
-    rm(`${path}-shm`, { force: true }),
-  ]);
-}
-
-function isConcurrentDatasetUpdate(error: unknown): boolean {
-  const statusCode =
-    typeof error === "object" && error !== null && "statusCode" in error
-      ? (error as { statusCode?: unknown }).statusCode
-      : undefined;
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  return (
-    statusCode === 409 ||
-    message.includes("branch was updated") ||
-    message.includes("parent commit does not match")
-  );
-}
-
-function assertSourceKind(
-  path: string,
-  kind: DatasetSourceKind,
-  previous: SourceFileRow | undefined,
-): void {
-  if (previous !== undefined && previous.kind !== kind) {
-    throw new Error(`dataset source kind changed: ${path}`);
-  }
-}
-
-function assertCompletePinnedSource(current: DatasetSourceFile, content: Uint8Array): void {
-  if (content.byteLength !== current.size) {
-    throw new Error(`dataset source size changed while pinned: ${current.path}`);
-  }
-  if (content.byteLength > 0 && content.at(-1) !== 0x0a) {
-    throw new Error(`dataset source does not end with a complete JSONL line: ${current.path}`);
-  }
-}
-
-function sourceSuffix(
-  path: string,
-  content: Uint8Array,
-  previous: SourceFileRow | undefined,
-): Uint8Array {
-  if (previous === undefined) return content;
-  if (content.byteLength < previous.byte_length) {
-    throw new Error(`dataset source was truncated: ${path}`);
-  }
-  const prefix = content.subarray(0, previous.byte_length);
-  if (sha256Bytes(prefix) !== previous.content_sha256) {
-    throw new Error(`dataset source prefix changed: ${path}`);
-  }
-  return content.subarray(previous.byte_length);
-}
-
-export function createDatasetSnapshotClient(
-  datasetRepo: string,
-  accessToken: string,
-): DatasetSnapshotClient {
-  const repo = { type: "dataset", name: datasetRepo } as const;
-  return {
-    async currentRevision(): Promise<string> {
-      const info = await datasetInfo({
-        name: datasetRepo,
-        accessToken,
-        additionalFields: ["sha"],
-      });
-      if (typeof info.sha !== "string" || !REVISION_PATTERN.test(info.sha)) {
-        throw new Error(`dataset ${datasetRepo} did not return a valid revision`);
-      }
-      return info.sha;
-    },
-    async listJsonlFiles(revision: string): Promise<readonly DatasetSourceFile[]> {
-      const groups = await Promise.all(
-        ["data", "enrichment"].map((prefix) =>
-          listDatasetPrefix(repo, accessToken, revision, prefix),
-        ),
-      );
-      return groups.flat();
-    },
-    async downloadFile(path: string, revision: string): Promise<Uint8Array> {
-      const blob = await downloadFile({ repo, accessToken, path, revision });
-      if (blob === null) throw new Error(`dataset source is missing: ${path}`);
-      return new Uint8Array(await blob.arrayBuffer());
-    },
-    async readText(path: string, revision: string): Promise<string | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path, revision });
-      return blob === null ? undefined : blob.text();
-    },
-    async commitText(path: string, content: string, parentRevision: string): Promise<string> {
-      const result = await commit({
-        repo,
-        accessToken,
-        parentCommit: parentRevision,
-        title: "Publish durable enrichment index manifest",
-        operations: [{ operation: "addOrUpdate", path, content: new Blob([content]) }],
-      });
-      if (result === undefined || !REVISION_PATTERN.test(result.commit.oid)) {
-        throw new Error("dataset did not confirm the durable index manifest commit");
-      }
-      return result.commit.oid;
-    },
-  };
-}
-
-// eslint-disable-next-line complexity -- Hub entries require type, path, and immutable-object validation.
-async function listDatasetPrefix(
-  repo: { type: "dataset"; name: string },
-  accessToken: string,
-  revision: string,
-  prefix: string,
-): Promise<DatasetSourceFile[]> {
-  const files: DatasetSourceFile[] = [];
-  try {
-    for await (const entry of listFiles({
-      repo,
-      accessToken,
-      recursive: true,
-      path: prefix,
-      revision,
-    })) {
-      if (entry.type !== "file" || !entry.path.endsWith(".jsonl")) continue;
-      const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
-      if (oid === undefined || oid.length === 0) {
-        throw new Error(`dataset source has no immutable object id: ${entry.path}`);
-      }
-      files.push({ path: entry.path, oid, size: entry.size });
-    }
-  } catch (error) {
-    if (!isHubNotFound(error)) throw error;
-    await assertDatasetRepoReadable(repo, accessToken, revision);
-  }
-  return files;
 }
 
 export function createDurableIndexBucketClient(
@@ -642,14 +362,14 @@ export function createDurableIndexBucketClient(
 ): DurableIndexBucketClient {
   const repo = { type: "bucket", name: indexBucket } as const;
   return {
-    async download(path: string, destination: string): Promise<boolean> {
+    async download(path, destination): Promise<boolean> {
       const blob = await downloadFile({ repo, accessToken, path });
       if (blob === null) return false;
       await mkdir(dirname(destination), { recursive: true });
       await pipeline(Readable.fromWeb(blob.stream()), createWriteStream(destination));
       return true;
     },
-    async uploadFile(path: string, source: string): Promise<void> {
+    async uploadFile(path, source): Promise<void> {
       await uploadFile({
         repo,
         accessToken,
@@ -657,7 +377,19 @@ export function createDurableIndexBucketClient(
         commitTitle: `Publish ${path}`,
       });
     },
-    async list(prefix: string): Promise<readonly BucketFile[]> {
+    async readText(path): Promise<string | undefined> {
+      const blob = await downloadFile({ repo, accessToken, path });
+      return blob === null ? undefined : blob.text();
+    },
+    async writeText(path, content): Promise<void> {
+      await uploadFile({
+        repo,
+        accessToken,
+        file: { path, content: new Blob([content]) },
+        commitTitle: `Publish ${path}`,
+      });
+    },
+    async list(prefix): Promise<readonly BucketFile[]> {
       const files: BucketFile[] = [];
       for await (const entry of listFiles({
         repo,
@@ -666,16 +398,15 @@ export function createDurableIndexBucketClient(
         path: prefix,
         expand: true,
       })) {
-        if (entry.type === "file") {
+        if (entry.type === "file")
           files.push({
             path: entry.path,
             ...(entry.uploadedAt === undefined ? {} : { uploadedAt: entry.uploadedAt }),
           });
-        }
       }
       return files;
     },
-    async remove(paths: readonly string[]): Promise<void> {
+    async remove(paths): Promise<void> {
       if (paths.length === 0) return;
       await deleteFiles({
         repo,
@@ -687,9 +418,25 @@ export function createDurableIndexBucketClient(
   };
 }
 
+function open(
+  options: DurableIndexOptions,
+  bucket: DurableIndexBucketClient,
+  keys: string[],
+): DurableIndex {
+  const store = new TweetStore(options.databasePath);
+  const enrichStore = new EnrichStore(
+    store.database,
+    options.taxonomyVersion,
+    () => new Date(),
+    options.contractHash,
+  );
+  ensureIndexTables(store.database);
+  return new DurableIndex(options, bucket, store, enrichStore, keys);
+}
+
 function parseManifest(
   raw: string,
-  options: Pick<DurableIndexOptions, "datasetRepo" | "contractHash">,
+  options: Pick<DurableIndexOptions, "rawBucket" | "contractHash">,
 ): DurableIndexManifest {
   let candidate: unknown;
   try {
@@ -698,12 +445,10 @@ function parseManifest(
     throw new Error("durable index manifest is not valid JSON");
   }
   const manifest = durableIndexManifestSchema.parse(candidate);
-  if (manifest.dataset.repo !== options.datasetRepo) {
-    throw new Error(`durable index dataset mismatch: ${manifest.dataset.repo}`);
-  }
-  if (manifest.projection.contract_hash !== options.contractHash) {
+  if (manifest.source.bucket !== options.rawBucket)
+    throw new Error(`durable index raw Bucket mismatch: ${manifest.source.bucket}`);
+  if (manifest.projection.contract_hash !== options.contractHash)
     throw new Error("durable index enrichment contract does not match the running code");
-  }
   return manifest;
 }
 
@@ -712,136 +457,114 @@ function ensureIndexTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS index_metadata (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       schema_version INTEGER NOT NULL,
-      dataset_repo TEXT NOT NULL,
-      dataset_revision TEXT NOT NULL,
+      raw_bucket TEXT NOT NULL,
+      raw_snapshot_revision TEXT NOT NULL,
       contract_hash TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS source_files (
-      path TEXT PRIMARY KEY,
-      kind TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS source_segments (
+      key TEXT PRIMARY KEY,
       oid TEXT NOT NULL,
       byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
       content_sha256 TEXT NOT NULL,
-      row_count INTEGER NOT NULL CHECK (row_count >= 0)
+      tweet_rows INTEGER NOT NULL CHECK (tweet_rows >= 0),
+      enrichment_rows INTEGER NOT NULL CHECK (enrichment_rows >= 0),
+      attempt_rows INTEGER NOT NULL CHECK (attempt_rows >= 0),
+      registry_rows INTEGER NOT NULL CHECK (registry_rows >= 0),
+      receipt_rows INTEGER NOT NULL CHECK (receipt_rows >= 0)
     );
   `);
 }
 
-function sourceFileRows(db: Database.Database): Map<string, SourceFileRow> {
-  const rows = db
-    .prepare(
-      `SELECT path, kind, oid, byte_length, content_sha256, row_count
-       FROM source_files ORDER BY path`,
-    )
-    .all() as SourceFileRow[];
-  return new Map(rows.map((row) => [row.path, row]));
+function sourceRows(db: Database.Database): Map<string, SegmentRow> {
+  const rows = db.prepare("SELECT * FROM source_segments").all() as SegmentRow[];
+  return new Map(rows.map((row) => [row.key, row]));
 }
 
-function upsertSourceFile(db: Database.Database, row: SourceFileRow): void {
+function insertSourceRow(
+  db: Database.Database,
+  file: BucketSnapshotFile,
+  counts: SourceCounts,
+): void {
   db.prepare(
-    `INSERT INTO source_files
-       (path, kind, oid, byte_length, content_sha256, row_count)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(path) DO UPDATE SET
-       kind = excluded.kind,
-       oid = excluded.oid,
-       byte_length = excluded.byte_length,
-       content_sha256 = excluded.content_sha256,
-       row_count = excluded.row_count`,
-  ).run(row.path, row.kind, row.oid, row.byte_length, row.content_sha256, row.row_count);
+    `INSERT INTO source_segments
+    (key, oid, byte_length, content_sha256, tweet_rows, enrichment_rows, attempt_rows, registry_rows, receipt_rows)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    file.key,
+    file.oid,
+    file.size,
+    file.content_sha256,
+    counts.tweet,
+    counts.enrichment,
+    counts.attempt,
+    counts.registry,
+    counts.receipt,
+  );
 }
 
-function writeMetadata(db: Database.Database, metadata: IndexMetadataRow): void {
+function writeMetadata(db: Database.Database, metadata: MetadataRow): void {
   db.prepare(
     `INSERT INTO index_metadata
-       (singleton, schema_version, dataset_repo, dataset_revision, contract_hash)
-     VALUES (1, ?, ?, ?, ?)
-     ON CONFLICT(singleton) DO UPDATE SET
-       schema_version = excluded.schema_version,
-       dataset_repo = excluded.dataset_repo,
-       dataset_revision = excluded.dataset_revision,
-       contract_hash = excluded.contract_hash`,
+    (singleton, schema_version, raw_bucket, raw_snapshot_revision, contract_hash)
+    VALUES (1, ?, ?, ?, ?)
+    ON CONFLICT(singleton) DO UPDATE SET schema_version=excluded.schema_version,
+      raw_bucket=excluded.raw_bucket, raw_snapshot_revision=excluded.raw_snapshot_revision,
+      contract_hash=excluded.contract_hash`,
   ).run(
     metadata.schema_version,
-    metadata.dataset_repo,
-    metadata.dataset_revision,
+    metadata.raw_bucket,
+    metadata.raw_snapshot_revision,
     metadata.contract_hash,
   );
 }
 
-function readMetadata(db: Database.Database): IndexMetadataRow | undefined {
+function readMetadata(db: Database.Database): MetadataRow | undefined {
   return db
     .prepare(
-      `SELECT schema_version, dataset_repo, dataset_revision, contract_hash
-       FROM index_metadata WHERE singleton = 1`,
+      "SELECT schema_version, raw_bucket, raw_snapshot_revision, contract_hash FROM index_metadata WHERE singleton = 1",
     )
-    .get() as IndexMetadataRow | undefined;
-}
-
-function sourceKindStats(
-  byKind: ReadonlyMap<DatasetSourceKind, { files: number; rows: number }>,
-  kind: DatasetSourceKind,
-): { files: number; rows: number } {
-  return byKind.get(kind) ?? { files: 0, rows: 0 };
+    .get() as MetadataRow | undefined;
 }
 
 function databaseCounts(db: Database.Database): DurableIndexCounts {
-  const count = (table: string): number =>
-    (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
-  const eventCount = (kind: DatasetSourceKind): number =>
+  const table = (name: string): number =>
+    (db.prepare(`SELECT COUNT(*) AS n FROM ${name}`).get() as { n: number }).n;
+  const source = (column: string): number =>
     (
-      db
-        .prepare("SELECT COALESCE(SUM(row_count), 0) AS n FROM source_files WHERE kind = ?")
-        .get(kind) as {
+      db.prepare(`SELECT COALESCE(SUM(${column}), 0) AS n FROM source_segments`).get() as {
         n: number;
       }
     ).n;
   return {
-    tweets: count("tweets"),
-    units: count("enrich_queue"),
-    enrichments: count("enrichment"),
-    attempt_events: eventCount("attempt"),
-    registry_events: eventCount("registry"),
+    tweets: table("tweets"),
+    units: table("enrich_queue"),
+    enrichments: table("enrichment"),
+    attempt_events: source("attempt_rows"),
+    registry_events: source("registry_rows"),
+    receipts: source("receipt_rows"),
   };
-}
-
-function validateDatabase(
-  db: Database.Database,
-  manifest: DurableIndexManifest,
-  options: Pick<DurableIndexOptions, "datasetRepo" | "contractHash">,
-): void {
-  assertDatabaseIntegrity(db);
-  const metadata = readMetadata(db);
-  if (metadata === undefined) throw new Error("durable index metadata is missing");
-  if (metadata.schema_version !== INDEX_SCHEMA_VERSION)
-    throw new Error("durable index schema version mismatch");
-  if (
-    metadata.dataset_repo !== options.datasetRepo ||
-    metadata.dataset_revision !== manifest.dataset.revision
-  ) {
-    throw new Error("durable index dataset provenance mismatch");
-  }
-  if (metadata.contract_hash !== options.contractHash)
-    throw new Error("durable index contract mismatch");
-  if (JSON.stringify(databaseCounts(db)) !== JSON.stringify(manifest.counts)) {
-    throw new Error("durable index physical counts do not match the manifest");
-  }
 }
 
 function validateStandaloneDatabase(
   path: string,
-  metadata: IndexMetadataRow,
-  counts: DurableIndexCounts,
+  manifest: DurableIndexManifest,
+  options: Pick<DurableIndexOptions, "rawBucket" | "contractHash">,
 ): void {
   const db = new Database(path, { readonly: true, fileMustExist: true });
   try {
     db.pragma("query_only = ON");
     assertDatabaseIntegrity(db);
-    if (JSON.stringify(readMetadata(db)) !== JSON.stringify(metadata)) {
-      throw new Error("published durable index metadata does not match");
-    }
-    if (JSON.stringify(databaseCounts(db)) !== JSON.stringify(counts)) {
-      throw new Error("published durable index counts do not match");
+    const metadata = readMetadata(db);
+    if (
+      metadata === undefined ||
+      metadata.schema_version !== 1 ||
+      metadata.raw_bucket !== options.rawBucket ||
+      metadata.raw_snapshot_revision !== manifest.source.revision ||
+      metadata.contract_hash !== options.contractHash
+    )
+      throw new Error("durable index database provenance mismatch");
+    if (JSON.stringify(databaseCounts(db)) !== JSON.stringify(manifest.counts)) {
+      throw new Error("durable index physical counts do not match the manifest");
     }
   } finally {
     db.close();
@@ -849,39 +572,30 @@ function validateStandaloneDatabase(
 }
 
 function assertDatabaseIntegrity(db: Database.Database): void {
-  const rows = db.pragma("quick_check") as { quick_check: string }[];
-  if (rows.length !== 1 || rows[0]?.quick_check !== "ok") {
-    throw new Error("durable index SQLite quick_check failed");
-  }
+  const result = db.pragma("integrity_check") as { integrity_check: string }[];
+  if (result.length !== 1 || result[0]?.integrity_check !== "ok")
+    throw new Error("durable index SQLite integrity check failed");
 }
 
-function sourceOrder(left: string, right: string): number {
-  const priorities: Record<DatasetSourceKind, number> = {
-    tweet: 0,
-    enrichment: 1,
-    registry: 2,
-    attempt: 3,
-    receipt: 4,
-  };
-  const difference = priorities[datasetSourceKind(left)] - priorities[datasetSourceKind(right)];
-  return difference === 0 ? left.localeCompare(right) : difference;
+function totalSourceRows(counts: SourceCounts): number {
+  return counts.tweet + counts.enrichment + counts.attempt + counts.registry + counts.receipt;
+}
+
+async function removeDatabaseFiles(path: string): Promise<void> {
+  await Promise.all([
+    rm(path, { force: true }),
+    rm(`${path}-wal`, { force: true }),
+    rm(`${path}-shm`, { force: true }),
+  ]);
 }
 
 async function fileSha256(path: string): Promise<string> {
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(path)) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-    hash.update(bytes);
-  }
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
   return hash.digest("hex");
 }
 
 async function assertFileSha256(path: string, expected: string): Promise<void> {
-  if ((await fileSha256(path)) !== expected) {
-    throw new Error("durable index database checksum mismatch");
-  }
-}
-
-function sha256Bytes(content: Uint8Array): string {
-  return createHash("sha256").update(content).digest("hex");
+  if ((await fileSha256(path)) !== expected)
+    throw new Error(`durable index database checksum mismatch: ${path}`);
 }

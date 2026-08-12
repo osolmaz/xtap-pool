@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { DatasetMirror } from "./dataset.js";
+import type { StorageLog } from "./bucket-log.js";
 
 export const POOL_CONFIG_PATH = "config/pool.json";
 
@@ -39,12 +39,12 @@ export type PoolAccessGrant =
 
 export type PoolSnapshot = PoolConfig & {
   bootstrap_admins: readonly string[];
-  source: "dataset" | "bootstrap";
+  source: "bucket" | "bootstrap";
   config_error?: string;
 };
 
 type PoolMembershipOptions = {
-  mirror: DatasetMirror;
+  log: StorageLog;
   bootstrapMembers: readonly string[];
   bootstrapAdmins: readonly string[];
   now: () => Date;
@@ -311,13 +311,13 @@ export class PoolMembership {
       updated_at: this.options.now().toISOString(),
       updated_by: normalizeUsername(actor),
     });
-    await this.options.mirror.writeTextAndCommit(
+    await this.options.log.writeText(
       POOL_CONFIG_PATH,
       `${JSON.stringify(committedConfig, null, 2)}\n`,
       title,
     );
     this.config = committedConfig;
-    this.source = "dataset";
+    this.source = "bucket";
     this.configError = undefined;
     this.configErrorRetryable = false;
   }
@@ -385,7 +385,7 @@ async function loadConfigFromMirror(options: PoolMembershipOptions): Promise<Loa
   const fallback = bootstrapConfig(options);
   let raw: string | undefined;
   try {
-    raw = await options.mirror.readText(POOL_CONFIG_PATH);
+    raw = await options.log.readText(POOL_CONFIG_PATH);
   } catch (error) {
     return {
       config: fallback,
@@ -398,7 +398,7 @@ async function loadConfigFromMirror(options: PoolMembershipOptions): Promise<Loa
   try {
     return {
       config: normalizeConfig(poolConfigSchema.parse(JSON.parse(raw))),
-      source: "dataset",
+      source: "bucket",
       retryable: false,
     };
   } catch (error) {

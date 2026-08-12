@@ -43,7 +43,7 @@ export type EnrichDeps = {
 
 export type AppReadiness = {
   ok: boolean;
-  dataset: {
+  storage: {
     indexed_files: number;
     indexed_tweets: number;
     enrichment_rows: number;

@@ -4,7 +4,7 @@ import { z } from "zod";
 const configSchema = z.object({
   PORT: z.coerce.number().int().positive().default(7860),
   DATA_DIR: z.string().default(".data"),
-  DATASET_REPO: z.string().min(1),
+  RAW_BUCKET: z.string().min(1),
   INDEX_BUCKET: z.string().min(1),
   HF_TOKEN: z.string().min(1),
   INFERENCE_TOKEN: z.string().min(1).optional(),
@@ -35,7 +35,7 @@ const configSchema = z.object({
 export type SpaceConfig = {
   port: number;
   dataDir: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   hfToken: string;
   inferenceToken?: string;
@@ -95,7 +95,7 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
   return {
     port: parsed.PORT,
     dataDir: parsed.DATA_DIR,
-    datasetRepo: parsed.DATASET_REPO,
+    rawBucket: parsed.RAW_BUCKET,
     indexBucket: parsed.INDEX_BUCKET,
     hfToken: parsed.HF_TOKEN,
     ...(parsed.INFERENCE_TOKEN === undefined ? {} : { inferenceToken: parsed.INFERENCE_TOKEN }),

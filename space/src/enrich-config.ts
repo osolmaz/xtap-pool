@@ -3,19 +3,19 @@ import { z } from "zod";
 import { labelConfigSchema } from "@xtap-pool/shared";
 import type { LabelConfig } from "@xtap-pool/shared";
 
-import type { DatasetMirror } from "./dataset.js";
+import type { StorageLog } from "./bucket-log.js";
 
-/** Dataset path of the preset taxonomy: an array of `{name, description}`. */
+/** Bucket logical path of the preset taxonomy: an array of `{name, description}`. */
 export const LABELS_CONFIG_PATH = "config/labels.json";
 
 export type EnrichTaxonomy = {
   labels: readonly LabelConfig[];
   version: number;
-  source: "dataset" | "default";
+  source: "bucket" | "default";
   error?: string;
 };
 
-/** Built-in taxonomy used until `config/labels.json` exists in the dataset. */
+/** Built-in taxonomy used until `config/labels.json` exists in the raw Bucket log. */
 export const DEFAULT_TAXONOMY: readonly LabelConfig[] = [
   {
     name: "ai",
@@ -62,24 +62,24 @@ export const DEFAULT_TAXONOMY: readonly LabelConfig[] = [
 const labelsFileSchema = z.array(labelConfigSchema).min(1);
 
 /**
- * Load the preset taxonomy from `config/labels.json` in the pool dataset,
+ * Load the preset taxonomy from `config/labels.json` in the pool Bucket log,
  * falling back to the built-in default when the file is absent or invalid.
  * The taxonomy version comes from the environment (`TAXONOMY_VERSION`).
  */
 export async function loadEnrichTaxonomy(
-  mirror: DatasetMirror,
+  log: StorageLog,
   version: number,
 ): Promise<EnrichTaxonomy> {
   let raw: string | undefined;
   try {
-    raw = await mirror.readText(LABELS_CONFIG_PATH);
+    raw = await log.readText(LABELS_CONFIG_PATH);
   } catch (error) {
     return { labels: DEFAULT_TAXONOMY, version, source: "default", error: errorMessage(error) };
   }
   if (raw === undefined) return { labels: DEFAULT_TAXONOMY, version, source: "default" };
   try {
     const labels = labelsFileSchema.parse(JSON.parse(raw));
-    return { labels, version, source: "dataset" };
+    return { labels, version, source: "bucket" };
   } catch {
     return { labels: DEFAULT_TAXONOMY, version, source: "default" };
   }

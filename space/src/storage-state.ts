@@ -1,7 +1,7 @@
-export type DatasetState = { state: "ready" } | { state: "invalid" | "unknown"; error: string };
+export type StorageState = { state: "ready" } | { state: "invalid" | "unknown"; error: string };
 
-/** Classify non-authentication failures while rebuilding dataset-backed caches. */
-export function datasetStateFromRebuildError(error: unknown): DatasetState {
+/** Classify non-authentication failures while rebuilding Bucket-backed caches. */
+export function storageStateFromRebuildError(error: unknown): StorageState {
   const status = errorStatus(error);
   const state =
     error instanceof TypeError ||

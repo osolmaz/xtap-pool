@@ -11,11 +11,11 @@ const pool = {
   member_orgs: [{ name: "huggingface", sub: "org-1", display_name: "Hugging Face" }],
   bootstrap_admins: ["root"],
   updated_at: "2026-07-06T00:00:00.000Z",
-  source: "dataset" as const,
+  source: "bucket" as const,
 };
 const accounts = {
   version: 1 as const,
-  source: "dataset" as const,
+  source: "bucket" as const,
   accounts: [
     {
       id: "reader",
@@ -141,7 +141,7 @@ describe("AdminPanel", () => {
         if (path.includes("repair"))
           return Response.json({
             pool,
-            service_accounts: { version: 1, accounts: [], source: "dataset" },
+            service_accounts: { version: 1, accounts: [], source: "bucket" },
           });
         return Response.json({ pool });
       }),

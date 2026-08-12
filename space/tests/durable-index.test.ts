@@ -1,416 +1,254 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
-import { DatasetMirror } from "../src/dataset.js";
-import { DurableIndex, durableIndexManifestSchema } from "../src/durable-index.js";
+import { BucketLog, sha256 } from "../src/bucket-log.js";
+import type { BucketObject, RawBucketClient } from "../src/bucket-log.js";
+import { DurableIndex } from "../src/durable-index.js";
 import type {
   BucketFile,
-  DatasetSnapshotClient,
-  DatasetSourceFile,
   DurableIndexBucketClient,
   DurableIndexOptions,
 } from "../src/durable-index.js";
-import { FakeHub, makePooled } from "./helpers.js";
+import { makePooled } from "./helpers.js";
 
-const DATASET = "osolmaz/xtap-pool-data";
-const BUCKET = "osolmaz/xtap-pool-bucket";
+const RAW = "osolmaz/xtap-pool-data";
+const INDEX = "osolmaz/xtap-pool-bucket";
 const CONTRACT = "a".repeat(64);
 
-class FakeSource implements DatasetSnapshotClient {
-  revision = "1".repeat(40);
-  files = new Map<string, string>();
-  textFiles = new Map<string, string>();
-  commitErrors: unknown[] = [];
+class MemoryRawBucket implements RawBucketClient {
+  files = new Map<string, Uint8Array>();
 
-  currentRevision(): Promise<string> {
-    return Promise.resolve(this.revision);
+  async list(prefix: string): Promise<readonly BucketObject[]> {
+    return [...this.files]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, content]) => ({ key, oid: sha256(content), size: content.byteLength }));
   }
 
-  listJsonlFiles(): Promise<readonly DatasetSourceFile[]> {
-    return Promise.resolve(
-      [...this.files.entries()].map(([path, content]) => ({
-        path,
-        oid: sha256(content),
-        size: Buffer.byteLength(content),
-      })),
-    );
+  async download(key: string): Promise<Uint8Array | undefined> {
+    const content = this.files.get(key);
+    return content === undefined ? undefined : new Uint8Array(content);
   }
 
-  downloadFile(path: string): Promise<Uint8Array> {
-    const content = this.files.get(path);
-    if (content === undefined) return Promise.reject(new Error(`missing ${path}`));
-    return Promise.resolve(Buffer.from(content));
-  }
-
-  readText(path: string): Promise<string | undefined> {
-    return Promise.resolve(this.textFiles.get(path));
-  }
-
-  commitText(path: string, content: string, parentRevision: string): Promise<string> {
-    const commitError = this.commitErrors.shift();
-    if (commitError !== undefined) {
-      this.advanceRevision();
-      // Deliberately permit a non-Error rejection to cover defensive classifier behavior.
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-      return Promise.reject(commitError);
-    }
-    if (parentRevision !== this.revision) {
-      return Promise.reject(new Error("parent commit does not match dataset HEAD"));
-    }
-    this.textFiles.set(path, content);
-    this.advanceRevision();
-    return Promise.resolve(this.revision);
-  }
-
-  advanceRevision(): void {
-    const value = Number.parseInt(this.revision.slice(0, 8), 16) + 1;
-    this.revision = value.toString(16).padStart(40, "0");
+  async upload(key: string, content: Uint8Array): Promise<void> {
+    this.files.set(key, new Uint8Array(content));
   }
 }
 
-class FakeBucket implements DurableIndexBucketClient {
+class MemoryIndexBucket implements DurableIndexBucketClient {
   files = new Map<string, Buffer>();
-  uploaded = new Map<string, string>();
   removed: string[] = [];
-  private clock = 0;
 
   async download(path: string, destination: string): Promise<boolean> {
     const content = this.files.get(path);
     if (content === undefined) return false;
-    await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, content);
+    writeFileSync(destination, content);
     return true;
   }
 
   async uploadFile(path: string, source: string): Promise<void> {
-    this.files.set(path, await readFile(source));
-    this.clock += 1;
-    this.uploaded.set(path, String(this.clock).padStart(8, "0"));
+    this.files.set(path, readFileSync(source));
   }
 
-  list(prefix: string): Promise<readonly BucketFile[]> {
-    return Promise.resolve(
-      [...this.files.keys()]
-        .filter((path) => path.startsWith(`${prefix}/`))
-        .map((path) => {
-          const uploadedAt = this.uploaded.get(path);
-          return { path, ...(uploadedAt === undefined ? {} : { uploadedAt }) };
-        }),
-    );
+  async readText(path: string): Promise<string | undefined> {
+    return this.files.get(path)?.toString("utf8");
   }
 
-  remove(paths: readonly string[]): Promise<void> {
+  async writeText(path: string, content: string): Promise<void> {
+    this.files.set(path, Buffer.from(content));
+  }
+
+  async list(prefix: string): Promise<readonly BucketFile[]> {
+    return [...this.files.keys()]
+      .filter((path) => path.startsWith(prefix))
+      .map((path) => ({ path }));
+  }
+
+  async remove(paths: readonly string[]): Promise<void> {
     for (const path of paths) {
       this.files.delete(path);
-      this.uploaded.delete(path);
       this.removed.push(path);
     }
-    return Promise.resolve();
   }
 }
 
-let dir: string;
-let source: FakeSource;
-let bucket: FakeBucket;
-let hub: FakeHub;
+let raw: MemoryRawBucket;
+let bucket: MemoryIndexBucket;
+let log: BucketLog;
 
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "xtap-index-test-"));
-  source = new FakeSource();
-  bucket = new FakeBucket();
-  hub = new FakeHub();
+beforeEach(() => {
+  raw = new MemoryRawBucket();
+  bucket = new MemoryIndexBucket();
+  log = new BucketLog(RAW, raw, temporary("cache"), () => new Date("2026-08-12T12:00:00.000Z"));
 });
 
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+describe("DurableIndex", () => {
+  it("bootstraps, publishes, restores, and advances exact Bucket snapshots", async () => {
+    await appendTweet("1");
+    const firstOptions = options("first");
+    const first = await DurableIndex.bootstrap(firstOptions);
+    expect(first.stats()).toMatchObject({ tweetRows: 1, tweetFiles: 1 });
+    const published = await first.publish();
+    expect(published.source.bucket).toBe(RAW);
+    expect(published.counts.tweets).toBe(1);
+    first.close();
 
-function options(name: string): DurableIndexOptions {
-  return {
-    datasetRepo: DATASET,
-    indexBucket: BUCKET,
-    accessToken: "hf_test",
-    databasePath: join(dir, `${name}.sqlite`),
-    mirror: new DatasetMirror(hub, join(dir, `${name}-mirror`)),
-    taxonomyVersion: 1,
-    contractHash: CONTRACT,
-    sourceClient: source,
-    bucketClient: bucket,
-  };
-}
-
-function tweetLine(id: string, author = "someone"): string {
-  return `${JSON.stringify(
-    makePooled({
-      id,
-      url: `https://x.com/${author}/status/${id}`,
-      author: { username: author, display_name: author },
-      conversation_id: id,
-    }),
-  )}\n`;
-}
-
-describe("durable enrichment index", () => {
-  it("bootstraps, publishes, restores, and applies only a strict append suffix", async () => {
-    const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
-    source.files.set(path, tweetLine("1"));
-    const initial = await DurableIndex.bootstrap(options("bootstrap"));
-    expect(initial.store.count()).toBe(1);
-    const firstManifest = await initial.publish();
-    initial.close();
-
-    expect(durableIndexManifestSchema.parse(firstManifest)).toEqual(firstManifest);
-    expect(() =>
-      durableIndexManifestSchema.parse({ ...firstManifest, unexpected: true }),
-    ).toThrow();
-    const restoreOptions = options("restored");
-    await Promise.all([
-      writeFile(restoreOptions.databasePath, "stale database"),
-      writeFile(`${restoreOptions.databasePath}-wal`, "stale wal"),
-      writeFile(`${restoreOptions.databasePath}-shm`, "stale shm"),
-    ]);
-    const restored = await DurableIndex.restore(restoreOptions);
-    expect(restored.store.count()).toBe(1);
-    source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine("2", "other")}`);
-    source.advanceRevision();
-
-    const advanced = await restored.advanceToLatest();
-    expect(advanced).toMatchObject({ filesChanged: 1, rowsApplied: 1 });
-    expect(restored.store.count()).toBe(2);
-    await expect(restored.advanceToLatest()).resolves.toMatchObject({
-      filesChanged: 0,
-      rowsApplied: 0,
-    });
+    const restored = await DurableIndex.restore(options("restored"));
+    expect(restored.store.query({ limit: 10 }).records).toHaveLength(1);
+    await appendTweet("2");
+    const advance = await restored.advanceToLatest();
+    expect(advance.filesChanged).toBe(1);
+    expect(advance.counts.tweets).toBe(2);
     restored.close();
   });
 
-  it("replays enrichment, attempt, registry, and receipt suffixes", async () => {
-    const tweetPath = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
-    source.files.set(tweetPath, `${tweetLine("1")}${tweetLine("2", "other")}`);
-    const eventOptions = options("events");
-    const index = await DurableIndex.bootstrap(eventOptions);
-    const items = index.enrichStore.claimQueued(10);
-    index.enrichStore.releaseClaims();
-    const first = items.find((item) => item.tweetIds.includes("1"));
-    const second = items.find((item) => item.tweetIds.includes("2"));
-    if (first === undefined || second === undefined) throw new Error("expected queue items");
-
-    source.files.set(
-      "enrichment/2026/08/enrichment-2026-08-04.jsonl",
-      `${JSON.stringify({
-        unit_id: first.unitId,
-        tweet_ids: first.tweetIds,
-        input_hash: first.inputHash,
-        contract_hash: first.contractHash,
-        preset_labels: [],
-        free_labels: [],
-        model: "model",
-        taxonomy_version: 1,
-        enriched_at: "2026-08-04T00:00:00.000Z",
-      })}\n`,
-    );
-    source.files.set(
-      "enrichment/attempts/2026/08/attempts-2026-08-04.jsonl",
-      `${JSON.stringify({
-        unit_id: second.unitId,
-        input_hash: second.inputHash,
-        contract_hash: second.contractHash,
-        attempt: 1,
-        outcome: "transient_failure",
-        error_class: "timeout",
-        at: "2026-08-04T00:00:00.000Z",
-      })}\n`,
-    );
-    source.files.set(
-      "enrichment/registry/2026/08/registry-2026-08-04.jsonl",
-      `${JSON.stringify({
-        name: "new-label",
-        status: "candidate",
-        at: "2026-08-04T00:00:00.000Z",
-        actor: "worker",
-        contract_hash: CONTRACT,
-        registry_revision: 2,
-      })}\n`,
-    );
-    source.files.set(
-      "enrichment/receipts/2026-08-04.jsonl",
-      `${JSON.stringify(receiptFixture("job-1"))}\n`,
-    );
-    source.advanceRevision();
-
-    const advanced = await index.advanceToLatest();
-    expect(advanced.filesChanged).toBe(4);
-    expect(index.enrichStore.queueEntry(first.unitId)?.status).toBe("done");
-    expect(index.enrichStore.queueEntry(second.unitId)?.status).toBe("retrying");
-    expect(index.enrichStore.registryStatus("new-label")).toBe("candidate");
-    expect(eventOptions.mirror.latestReceipt()?.worker_id).toBe("job-1");
-    expect(index.stats()).toMatchObject({
-      enrichmentRows: 1,
-      attemptEvents: 1,
-      registryEvents: 1,
-    });
+  it("fails closed when an exact snapshot segment is missing or changed", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("mutation"));
+    const current = await log.createSnapshot();
+    const file = current.snapshot.files[0]!;
+    raw.files.delete(file.key);
+    await expect(index.advanceToRevision(current.revision)).rejects.toThrow("missing");
     index.close();
+
+    raw = new MemoryRawBucket();
+    log = new BucketLog(
+      RAW,
+      raw,
+      temporary("cache-two"),
+      () => new Date("2026-08-12T12:00:00.000Z"),
+    );
+    await appendTweet("1");
+    const second = await DurableIndex.bootstrap(options("changed"));
+    const old = await log.createSnapshot();
+    const oldFile = old.snapshot.files[0]!;
+    raw.files.set(oldFile.key, new Uint8Array([1, 2, 3]));
+    await expect(second.advanceToRevision(old.revision)).rejects.toThrow("size mismatch");
+    second.close();
   });
 
-  it("fails closed on prefix edits, truncation, deletion, and checksum mismatch", async () => {
-    const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
-    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}`);
-    const index = await DurableIndex.bootstrap(options("failures"));
-    await index.publish();
-
-    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}not json\n`);
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("invalid JSON");
-    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}{}\n`);
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("invalid tweet record");
-    source.files.set(path, `${tweetLine("changed")}${tweetLine("2")}`);
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("prefix changed");
-    source.files.set(path, tweetLine("1"));
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("truncated");
-    source.files.delete(path);
-    source.advanceRevision();
+  it("rejects deleted source segments after recording them", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("delete"));
+    raw.files.clear();
     await expect(index.advanceToLatest()).rejects.toThrow("were deleted");
-    source.files.set(path, tweetLine("1").trimEnd());
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("complete JSONL line");
-    source.files.set(path, `${tweetLine("1")}${tweetLine("2")}`);
-    source.files.set("data/unknown.jsonl", tweetLine("1"));
-    source.advanceRevision();
-    await expect(index.advanceToLatest()).rejects.toThrow("unsupported dataset index source");
     index.close();
+  });
 
-    const manifest = JSON.parse(source.textFiles.get("index/current.json") ?? "{}") as {
-      database: { key: string };
-    };
+  it("detects a corrupt published SQLite generation", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("corrupt"));
+    const manifest = await index.publish();
+    index.close();
     bucket.files.set(manifest.database.key, Buffer.from("corrupt"));
-    await expect(DurableIndex.restore(options("corrupt"))).rejects.toThrow("checksum mismatch");
-  });
-
-  it("refuses an atomic manifest commit after the dataset head changes", async () => {
-    source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
-    const index = await DurableIndex.bootstrap(options("race"));
-    source.advanceRevision();
-
-    await expect(index.publish()).rejects.toThrow("parent commit does not match");
-    expect(source.textFiles.has("index/current.json")).toBe(false);
-    index.close();
-  });
-
-  it("re-advances and retries when the dataset changes during publication", async () => {
-    source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
-    const index = await DurableIndex.bootstrap(options("publication-retry"));
-    source.commitErrors.push(new Error("The branch was updated since publication started"));
-
-    const published = await index.publishLatest();
-
-    expect(published.manifest.dataset.revision).toBe(published.advance.revision);
-    expect(source.textFiles.has("index/current.json")).toBe(true);
-    expect(bucket.files.has(published.manifest.database.key)).toBe(true);
-    index.close();
-  });
-
-  it("retries status-code conflicts but rejects unrelated and exhausted failures", async () => {
-    source.files.set("data/osolmaz/2026/08/tweets-2026-08-04.jsonl", tweetLine("1"));
-    const index = await DurableIndex.bootstrap(options("publication-errors"));
-    source.commitErrors.push(Object.assign(new Error("conflict"), { statusCode: 409 }));
-    await expect(index.publishLatest()).resolves.toHaveProperty("manifest.dataset.repo", DATASET);
-
-    source.commitErrors.push(new Error("permission denied"));
-    await expect(index.publishLatest()).rejects.toThrow("permission denied");
-    source.commitErrors.push("non-error rejection");
-    await expect(index.publishLatest()).rejects.toBe("non-error rejection");
-
-    source.commitErrors.push(
-      ...Array.from(
-        { length: 5 },
-        () => new Error("The branch was updated since publication started"),
-      ),
+    await expect(DurableIndex.restore(options("restore-corrupt"))).rejects.toThrow(
+      "checksum mismatch",
     );
-    await expect(index.publishLatest()).rejects.toThrow("branch was updated");
-    index.close();
   });
 
-  it("does not let failed publication uploads displace successful predecessors", async () => {
-    const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
-    source.files.set(path, tweetLine("1"));
-    const index = await DurableIndex.bootstrap(options("orphan-retention"));
-    const first = await index.publish();
-    for (let generation = 2; generation <= 5; generation += 1) {
-      source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine(String(generation))}`);
-      source.advanceRevision();
-      await index.advanceToLatest();
-      source.commitErrors.push(new Error("permission denied"));
-      await expect(index.publish()).rejects.toThrow("permission denied");
-    }
-    source.files.set(path, `${source.files.get(path) ?? ""}${tweetLine("6")}`);
-    source.advanceRevision();
-    await index.advanceToLatest();
-    const final = await index.publish();
-
-    expect(final.database.predecessors).toEqual([first.database.key]);
-    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite")).sort()).toEqual(
-      [first.database.key, final.database.key].sort(),
+  it("restores receipt metadata from the exact raw snapshot", async () => {
+    await appendTweet("1");
+    await log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [
+            JSON.stringify({
+              started_at: "2026-08-12T12:00:00.000Z",
+              finished_at: "2026-08-12T12:01:00.000Z",
+              units: 1,
+              calls: 1,
+              prompt_tokens: 1,
+              completion_tokens: 1,
+              failures: 0,
+              retries: 0,
+              blocked: 0,
+              contract_hash: CONTRACT,
+              worker_id: "test-worker",
+              discarded_assignments: 0,
+              new_candidates: 0,
+              new_approvals: 0,
+              new_rejections: 0,
+            }),
+          ],
+        },
+      ],
+      [],
     );
+    const index = await DurableIndex.bootstrap(options("receipt-publish"));
+    await index.publish();
     index.close();
+
+    const restoredLog = new BucketLog(RAW, raw, temporary("receipt-cache"));
+    const restored = await DurableIndex.restore({
+      ...options("receipt-restore"),
+      log: restoredLog,
+    });
+    expect(restoredLog.latestReceipt()?.finished_at).toBe("2026-08-12T12:01:00.000Z");
+    restored.close();
   });
 
-  it("retains the active database and three recent predecessors", async () => {
-    const path = "data/osolmaz/2026/08/tweets-2026-08-04.jsonl";
-    source.files.set(path, tweetLine("1"));
+  it("retains the active database and three predecessors", async () => {
+    await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("retention"));
     for (let generation = 0; generation < 6; generation += 1) {
       if (generation > 0) {
-        source.files.set(
-          path,
-          `${source.files.get(path) ?? ""}${tweetLine(String(generation + 1))}`,
-        );
-        source.advanceRevision();
+        await appendTweet(String(generation + 1));
         await index.advanceToLatest();
       }
       await index.publish();
     }
-    const databases = [...bucket.files.keys()].filter((key) => key.startsWith("index/databases/"));
-    expect(databases).toHaveLength(4);
-    const current = JSON.parse(source.textFiles.get("index/current.json") ?? "{}") as {
+    const manifest = JSON.parse(
+      bucket.files.get("index/current.json")?.toString("utf8") ?? "{}",
+    ) as {
       database: { key: string; predecessors: string[] };
     };
-    expect(current.database.predecessors).toHaveLength(3);
-    expect(databases.sort()).toEqual(
-      [current.database.key, ...current.database.predecessors].sort(),
-    );
+    expect(manifest.database.predecessors).toHaveLength(3);
+    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite"))).toHaveLength(4);
     expect(bucket.removed).toHaveLength(2);
     index.close();
   });
+
+  it("binds the manifest to the raw Bucket and enrichment contract", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("provenance"));
+    await index.publish();
+    index.close();
+    await expect(
+      DurableIndex.restore({ ...options("wrong-bucket"), rawBucket: "osolmaz/other" }),
+    ).rejects.toThrow("raw Bucket mismatch");
+    await expect(
+      DurableIndex.restore({ ...options("wrong-contract"), contractHash: "b".repeat(64) }),
+    ).rejects.toThrow("contract");
+  });
 });
 
-function receiptFixture(workerId: string): Record<string, unknown> {
+async function appendTweet(id: string): Promise<void> {
+  await log.appendTweets([
+    makePooled({
+      id,
+      url: `https://x.com/someone/status/${id}`,
+      text: `tweet ${id}`,
+      captured_at: `2026-08-12T12:00:${id.padStart(2, "0")}.000Z`,
+    }),
+  ]);
+}
+
+function options(name: string): DurableIndexOptions {
   return {
-    started_at: "2026-08-04T00:00:00.000Z",
-    finished_at: "2026-08-04T00:01:00.000Z",
-    units: 1,
-    calls: 1,
-    prompt_tokens: 1,
-    completion_tokens: 1,
-    cost_usd: 0.00001,
-    failures: 0,
-    retries: 0,
-    blocked: 0,
-    contract_hash: CONTRACT,
-    worker_id: workerId,
-    discarded_assignments: 0,
-    new_candidates: 0,
-    new_approvals: 0,
-    new_rejections: 0,
+    rawBucket: RAW,
+    indexBucket: INDEX,
+    accessToken: "token",
+    databasePath: join(temporary(name), "index.sqlite"),
+    log,
+    taxonomyVersion: 1,
+    contractHash: CONTRACT,
+    bucketClient: bucket,
   };
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+function temporary(name: string): string {
+  return mkdtempSync(join(tmpdir(), `xtap-index-${name}-`));
 }

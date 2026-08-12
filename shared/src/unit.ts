@@ -48,7 +48,7 @@ export type ServiceAccountSummary = {
 export type ServiceAccountsSnapshot = {
   version: 1;
   accounts: readonly ServiceAccountSummary[];
-  source: "dataset" | "empty";
+  source: "bucket" | "empty";
   config_error?: string;
 };
 

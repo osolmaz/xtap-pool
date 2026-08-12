@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { checkDatasetCredential } from "../src/dataset-token.js";
+import { checkStorageCredential } from "../src/storage-token.js";
 
-const datasetRepo = "alice/xtap-pool-data";
+const rawBucket = "alice/xtap-pool-data";
 const indexBucket = "alice/xtap-pool-bucket";
 
-function scope(name: string, permissions: readonly string[], type: string): unknown {
+function scope(name: string, permissions: readonly string[], type = "bucket"): unknown {
   return { entity: { type, name }, permissions };
 }
 
@@ -22,15 +22,15 @@ function whoami(scopes: readonly unknown[]): unknown {
 
 function validScopes(): readonly unknown[] {
   const permissions = ["repo.content.read", "repo.content.write"];
-  return [scope(datasetRepo, permissions, "dataset"), scope(indexBucket, permissions, "bucket")];
+  return [scope(rawBucket, permissions), scope(indexBucket, permissions)];
 }
 
 function check(fetchFn: typeof fetch, token = "hf_storage") {
-  return checkDatasetCredential({ token, datasetRepo, indexBucket, fetchFn });
+  return checkStorageCredential({ token, rawBucket, indexBucket, fetchFn });
 }
 
 describe("storage credential readiness", () => {
-  it("accepts exact dataset and Bucket read/write scopes plus direct reads", async () => {
+  it("accepts exact raw and index Bucket read/write scopes plus direct reads", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json(whoami(validScopes())))
@@ -40,12 +40,10 @@ describe("storage credential readiness", () => {
     await expect(check(fetchFn)).resolves.toEqual({ credential: "ok" });
   });
 
-  it("rejects a token whose Bucket metadata scope is missing", async () => {
+  it("rejects a token whose index Bucket scope is missing", async () => {
     const fetchFn: typeof fetch = () =>
       Promise.resolve(
-        Response.json(
-          whoami([scope(datasetRepo, ["repo.content.read", "repo.content.write"], "dataset")]),
-        ),
+        Response.json(whoami([scope(rawBucket, ["repo.content.read", "repo.content.write"])])),
       );
 
     await expect(check(fetchFn)).resolves.toEqual({
@@ -67,20 +65,20 @@ describe("storage credential readiness", () => {
     });
   });
 
-  it("rejects storage tokens without write permission", async () => {
+  it("rejects storage tokens without raw Bucket write permission", async () => {
     const fetchFn: typeof fetch = () =>
       Promise.resolve(
         Response.json(
           whoami([
-            scope(datasetRepo, ["repo.content.read"], "dataset"),
-            scope(indexBucket, ["repo.content.read", "repo.content.write"], "bucket"),
+            scope(rawBucket, ["repo.content.read"]),
+            scope(indexBucket, ["repo.content.read", "repo.content.write"]),
           ]),
         ),
       );
 
     await expect(check(fetchFn, "hf_readonly")).resolves.toEqual({
       credential: "invalid",
-      error: `HF_TOKEN must include repo.content.write or repo.write on ${datasetRepo}.`,
+      error: `HF_TOKEN must include repo.content.write or repo.write on ${rawBucket}.`,
     });
   });
 
