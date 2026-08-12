@@ -29,7 +29,10 @@ export function existingSpaceConfig(
   const spaceError = validateRepoId(spaceRepo);
   if (spaceError !== undefined) throw new Error(spaceError);
   const namespace = spaceRepo.split("/")[0] ?? "";
-  const rawBucket = variables.get("RAW_BUCKET") ?? repoInNamespace(namespace, "xtap-pool-data");
+  const rawBucket =
+    variables.get("RAW_BUCKET") ??
+    variables.get("DATASET_REPO") ??
+    repoInNamespace(namespace, "xtap-pool-data");
   const rawBucketError = validateRepoId(rawBucket);
   if (rawBucketError !== undefined)
     throw new Error(`Invalid RAW_BUCKET on ${spaceRepo}: ${rawBucket}`);
