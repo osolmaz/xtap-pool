@@ -143,9 +143,7 @@ function matchesTarget(entity: JsonObject, target: StorageTarget): boolean {
   const type = text(entity["type"]).replace(/s$/u, "");
   return (
     type === target.kind &&
-    entityCandidates(entity).some(
-      (candidate) => normalizeName(candidate, target.kind) === target.name,
-    )
+    entityCandidates(entity).some((candidate) => normalizeName(candidate) === target.name)
   );
 }
 
@@ -167,7 +165,7 @@ function entityLabel(entity: JsonObject): string {
   return `${kind}:${name}`;
 }
 
-function normalizeName(value: string, kind: StorageTarget["kind"]): string {
+function normalizeName(value: string): string {
   return value.replace(/^buckets\//u, "");
 }
 

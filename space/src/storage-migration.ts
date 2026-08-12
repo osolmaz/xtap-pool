@@ -146,6 +146,7 @@ export function createPinnedDatasetSource(
     throw new Error("HF_TOKEN is required");
   const repo = { type: "dataset", name: dataset } as const;
   return {
+    // eslint-disable-next-line complexity -- Pinned listing validates immutable identity and approved paths.
     async list(): Promise<readonly PinnedSourceObject[]> {
       const objects: PinnedSourceObject[] = [];
       for await (const entry of listFiles({

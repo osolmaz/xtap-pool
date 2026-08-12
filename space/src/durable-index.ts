@@ -10,7 +10,7 @@ import { deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/h
 import { z } from "zod";
 
 import { BucketLog } from "./bucket-log.js";
-import type { BucketSnapshot, BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
+import type { BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
 
@@ -185,8 +185,7 @@ export class DurableIndex {
     const index = open(options, bucket, [...(options.predecessorKeys ?? [])]);
     const metadata = readMetadata(index.store.database);
     if (
-      metadata === undefined ||
-      metadata.schema_version !== INDEX_SCHEMA_VERSION ||
+      metadata?.schema_version !== INDEX_SCHEMA_VERSION ||
       metadata.raw_bucket !== options.rawBucket ||
       metadata.contract_hash !== options.contractHash
     ) {
@@ -556,8 +555,7 @@ function validateStandaloneDatabase(
     assertDatabaseIntegrity(db);
     const metadata = readMetadata(db);
     if (
-      metadata === undefined ||
-      metadata.schema_version !== 1 ||
+      metadata?.schema_version !== 1 ||
       metadata.raw_bucket !== options.rawBucket ||
       metadata.raw_snapshot_revision !== manifest.source.revision ||
       metadata.contract_hash !== options.contractHash

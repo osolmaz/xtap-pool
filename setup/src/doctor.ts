@@ -1032,6 +1032,7 @@ async function restartAndWaitDefault(spaceRepo: string): Promise<void> {
 
 type StorageSegmentStats = { segments: number; records: number };
 
+// eslint-disable-next-line complexity -- Segment inspection validates every structural and checksum boundary.
 async function storageSegmentStats(
   client: HubClient,
   rawBucket: string,
@@ -1089,15 +1090,6 @@ function hubOptions(client: HubClient): { hubUrl?: string; fetch?: typeof fetch 
     ...(client.hubUrl === undefined ? {} : { hubUrl: client.hubUrl }),
     ...(client.fetchFn === undefined ? {} : { fetch: client.fetchFn }),
   };
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "statusCode" in error &&
-    (error as { statusCode?: unknown }).statusCode === 404
-  );
 }
 
 function report(
