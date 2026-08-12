@@ -77,6 +77,9 @@ function fixture(): {
       '{"version":1,"admins":["osolmaz"],"members":["osolmaz"],"updated_at":"2026-08-12T00:00:00.000Z"}\n',
     ),
   );
+  source.files.set("config/service-accounts.json", bytes('{"version":1,"accounts":[]}\n'));
+  source.files.set("config/labels.json", bytes('{"version":1,"labels":[]}\n'));
+  source.files.set("enrichment/vocabulary.json", bytes('{"version":1,"labels":[]}\n'));
   return {
     source,
     bucket,
@@ -104,8 +107,8 @@ describe("pinned storage migration", () => {
       unique_tweet_identities: 1,
       passed: true,
     });
-    expect(first.source.objects).toBe(2);
-    expect(first.target.objects).toBe(2);
+    expect(first.source.objects).toBe(5);
+    expect(first.target.objects).toBe(5);
     expect(JSON.parse(readFileSync(state.report, "utf8"))).toEqual(first);
     const keys = [...state.bucket.files.keys()];
 
@@ -144,6 +147,15 @@ describe("pinned storage migration", () => {
       .filter((file) => file.kind === "registry")
       .map((file) => file.target_segment);
     expect(registryKeys).toEqual([...registryKeys].sort());
+  });
+
+  it("rejects a pinned source that omits required configuration", async () => {
+    const state = fixture();
+    state.source.files.delete("config/service-accounts.json");
+
+    await expect(importPinnedDataset(options(state))).rejects.toThrow(
+      "missing required configuration: config/service-accounts.json",
+    );
   });
 
   it("requires a pinned source and a configured token", async () => {
