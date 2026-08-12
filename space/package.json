@@ -10,6 +10,7 @@
     "enrich": "node dist/src/enrich-command-main.js",
     "enrich:job": "node dist/src/enrich-job-main.js",
     "index:bootstrap": "node dist/src/index-command-main.js",
+    "storage:initialize": "node dist/src/storage-initialize-main.js",
     "storage:import": "node dist/src/storage-import-main.js",
     "storage:verify": "node dist/src/storage-verify-main.js",
     "format": "prettier --check .",

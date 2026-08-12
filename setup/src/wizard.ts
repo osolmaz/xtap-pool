@@ -52,6 +52,7 @@ export async function runSetupWizard(root: string): Promise<void> {
   task.stop("Space deployed");
   const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
   await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
+  await initializeStorage(root, config, storageToken);
   await bootstrapIndex(root, config, storageToken);
   await inheritCommand("hf", ["spaces", "restart", config.spaceRepo, "--format", "json"]);
   await inheritCommand("hf", [
@@ -77,13 +78,22 @@ export async function runSetupWizard(root: string): Promise<void> {
   );
 }
 
-export async function runUpdateCommand(root: string, requestedSpaceRepo?: string): Promise<void> {
+export async function runUpdateCommand(
+  root: string,
+  requestedSpaceRepo?: string,
+  options: { verifiedBucketCutover?: boolean } = {},
+): Promise<void> {
   intro("xtap-pool update");
   const accessToken = await activeHfToken();
   const account = await whoAmI({ accessToken });
   const spaceRepo = requestedSpaceRepo ?? repoInNamespace(account.name, "xtap-pool");
   const variables = await getSpaceVariables({ accessToken }, spaceRepo);
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
+  if (variables.has("DATASET_REPO") && options.verifiedBucketCutover !== true) {
+    throw new Error(
+      "legacy DATASET_REPO is still configured; run the verified import and use --verified-bucket-cutover",
+    );
+  }
   const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
   if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.indexBucket))) {
     const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
@@ -92,7 +102,9 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   }
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
-  await updateExistingPool(root, { accessToken }, config);
+  await updateExistingPool(root, { accessToken }, config, {
+    allowLegacyDatasetRemoval: options.verifiedBucketCutover === true,
+  });
   const refreshedVariables = await getSpaceVariables({ accessToken }, spaceRepo);
   const desired = await desiredEnrichmentJob(
     { accessToken },
@@ -221,6 +233,30 @@ export function indexContractFromVariables(variables: ReadonlyMap<string, string
       ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"] ??
       "",
   };
+}
+
+export async function initializeStorage(
+  root: string,
+  config: SetupConfig,
+  storageToken: string,
+): Promise<void> {
+  const dataDir = await mkdtemp(join(tmpdir(), "xtap-pool-storage-initialize-"));
+  try {
+    await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+    await inheritCommand("npm", ["run", "storage:initialize", "--workspace", "space"], {
+      cwd: root,
+      env: {
+        ...process.env,
+        DATA_DIR: dataDir,
+        RAW_BUCKET: config.rawBucket,
+        HF_TOKEN: storageToken,
+        ALLOWED_USERS: usersValue(config.allowedUsers),
+        POOL_ADMINS: usersValue(config.poolAdmins),
+      },
+    });
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
 }
 
 export async function bootstrapIndex(
