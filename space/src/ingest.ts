@@ -2,7 +2,7 @@ import { stampTweet, validateTweet } from "@xtap-pool/shared";
 import type { PooledTweet } from "@xtap-pool/shared";
 import { z } from "zod";
 
-import type { DatasetMirror } from "./dataset.js";
+import type { StorageLog } from "./bucket-log.js";
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
@@ -23,13 +23,13 @@ export type IngestOutcome =
 
 export type IngestDeps = {
   store: TweetStore;
-  mirror: DatasetMirror;
+  log: StorageLog;
   /** When present, ingested tweets enqueue their units for enrichment. */
   enrich?: EnrichStore;
   now: () => Date;
 };
 
-/** Serialize async critical sections (single writer to the dataset repo). */
+/** Serialize async critical sections (single raw Bucket writer). */
 export class Mutex {
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -74,13 +74,13 @@ export async function ingestBatch(
 
   try {
     const days = [...new Set(accepted.map((tweet) => tweet.captured_at.slice(0, 10)))].sort();
-    await deps.mirror.appendAndCommit(
+    await deps.log.appendTweets(
       accepted,
       `pool: ${username} +${String(accepted.length)} tweets (${days.join(", ")})`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
-    return { ok: false, status: 500, error: `failed to persist to dataset: ${message}` };
+    return { ok: false, status: 500, error: `failed to persist to raw Bucket: ${message}` };
   }
 
   deps.store.insert(accepted);

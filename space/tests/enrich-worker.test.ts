@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { computeInputHash } from "@xtap-pool/shared";
 
-import { DatasetMirror } from "../src/dataset.js";
 import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
 import { EnrichStore, MAX_ATTEMPTS } from "../src/enrich-store.js";
 import {
@@ -19,7 +18,8 @@ import {
 } from "../src/enrich-worker.js";
 import type { EnrichWorkerDeps, LlmClient, LlmMessage } from "../src/enrich-worker.js";
 import { TweetStore } from "../src/store.js";
-import { FakeHub, makePooled } from "./helpers.js";
+import { makePooled } from "./helpers.js";
+import { FakeLog } from "./fake-log.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 const CONTRACT_HASH = contractHashFor({
@@ -28,15 +28,13 @@ const CONTRACT_HASH = contractHashFor({
 });
 
 let dir: string;
-let hub: FakeHub;
-let mirror: DatasetMirror;
+let log: FakeLog;
 let store: TweetStore;
 let enrichStore: EnrichStore;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "xtap-pool-enrich-"));
-  hub = new FakeHub();
-  mirror = new DatasetMirror(hub, dir);
+  log = new FakeLog();
   store = new TweetStore();
   enrichStore = new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH);
 });
@@ -122,7 +120,7 @@ function withSelectedDiscardedPreset(
 }
 
 function hubJson(path: string): unknown {
-  const content = hub.files.get(path);
+  const content = log.files.get(path);
   if (content === undefined) throw new Error(`missing Hub fixture: ${path}`);
   return JSON.parse(content.trim()) as unknown;
 }
@@ -130,7 +128,7 @@ function hubJson(path: string): unknown {
 function deps(llm: LlmClient, overrides: Partial<EnrichWorkerDeps> = {}): EnrichWorkerDeps {
   return {
     enrichStore,
-    mirror,
+    log,
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
     llm,
     model: "test-model",
@@ -174,7 +172,7 @@ describe("runEnrichTick", () => {
       expect(resolveCalls).toHaveLength(3);
     });
     const dispatches = (
-      hub.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl") ?? ""
+      log.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl") ?? ""
     )
       .trim()
       .split("\n")
@@ -193,7 +191,7 @@ describe("runEnrichTick", () => {
       peak_concurrency: 3,
       commit_queue_peak: 3,
     });
-    const rows = (hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "")
+    const rows = (log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { unit_id: string });
@@ -282,7 +280,7 @@ describe("runEnrichTick", () => {
     expect(receipt.stopped_by).toBeUndefined();
   });
 
-  it("persists results, attempt events and registry events to the dataset", async () => {
+  it("persists results, attempt events and registry events to the Bucket log", async () => {
     seedUnit("100", "vllm ships fp8 kernels");
     await runEnrichTick(deps(respondingClient(withEvidence)));
     const row = hubJson("enrichment/2026/07/enrichment-2026-07-06.jsonl") as {
@@ -295,7 +293,7 @@ describe("runEnrichTick", () => {
     expect(hubJson("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl")).toMatchObject({
       first_queued_at: "2026-05-21T03:04:35.954Z",
     });
-    const registryShard = hub.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl");
+    const registryShard = log.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl");
     const registryNames = (registryShard?.trim().split("\n") ?? []).map(
       (line) => (JSON.parse(line) as { name: string }).name,
     );
@@ -322,7 +320,7 @@ describe("runEnrichTick", () => {
       });
     const receipt = await runEnrichTick(deps(messy));
     expect(receipt.discarded_assignments).toBeGreaterThan(0);
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
+    const shard = log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
     const row = JSON.parse(shard?.trim() ?? "{}") as {
       preset_labels: unknown[];
       free_labels: unknown[];
@@ -361,7 +359,7 @@ describe("runEnrichTick", () => {
     const receipt = await runEnrichTick(deps(model));
     expect(receipt.discarded_assignments).toBe(5);
     const row = JSON.parse(
-      hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "{}",
+      log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "{}",
     ) as { preset_labels: { name: string }[]; free_labels: { name: string }[] };
     expect(row.preset_labels.map((assignment) => assignment.name)).toEqual(["ai"]);
     expect(row.free_labels.map((assignment) => assignment.name)).toEqual(["fp8"]);
@@ -385,10 +383,10 @@ describe("runEnrichTick", () => {
       });
     };
     await expect(runEnrichTick(deps(fenced))).resolves.toMatchObject({ units: 1, failures: 0 });
-    hub.commits.length = 0;
+    log.commits.length = 0;
     const idle = await runEnrichTick(deps(fenced));
     expect(idle).toMatchObject({ units: 0, calls: 0, failures: 0 });
-    expect(hub.commits).toHaveLength(0);
+    expect(log.commits).toHaveLength(0);
   });
 
   it("persists an explicit idle receipt for a scheduled Job canary", async () => {
@@ -444,13 +442,13 @@ describe("runEnrichTick", () => {
 
   it("marks the batch retrying and keeps SQLite untouched when the commit fails", async () => {
     const unitId = seedUnit("100", "vllm fp8");
-    hub.failNextCommit = true;
+    log.failNextCommit = true;
     const receipt = await runEnrichTick(deps(respondingClient(withEvidence)));
     expect(receipt).toMatchObject({ units: 0, failures: 1 });
     const entry = enrichStore.queueEntry(unitId);
     expect(entry?.status).toBe("retrying");
     expect(entry?.attempts).toBe(1);
-    expect(entry?.lastError).toBe("hub unavailable");
+    expect(entry?.lastError).toBe("Bucket unavailable");
     expect(store.query({ labels: ["ai"] }).records).toHaveLength(0);
   });
 
@@ -512,7 +510,7 @@ describe("runEnrichTick", () => {
       is_retweet: true,
     });
     expect(posts[0]?.expanded_urls).toEqual(["https://huggingface.co/acme/model"]);
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "";
+    const shard = log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl") ?? "";
     expect((JSON.parse(shard) as { tweet_ids: string[] }).tweet_ids).toEqual(["100", "101"]);
     expect(enrichStore.queueEntry("100:someone")?.status).toBe("done");
   });
@@ -739,7 +737,7 @@ describe("runEnrichTick", () => {
     );
     expect(verifyHubLabel).toHaveBeenCalledWith("verified-model", expect.any(Array));
     expect(enrichStore.registryStatus("verified-model")).toBe("approved");
-    const events = hub.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl") ?? "";
+    const events = log.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl") ?? "";
     expect(events).toContain("verified-hub-reference");
   });
 
@@ -764,12 +762,12 @@ describe("runEnrichTick", () => {
       }),
     );
     await runEnrichTick(deps(response));
-    hub.commits.length = 0;
+    log.commits.length = 0;
     const receipt = await runEnrichTick(
       deps(response, { verifyHubLabel: () => Promise.resolve(true) }),
     );
     expect(receipt).toMatchObject({ units: 0, new_approvals: 1 });
-    const receiptShard = hub.files.get("enrichment/receipts/2026-07-06.jsonl") ?? "";
+    const receiptShard = log.files.get("enrichment/receipts/2026-07-06.jsonl") ?? "";
     expect(receiptShard).toContain('"new_approvals":1');
   });
 
@@ -891,7 +889,7 @@ describe("runEnrichTick", () => {
         ),
       ),
     );
-    const events = (hub.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl") ?? "")
+    const events = (log.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl") ?? "")
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { registry_revision: number });
@@ -917,7 +915,7 @@ describe("free-label regression fixtures", () => {
     const receipt = await runEnrichTick(deps(model));
     expect(receipt.units).toBe(1);
     expect(receipt.discarded_assignments).toBeGreaterThan(0);
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
+    const shard = log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
     const row = JSON.parse(shard?.trim() ?? "{}") as { free_labels: unknown[] };
     expect(row.free_labels).toEqual([]);
   });
@@ -944,7 +942,7 @@ describe("free-label regression fixtures", () => {
         usage: { prompt_tokens: 0, completion_tokens: 0 },
       });
     await runEnrichTick(deps(model));
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
+    const shard = log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
     const row = JSON.parse(shard?.trim() ?? "{}") as {
       free_labels: { name: string }[];
     };
@@ -976,7 +974,7 @@ describe("free-label regression fixtures", () => {
         usage: { prompt_tokens: 0, completion_tokens: 0 },
       });
     await runEnrichTick(deps(model));
-    const shard = hub.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
+    const shard = log.files.get("enrichment/2026/07/enrichment-2026-07-06.jsonl");
     const row = JSON.parse(shard?.trim() ?? "{}") as { free_labels: { name: string }[] };
     expect(row.free_labels.map((entry) => entry.name)).toEqual(["frontier-model"]);
   });

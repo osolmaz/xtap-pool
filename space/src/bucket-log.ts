@@ -25,7 +25,8 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SEGMENT_PREFIX = "v1/segments";
 const SNAPSHOT_PREFIX = "v1/snapshots";
-const SEGMENT_KEY = /^v1\/segments\/(tweet|enrichment|attempt|registry|receipt|config|mixed)\/(\d{4})\/(\d{2})\/(\d{2})\/(\d{13})-([0-9a-f-]{36})-([a-f0-9]{64})\.json\.gz$/u;
+const SEGMENT_KEY =
+  /^v1\/segments\/(tweet|enrichment|attempt|registry|receipt|config|mixed)\/(\d{4})\/(\d{2})\/(\d{2})\/(\d{13})-([0-9a-f-]{36})-([a-f0-9]{64})\.json\.gz$/u;
 const SNAPSHOT_KEY = /^v1\/snapshots\/([a-f0-9]{64})\.json$/u;
 const CONFIG_PATHS = new Set([
   "config/labels.json",
@@ -90,7 +91,8 @@ export const bucketSnapshotSchema = z
     }
   });
 
-export type BucketOperation = z.infer<typeof appendOperationSchema> | z.infer<typeof writeOperationSchema>;
+export type BucketOperation =
+  z.infer<typeof appendOperationSchema> | z.infer<typeof writeOperationSchema>;
 export type BucketSegment = z.infer<typeof bucketSegmentSchema>;
 export type BucketSnapshot = z.infer<typeof bucketSnapshotSchema>;
 export type BucketSnapshotFile = z.infer<typeof snapshotFileSchema>;
@@ -103,6 +105,11 @@ export type RawBucketClient = {
   download(key: string): Promise<Uint8Array | undefined>;
   upload(key: string, content: Uint8Array): Promise<void>;
 };
+
+export type StorageLog = Pick<
+  BucketLog,
+  "appendTweets" | "commitBatch" | "latestReceipt" | "readText" | "writeText"
+>;
 
 const legacyReceiptSchema = z
   .object({
@@ -216,7 +223,8 @@ export class BucketLog {
     const category = segmentCategory(segment.operations);
     const day = segment.created_at.slice(0, 10);
     const time = Date.parse(segment.created_at);
-    if (!Number.isSafeInteger(time)) throw new Error("segment created_at is outside the safe range");
+    if (!Number.isSafeInteger(time))
+      throw new Error("segment created_at is outside the safe range");
     const key = `${SEGMENT_PREFIX}/${category}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(time).padStart(13, "0")}-${segment.transaction_id}-${digest}.json.gz`;
     const compressed = new Uint8Array(await gzipAsync(raw, { level: 9 }));
     const existing = await this.client.download(key);
@@ -261,7 +269,8 @@ export class BucketLog {
       throw new Error(`Bucket snapshot is not valid UTF-8 JSON: ${key}`);
     }
     const snapshot = bucketSnapshotSchema.parse(candidate);
-    if (snapshot.bucket !== this.name) throw new Error(`Bucket snapshot source mismatch: ${snapshot.bucket}`);
+    if (snapshot.bucket !== this.name)
+      throw new Error(`Bucket snapshot source mismatch: ${snapshot.bucket}`);
     return snapshot;
   }
 
@@ -271,9 +280,11 @@ export class BucketLog {
     }
     const compressed = await this.client.download(file.key);
     if (compressed === undefined) throw new Error(`Bucket segment is missing: ${file.key}`);
-    if (compressed.byteLength !== file.size) throw new Error(`Bucket segment size mismatch: ${file.key}`);
+    if (compressed.byteLength !== file.size)
+      throw new Error(`Bucket segment size mismatch: ${file.key}`);
     const raw = new Uint8Array(await gunzipAsync(compressed));
-    if (sha256(raw) !== file.content_sha256) throw new Error(`Bucket segment checksum mismatch: ${file.key}`);
+    if (sha256(raw) !== file.content_sha256)
+      throw new Error(`Bucket segment checksum mismatch: ${file.key}`);
     let candidate: unknown;
     try {
       candidate = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
@@ -282,7 +293,8 @@ export class BucketLog {
     }
     const segment = bucketSegmentSchema.parse(candidate);
     validateOperations(segment.operations);
-    if (!equalBytes(canonicalBytes(segment), raw)) throw new Error(`Bucket segment is not canonical: ${file.key}`);
+    if (!equalBytes(canonicalBytes(segment), raw))
+      throw new Error(`Bucket segment is not canonical: ${file.key}`);
     return segment;
   }
 
@@ -290,12 +302,15 @@ export class BucketLog {
     assertConfigPath(path);
     const { snapshot } = await this.createSnapshot();
     let latest: { order: string; value: string } | undefined;
-    for (const file of snapshot.files.filter((item) => item.key.includes("/config/") || item.key.includes("/mixed/"))) {
+    for (const file of snapshot.files.filter(
+      (item) => item.key.includes("/config/") || item.key.includes("/mixed/"),
+    )) {
       const segment = await this.loadSegment(file);
       for (const operation of segment.operations) {
         if (operation.mode !== "write" || operation.path !== path) continue;
         const order = `${segment.created_at}\0${segment.transaction_id}\0${file.key}`;
-        if (latest === undefined || order > latest.order) latest = { order, value: operation.content };
+        if (latest === undefined || order > latest.order)
+          latest = { order, value: operation.content };
       }
     }
     return latest?.value;
@@ -304,6 +319,26 @@ export class BucketLog {
   async writeText(path: string, content: string, title?: string): Promise<void> {
     await this.commitBatch([], [{ path, content }], title);
     this.rememberText(path, content);
+  }
+
+  async hydrateMetadata(snapshot: BucketSnapshot): Promise<void> {
+    this.lastReceipt = undefined;
+    for (const file of snapshot.files) {
+      if (!file.key.includes("/receipt/") && !file.key.includes("/mixed/")) continue;
+      const segment = await this.loadSegment(file);
+      for (const operation of segment.operations) {
+        if (operation.mode !== "append" || sourceKind(operation.path) !== "receipt") continue;
+        for (const line of operation.lines) {
+          const receipt = parseEnrichReceipt(JSON.parse(line) as unknown);
+          if (
+            receipt !== undefined &&
+            (this.lastReceipt === undefined || receipt.finished_at > this.lastReceipt.finished_at)
+          ) {
+            this.lastReceipt = receipt;
+          }
+        }
+      }
+    }
   }
 
   applySegment(segment: BucketSegment, store: TweetStore, enrich: EnrichStore): SourceCounts {
@@ -368,9 +403,12 @@ export class BucketLog {
 
 export function sourceKind(path: string): SourceKind {
   if (/^data\/[^/]+\/\d{4}\/\d{2}\/tweets-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "tweet";
-  if (/^enrichment\/\d{4}\/\d{2}\/enrichment-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "enrichment";
-  if (/^enrichment\/attempts\/\d{4}\/\d{2}\/attempts-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "attempt";
-  if (/^enrichment\/registry\/\d{4}\/\d{2}\/registry-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "registry";
+  if (/^enrichment\/\d{4}\/\d{2}\/enrichment-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path))
+    return "enrichment";
+  if (/^enrichment\/attempts\/\d{4}\/\d{2}\/attempts-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path))
+    return "attempt";
+  if (/^enrichment\/registry\/\d{4}\/\d{2}\/registry-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path))
+    return "registry";
   if (/^enrichment\/receipts\/\d{4}-\d{2}-\d{2}\.jsonl$/u.test(path)) return "receipt";
   throw new Error(`unsupported Bucket log source: ${path}`);
 }
@@ -451,13 +489,19 @@ function validRecord(kind: SourceKind, candidate: unknown): boolean {
     case "tweet":
       return validateTweet(candidate).ok;
     case "enrichment":
-      return parseEnrichmentRow(candidate) !== undefined || legacyEnrichmentRowSchema.safeParse(candidate).success;
+      return (
+        parseEnrichmentRow(candidate) !== undefined ||
+        legacyEnrichmentRowSchema.safeParse(candidate).success
+      );
     case "attempt":
       return attemptEventSchema.safeParse(candidate).success;
     case "registry":
       return freeLabelEventSchema.safeParse(candidate).success;
     case "receipt":
-      return parseEnrichReceipt(candidate) !== undefined || legacyReceiptSchema.safeParse(candidate).success;
+      return (
+        parseEnrichReceipt(candidate) !== undefined ||
+        legacyReceiptSchema.safeParse(candidate).success
+      );
   }
 }
 
@@ -497,7 +541,9 @@ function applyLines(
 
 function segmentCategory(operations: readonly BucketOperation[]): string {
   const categories = new Set(
-    operations.map((operation) => (operation.mode === "write" ? "config" : sourceKind(operation.path))),
+    operations.map((operation) =>
+      operation.mode === "write" ? "config" : sourceKind(operation.path),
+    ),
   );
   return categories.size === 1 ? ([...categories][0] ?? "mixed") : "mixed";
 }
@@ -510,7 +556,8 @@ function segmentHash(key: string): string {
   const match = SEGMENT_KEY.exec(key);
   if (match === null) throw new Error(`invalid Bucket segment key: ${key}`);
   const digest = match[7];
-  if (digest === undefined || !SHA256.test(digest)) throw new Error(`invalid Bucket segment key: ${key}`);
+  if (digest === undefined || !SHA256.test(digest))
+    throw new Error(`invalid Bucket segment key: ${key}`);
   const day = `${match[2] ?? ""}-${match[3] ?? ""}-${match[4] ?? ""}`;
   const time = Number(match[5]);
   if (new Date(time).toISOString().slice(0, 10) !== day || !UUID.test(match[6] ?? "")) {

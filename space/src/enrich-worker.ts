@@ -24,7 +24,7 @@ import type {
   LabelConfig,
 } from "@xtap-pool/shared";
 
-import type { DatasetMirror } from "./dataset.js";
+import type { StorageLog } from "./bucket-log.js";
 import type { EnrichTaxonomy } from "./enrich-config.js";
 import type { EnrichStore, QueueItem } from "./enrich-store.js";
 import {
@@ -309,7 +309,7 @@ export type FreeLabelJudge = (
 
 export type EnrichWorkerDeps = {
   enrichStore: EnrichStore;
-  mirror: DatasetMirror;
+  log: StorageLog;
   taxonomy: EnrichTaxonomy;
   llm: LlmClient;
   model: string;
@@ -1137,7 +1137,7 @@ async function persistAndApply(
 }
 
 /**
- * Events are allocated under the same lock as their dataset commit. A batch
+ * Events are allocated under the same lock as their Bucket transaction. A batch
  * can discover several labels, so `registryRevision() + 1` at construction
  * time is not a revision allocator.
  */
@@ -1287,7 +1287,7 @@ async function persistRowsAndEvents(
     if (bucket === undefined) byPath.set(path, [JSON.stringify(event)]);
     else bucket.push(JSON.stringify(event));
   }
-  await deps.mirror.commitBatch(
+  await deps.log.commitBatch(
     [...byPath.entries()].map(([path, lines]) => ({ path, lines })),
     [],
     `enrich: ${String(rows.length)} units`,
@@ -1398,7 +1398,7 @@ async function persistAttemptAndApply(deps: EnrichWorkerDeps, event: AttemptEven
   const validated = attemptEventSchema.parse(event);
   const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
   await lock(async () => {
-    await deps.mirror.commitBatch(
+    await deps.log.commitBatch(
       [{ path: attemptEventPathFor(validated.at), lines: [JSON.stringify(validated)] }],
       [],
       `enrich: attempt ${validated.unit_id.slice(0, 40)}`,
@@ -1408,7 +1408,7 @@ async function persistAttemptAndApply(deps: EnrichWorkerDeps, event: AttemptEven
 }
 
 async function writeReceipt(deps: EnrichWorkerDeps, receipt: EnrichReceipt): Promise<void> {
-  await deps.mirror.commitBatch(
+  await deps.log.commitBatch(
     [{ path: receiptPathFor(receipt.finished_at), lines: [JSON.stringify(receipt)] }],
     [],
     `enrich: receipt ${receipt.finished_at.slice(0, 10)}`,

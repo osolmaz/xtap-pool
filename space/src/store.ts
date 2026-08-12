@@ -81,7 +81,7 @@ export function decodeCursor(cursor: string): Cursor | undefined {
   return contributedBy === undefined ? { sortTs, id } : { sortTs, id, contributedBy };
 }
 
-/** In-process index over the pooled tweets; a cache of the dataset repo, rebuilt on boot. */
+/** In-process index over the pooled tweets; a cache of the raw Bucket log, rebuilt on boot. */
 export class TweetStore {
   private readonly db: Database.Database;
 
@@ -131,7 +131,7 @@ export class TweetStore {
     return this.db;
   }
 
-  /** Clear the tweet index before replaying a complete dataset snapshot. */
+  /** Clear the tweet index before replaying a complete Bucket snapshot. */
   clearForRebuild(): void {
     this.db.prepare("DELETE FROM tweets").run();
   }

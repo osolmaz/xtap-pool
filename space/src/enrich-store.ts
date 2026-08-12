@@ -96,7 +96,7 @@ function isLegalRegistryTransition(
 /**
  * Enrichment tables live beside the tweet index so label filters compose
  * with tweet queries in one SQL statement. Everything here is a cache
- * rebuilt from the dataset (tweets + result shards + attempt events +
+ * rebuilt from the Bucket log (tweets + result shards + attempt events +
  * registry events).
  */
 export function ensureEnrichmentTables(db: Database.Database): void {
@@ -237,7 +237,7 @@ export class EnrichStore {
     return next;
   }
 
-  /** Clear all derived enrichment state before replaying a complete dataset snapshot. */
+  /** Clear all derived enrichment state before replaying a complete Bucket snapshot. */
   clearForRebuild(): void {
     const clear = this.db.transaction(() => {
       for (const table of [
@@ -739,7 +739,7 @@ export class EnrichStore {
         return;
       }
       // Historical rows, rows from another contract, and stale rows may be
-      // retained in the append-only dataset, but must never erase a current
+      // retained in the append-only Bucket log, but must never erase a current
       // projection or seed registry state during replay.
       if (!this.matchesCurrentUnit(enrichment)) return;
       const existing = this.db

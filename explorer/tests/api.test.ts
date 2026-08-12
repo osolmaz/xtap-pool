@@ -143,7 +143,7 @@ describe("explorer API", () => {
       member_orgs: [],
       bootstrap_admins: [],
       updated_at: "now",
-      source: "dataset" as const,
+      source: "bucket" as const,
     };
     vi.stubGlobal(
       "fetch",
@@ -162,11 +162,11 @@ describe("explorer API", () => {
           return Response.json({ registry_revision: 1, labels: [], candidates: [] });
         if (path === "/api/admin/service-accounts")
           return Response.json({
-            service_accounts: { version: 1, accounts: [], source: "dataset" },
+            service_accounts: { version: 1, accounts: [], source: "bucket" },
           });
         if (path === "/api/admin/service-accounts/repair")
           return Response.json({
-            service_accounts: { version: 1, accounts: [], source: "dataset" },
+            service_accounts: { version: 1, accounts: [], source: "bucket" },
           });
         if (path.includes("/keys") && !path.endsWith("/key%201"))
           return Response.json({ account, token: "token" });

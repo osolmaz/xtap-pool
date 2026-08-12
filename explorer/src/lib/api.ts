@@ -46,7 +46,7 @@ export type PoolSnapshot = {
   bootstrap_admins: readonly string[];
   updated_at: string;
   updated_by?: string;
-  source: "dataset" | "bootstrap";
+  source: "bucket" | "bootstrap";
   config_error?: string;
 };
 

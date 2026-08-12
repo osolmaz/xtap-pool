@@ -10,7 +10,6 @@ import type { EnrichReceipt } from "@xtap-pool/shared";
 
 import { createApp } from "../src/app.js";
 import type { EnrichDeps } from "../src/app.js";
-import { DatasetMirror } from "../src/dataset.js";
 import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
 import { CompleteGraphLimitError, EnrichStore } from "../src/enrich-store.js";
 import {
@@ -25,7 +24,8 @@ import { mintPoolToken } from "../src/pool-token.js";
 import { ServiceAccountRegistry } from "../src/service-accounts.js";
 import { TweetStore } from "../src/store.js";
 import { UnitStore } from "../src/unit-store.js";
-import { FakeHub, makeTweet, testConfig } from "./helpers.js";
+import { makeTweet, testConfig } from "./helpers.js";
+import { FakeLog } from "./fake-log.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
 const FUTURE = new Date("2027-01-01T00:00:00.000Z");
@@ -65,7 +65,7 @@ void computeContractHash({
 });
 
 let dir: string;
-let hub: FakeHub;
+let log: FakeLog;
 let store: TweetStore;
 let app: Hono;
 let membership: PoolMembership;
@@ -90,16 +90,15 @@ function sessionCookieFrom(setCookie: string | null): string {
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "xtap-pool-app-"));
-  hub = new FakeHub();
+  log = new FakeLog();
   store = new TweetStore();
-  const mirror = new DatasetMirror(hub, dir);
   membership = await PoolMembership.load({
-    mirror,
+    log,
     bootstrapMembers: testConfig.allowedUsers,
     bootstrapAdmins: testConfig.poolAdmins,
     now: () => NOW,
   });
-  serviceAccounts = await ServiceAccountRegistry.load({ mirror, now: () => NOW });
+  serviceAccounts = await ServiceAccountRegistry.load({ log, now: () => NOW });
   const mutex = new Mutex();
   enrich = {
     store: new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH),
@@ -116,7 +115,7 @@ beforeEach(async () => {
     now: () => NOW,
     ingest: (username, payload) =>
       mutex.run(() =>
-        ingestBatch({ store, mirror, enrich: enrich.store, now: () => NOW }, username, payload),
+        ingestBatch({ store, log, enrich: enrich.store, now: () => NOW }, username, payload),
       ),
   });
 });
@@ -144,7 +143,7 @@ describe("health", () => {
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       readiness: () => ({
         ok: false,
-        dataset: {
+        storage: {
           indexed_files: 1,
           indexed_tweets: 0,
           enrichment_rows: 0,
@@ -171,14 +170,14 @@ describe("health", () => {
     await expect(response.json()).resolves.toMatchObject({
       ok: false,
       tweets: 0,
-      readiness: { dataset: { indexed_files: 1, indexed_tweets: 0 } },
+      readiness: { storage: { indexed_files: 1, indexed_tweets: 0 } },
     });
   });
 
   it("lets a bootstrap admin authenticate and repair malformed membership", async () => {
-    hub.files.set("config/pool.json", "not json");
+    log.files.set("config/pool.json", "not json");
     const brokenMembership = await PoolMembership.load({
-      mirror: new DatasetMirror(hub, dir),
+      log,
       bootstrapMembers: testConfig.allowedUsers,
       bootstrapAdmins: testConfig.poolAdmins,
       now: () => NOW,
@@ -194,7 +193,7 @@ describe("health", () => {
       ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       readiness: () => ({
         ok: !brokenMembership.hasConfigError(),
-        dataset: {
+        storage: {
           indexed_files: 1,
           indexed_tweets: 0,
           enrichment_rows: 0,
@@ -225,7 +224,7 @@ describe("health", () => {
     });
     expect(repaired.status).toBe(200);
     await expect(repaired.json()).resolves.toMatchObject({
-      pool: { source: "dataset", members: ["alice", "osolmaz"] },
+      pool: { source: "bucket", members: ["alice", "osolmaz"] },
     });
     expect((await recoveryApp.request("/api/tweets", { headers })).status).toBe(200);
   });
@@ -255,7 +254,7 @@ describe("/api/ingest", () => {
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ added: 1, duplicates: 0, rejected: [] });
-    expect(hub.commits).toHaveLength(1);
+    expect(log.commits).toHaveLength(1);
   });
 
   it("rejects non-JSON bodies and surfaces persistence failures", async () => {
@@ -265,7 +264,7 @@ describe("/api/ingest", () => {
       body: "not json",
     });
     expect(bad.status).toBe(400);
-    hub.failNextCommit = true;
+    log.failNextCommit = true;
     const failed = await app.request("/api/ingest", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: bearer("osolmaz") },
@@ -757,13 +756,7 @@ describe("oauth + connect flow", () => {
       enrich,
       now: () => NOW,
       ingest: (username, payload) =>
-        new Mutex().run(() =>
-          ingestBatch(
-            { store, mirror: new DatasetMirror(hub, dir), now: () => NOW },
-            username,
-            payload,
-          ),
-        ),
+        new Mutex().run(() => ingestBatch({ store, log, now: () => NOW }, username, payload)),
       oauthFetch,
     });
 
@@ -922,7 +915,7 @@ describe("admin pool management", () => {
       headers: adminHeaders,
     });
     expect(added.status).toBe(200);
-    expect(hub.files.get("config/pool.json")).toContain("mallory");
+    expect(log.files.get("config/pool.json")).toContain("mallory");
     expect(
       (
         await app.request("/api/ingest", {

@@ -10,7 +10,7 @@ import type {
   ServiceAccountSummary,
 } from "@xtap-pool/shared";
 
-import type { DatasetMirror } from "./dataset.js";
+import type { StorageLog } from "./bucket-log.js";
 
 export const SERVICE_ACCOUNTS_PATH = "config/service-accounts.json";
 
@@ -47,7 +47,7 @@ type StoredServiceAccount = ServiceAccountFile["accounts"][number];
 type StoredServiceAccountKey = StoredServiceAccount["keys"][number];
 
 type ServiceAccountRegistryOptions = {
-  mirror: DatasetMirror;
+  log: StorageLog;
   now: () => Date;
 };
 
@@ -65,7 +65,7 @@ export type ServiceAccountIdentity = {
   scopes: readonly ServiceAccountScope[];
 };
 
-/** Dataset-backed registry for rotatable, least-privilege machine credentials. */
+/** Bucket-backed registry for rotatable, least-privilege machine credentials. */
 export class ServiceAccountRegistry {
   private file: ServiceAccountFile;
   private source: ServiceAccountsSnapshot["source"];
@@ -245,13 +245,13 @@ export class ServiceAccountRegistry {
 
   private async commit(file: ServiceAccountFile, title: string): Promise<void> {
     const normalized = normalizeFile(file);
-    await this.options.mirror.writeTextAndCommit(
+    await this.options.log.writeText(
       SERVICE_ACCOUNTS_PATH,
       `${JSON.stringify(normalized, null, 2)}\n`,
       title,
     );
     this.file = normalized;
-    this.source = "dataset";
+    this.source = "bucket";
     this.configError = undefined;
     this.configErrorRetryable = false;
   }
@@ -376,7 +376,7 @@ function toSummary(account: StoredServiceAccount): ServiceAccountSummary {
 async function loadFile(options: ServiceAccountRegistryOptions): Promise<LoadedServiceAccounts> {
   let raw: string | undefined;
   try {
-    raw = await options.mirror.readText(SERVICE_ACCOUNTS_PATH);
+    raw = await options.log.readText(SERVICE_ACCOUNTS_PATH);
   } catch (error) {
     return {
       file: emptyFile(),
@@ -389,7 +389,7 @@ async function loadFile(options: ServiceAccountRegistryOptions): Promise<LoadedS
   try {
     return {
       file: normalizeFile(serviceAccountsFileSchema.parse(JSON.parse(raw))),
-      source: "dataset",
+      source: "bucket",
       retryable: false,
     };
   } catch (error) {

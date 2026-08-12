@@ -5,20 +5,17 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DatasetMirror } from "../src/dataset.js";
 import { DEFAULT_TAXONOMY, LABELS_CONFIG_PATH, loadEnrichTaxonomy } from "../src/enrich-config.js";
-import { FakeHub } from "./helpers.js";
+import { FakeLog } from "./fake-log.js";
 
 const FIXTURE = readFileSync(join(import.meta.dirname, "fixtures/labels.json"), "utf8");
 
 let dir: string;
-let hub: FakeHub;
-let mirror: DatasetMirror;
+let log: FakeLog;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "xtap-pool-enrich-config-"));
-  hub = new FakeHub();
-  mirror = new DatasetMirror(hub, dir);
+  log = new FakeLog();
 });
 
 afterEach(() => {
@@ -26,16 +23,16 @@ afterEach(() => {
 });
 
 describe("loadEnrichTaxonomy", () => {
-  it("loads config/labels.json from the dataset", async () => {
-    hub.files.set(LABELS_CONFIG_PATH, FIXTURE);
-    const taxonomy = await loadEnrichTaxonomy(mirror, 2);
-    expect(taxonomy.source).toBe("dataset");
+  it("loads config/labels.json from the raw Bucket", async () => {
+    log.files.set(LABELS_CONFIG_PATH, FIXTURE);
+    const taxonomy = await loadEnrichTaxonomy(log, 2);
+    expect(taxonomy.source).toBe("bucket");
     expect(taxonomy.version).toBe(2);
     expect(taxonomy.labels.map((label) => label.name)).toEqual(["ai", "local-models", "robotics"]);
   });
 
   it("falls back to the built-in taxonomy when the file is absent", async () => {
-    const taxonomy = await loadEnrichTaxonomy(mirror, 1);
+    const taxonomy = await loadEnrichTaxonomy(log, 1);
     expect(taxonomy.source).toBe("default");
     expect(taxonomy.labels).toBe(DEFAULT_TAXONOMY);
     expect(taxonomy.labels.map((label) => label.name)).toEqual([
@@ -51,26 +48,19 @@ describe("loadEnrichTaxonomy", () => {
   });
 
   it("falls back with a retryable error when the config cannot be read", async () => {
-    const brokenMirror = new DatasetMirror(
-      {
-        listJsonlFiles: () => Promise.resolve([]),
-        downloadFile: () => Promise.reject(new Error("cannot read dataset")),
-        commitFiles: () => Promise.resolve(),
-      },
-      dir,
-    );
-    await expect(loadEnrichTaxonomy(brokenMirror, 1)).resolves.toMatchObject({
+    log.failReadAttempts = 1;
+    await expect(loadEnrichTaxonomy(log, 1)).resolves.toMatchObject({
       source: "default",
-      error: "cannot read dataset",
+      error: "Bucket unavailable",
     });
   });
 
   it("falls back on invalid content", async () => {
-    hub.files.set(LABELS_CONFIG_PATH, "not json");
-    await expect(loadEnrichTaxonomy(mirror, 1)).resolves.toMatchObject({ source: "default" });
-    hub.files.set(LABELS_CONFIG_PATH, JSON.stringify([{ name: "" }]));
-    await expect(loadEnrichTaxonomy(mirror, 1)).resolves.toMatchObject({ source: "default" });
-    hub.files.set(LABELS_CONFIG_PATH, "[]");
-    await expect(loadEnrichTaxonomy(mirror, 1)).resolves.toMatchObject({ source: "default" });
+    log.files.set(LABELS_CONFIG_PATH, "not json");
+    await expect(loadEnrichTaxonomy(log, 1)).resolves.toMatchObject({ source: "default" });
+    log.files.set(LABELS_CONFIG_PATH, JSON.stringify([{ name: "" }]));
+    await expect(loadEnrichTaxonomy(log, 1)).resolves.toMatchObject({ source: "default" });
+    log.files.set(LABELS_CONFIG_PATH, "[]");
+    await expect(loadEnrichTaxonomy(log, 1)).resolves.toMatchObject({ source: "default" });
   });
 });

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 
 const baseEnv = {
-  DATASET_REPO: "osolmaz/xtap-pool-data",
+  RAW_BUCKET: "osolmaz/xtap-pool-data",
   INDEX_BUCKET: "osolmaz/xtap-pool-bucket",
   HF_TOKEN: "hf_x",
   POOL_SIGNING_SECRET: "pool-secret-0123456789abcdef0123456789abcdef",

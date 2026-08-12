@@ -10,27 +10,27 @@ const TARGET_PERMISSIONS = new Set([
 const READ_PERMISSION = "repo.content.read";
 const WRITE_PERMISSIONS = ["repo.content.write", "repo.write"] as const;
 
-type StorageTarget = { kind: "bucket" | "dataset"; name: string };
+type StorageTarget = { kind: "bucket"; name: string };
 
-export type DatasetCredentialReadiness =
+export type StorageCredentialReadiness =
   | { credential: "ok" }
   | { credential: "invalid"; error: string }
   | { credential: "unknown"; error: string };
 
-/** Verify the Space HF_TOKEN can read and write the configured dataset and index Bucket only. */
-export async function checkDatasetCredential(params: {
+/** Verify the Space HF_TOKEN can read and write the configured raw and index Buckets only. */
+export async function checkStorageCredential(params: {
   token: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   fetchFn?: typeof fetch;
-}): Promise<DatasetCredentialReadiness> {
+}): Promise<StorageCredentialReadiness> {
   try {
     const response = await (params.fetchFn ?? fetch)("https://huggingface.co/api/whoami-v2", {
       headers: { authorization: `Bearer ${params.token}` },
     });
     if (!response.ok) return tokenStatusError("HF_TOKEN", response.status);
     const targets: readonly StorageTarget[] = [
-      { kind: "dataset", name: params.datasetRepo },
+      { kind: "bucket", name: params.rawBucket },
       { kind: "bucket", name: params.indexBucket },
     ];
     const errors = storageTokenErrors(await response.json(), targets);
@@ -41,21 +41,21 @@ export async function checkDatasetCredential(params: {
   }
 }
 
-export function datasetCredentialOk(status: DatasetCredentialReadiness): boolean {
+export function storageCredentialOk(status: StorageCredentialReadiness): boolean {
   return status.credential === "ok";
 }
 
 async function checkStorageReads(params: {
   token: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   fetchFn?: typeof fetch;
-}): Promise<DatasetCredentialReadiness> {
+}): Promise<StorageCredentialReadiness> {
   const fetchFn = params.fetchFn ?? fetch;
   const probes = [
     {
-      url: `https://huggingface.co/datasets/${params.datasetRepo}/resolve/main/config/pool.json`,
-      label: "private-dataset download",
+      url: `https://huggingface.co/api/buckets/${params.rawBucket}`,
+      label: "private raw-Bucket read",
     },
     {
       url: `https://huggingface.co/api/buckets/${params.indexBucket}`,
@@ -168,10 +168,10 @@ function entityLabel(entity: JsonObject): string {
 }
 
 function normalizeName(value: string, kind: StorageTarget["kind"]): string {
-  return value.replace(kind === "dataset" ? /^datasets\//u : /^buckets\//u, "");
+  return value.replace(/^buckets\//u, "");
 }
 
-function tokenStatusError(tokenName: "HF_TOKEN", status: number): DatasetCredentialReadiness {
+function tokenStatusError(tokenName: "HF_TOKEN", status: number): StorageCredentialReadiness {
   const error = `Hugging Face rejected ${tokenName} (${String(status)}).`;
   if (status === 401 || status === 403) return { credential: "invalid", error };
   return { credential: "unknown", error };

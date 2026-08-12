@@ -4,21 +4,20 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DatasetMirror } from "../src/dataset.js";
 import { SERVICE_ACCOUNTS_PATH, ServiceAccountRegistry } from "../src/service-accounts.js";
-import { FakeHub } from "./helpers.js";
+import { FakeLog } from "./fake-log.js";
 
 const NOW = new Date("2026-07-27T00:00:00.000Z");
 
 let dir: string;
-let hub: FakeHub;
+let log: FakeLog;
 let registry: ServiceAccountRegistry;
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "xtap-service-accounts-"));
-  hub = new FakeHub();
+  log = new FakeLog();
   registry = await ServiceAccountRegistry.load({
-    mirror: new DatasetMirror(hub, dir),
+    log,
     now: () => NOW,
   });
 });
@@ -45,7 +44,7 @@ describe("ServiceAccountRegistry", () => {
     });
     expect(registry.authorize(issued.token, "taxonomy:read")).toBeDefined();
 
-    const durable = hub.files.get(SERVICE_ACCOUNTS_PATH) ?? "";
+    const durable = log.files.get(SERVICE_ACCOUNTS_PATH) ?? "";
     const secret = /^xtap_sa_[^_]+_[^_]+_(.+)$/.exec(issued.token)?.[1];
     if (secret === undefined) throw new Error("issued token is malformed");
     expect(durable).not.toContain(issued.token);
@@ -73,7 +72,7 @@ describe("ServiceAccountRegistry", () => {
   });
 
   it("fails closed when a durable key has an invalid expiration timestamp", async () => {
-    hub.files.set(
+    log.files.set(
       SERVICE_ACCOUNTS_PATH,
       JSON.stringify({
         version: 1,
@@ -98,7 +97,7 @@ describe("ServiceAccountRegistry", () => {
       }),
     );
     registry = await ServiceAccountRegistry.load({
-      mirror: new DatasetMirror(hub, dir),
+      log,
       now: () => NOW,
     });
 
@@ -107,9 +106,9 @@ describe("ServiceAccountRegistry", () => {
   });
 
   it("fails closed on malformed durable configuration and repairs explicitly", async () => {
-    hub.files.set(SERVICE_ACCOUNTS_PATH, "not json");
+    log.files.set(SERVICE_ACCOUNTS_PATH, "not json");
     registry = await ServiceAccountRegistry.load({
-      mirror: new DatasetMirror(hub, dir),
+      log,
       now: () => NOW,
     });
     expect(registry.hasPermanentConfigError()).toBe(true);
@@ -118,6 +117,6 @@ describe("ServiceAccountRegistry", () => {
     );
 
     await registry.repair("osolmaz");
-    expect(registry.snapshot()).toEqual({ version: 1, accounts: [], source: "dataset" });
+    expect(registry.snapshot()).toEqual({ version: 1, accounts: [], source: "bucket" });
   });
 });
