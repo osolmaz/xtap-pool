@@ -28,12 +28,13 @@ const SNAPSHOT_PREFIX = "v1/snapshots";
 const SEGMENT_KEY =
   /^v1\/segments\/(tweet|enrichment|attempt|registry|receipt|config|mixed)\/(\d{4})\/(\d{2})\/(\d{2})\/(\d{13})-([0-9a-f-]{36})-([a-f0-9]{64})\.json\.gz$/u;
 const SNAPSHOT_KEY = /^v1\/snapshots\/([a-f0-9]{64})\.json$/u;
-const CONFIG_PATHS = new Set([
+export const RAW_CONFIG_PATHS = [
   "config/labels.json",
   "config/pool.json",
   "config/service-accounts.json",
   "enrichment/vocabulary.json",
-]);
+] as const;
+const CONFIG_PATHS = new Set<string>(RAW_CONFIG_PATHS);
 
 const appendOperationSchema = z
   .object({
@@ -98,7 +99,7 @@ export type BucketSnapshot = z.infer<typeof bucketSnapshotSchema>;
 export type BucketSnapshotFile = z.infer<typeof snapshotFileSchema>;
 export type SourceKind = "tweet" | "enrichment" | "attempt" | "registry" | "receipt";
 export type SourceCounts = Readonly<Record<SourceKind, number>>;
-export type BucketObject = { key: string; oid: string; size: number };
+export type BucketObject = { key: string; oid?: string; size: number };
 
 export type RawBucketClient = {
   list(prefix: string): Promise<readonly BucketObject[]>;
@@ -110,6 +111,18 @@ export type StorageLog = Pick<
   BucketLog,
   "appendTweets" | "commitBatch" | "latestReceipt" | "readText" | "writeText"
 >;
+
+export function receiptsInSegment(segment: BucketSegment): EnrichReceipt[] {
+  const receipts: EnrichReceipt[] = [];
+  for (const operation of segment.operations) {
+    if (operation.mode !== "append" || sourceKind(operation.path) !== "receipt") continue;
+    for (const line of operation.lines) {
+      const receipt = parseEnrichReceipt(JSON.parse(line) as unknown);
+      if (receipt !== undefined) receipts.push(receipt);
+    }
+  }
+  return receipts;
+}
 
 const legacyReceiptSchema = z
   .object({
@@ -149,10 +162,11 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
       })) {
         if (entry.type !== "file") continue;
         const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
-        if (oid === undefined || oid.length === 0) {
-          throw new Error(`Bucket object has no immutable object id: ${entry.path}`);
-        }
-        objects.push({ key: entry.path, oid, size: entry.size });
+        objects.push({
+          key: entry.path,
+          ...(oid === undefined || oid.length === 0 ? {} : { oid }),
+          size: entry.size,
+        });
       }
       return objects;
     },
@@ -237,12 +251,38 @@ export class BucketLog {
     const objects = [...(await this.client.list(SEGMENT_PREFIX))].sort((a, b) =>
       a.key.localeCompare(b.key),
     );
-    const files = objects.map((object): BucketSnapshotFile => ({
-      key: object.key,
-      oid: object.oid,
-      size: object.size,
-      content_sha256: segmentHash(object.key),
-    }));
+    const files: BucketSnapshotFile[] = [];
+    for (const object of objects) {
+      const compressed = await this.client.download(object.key);
+      if (compressed === undefined) {
+        throw new Error(`Bucket object disappeared while creating snapshot: ${object.key}`);
+      }
+      if (compressed.byteLength !== object.size) {
+        throw new Error(`Bucket object size changed while creating snapshot: ${object.key}`);
+      }
+      let raw: Uint8Array;
+      try {
+        raw = new Uint8Array(await gunzipAsync(compressed));
+      } catch {
+        throw new Error(`Bucket object is not valid gzip: ${object.key}`);
+      }
+      if (sha256(raw) !== segmentHash(object.key)) {
+        throw new Error(`Bucket object checksum mismatch: ${object.key}`);
+      }
+      const segment = bucketSegmentSchema.parse(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)),
+      );
+      validateOperations(segment.operations);
+      if (!equalBytes(canonicalBytes(segment), raw)) {
+        throw new Error(`Bucket object is not canonical: ${object.key}`);
+      }
+      files.push({
+        key: object.key,
+        oid: sha256(compressed),
+        size: object.size,
+        content_sha256: segmentHash(object.key),
+      });
+    }
     const snapshot = bucketSnapshotSchema.parse({ schema_version: 1, bucket: this.name, files });
     const raw = canonicalBytes(snapshot);
     const revision = sha256(raw);
@@ -282,6 +322,9 @@ export class BucketLog {
     if (compressed === undefined) throw new Error(`Bucket segment is missing: ${file.key}`);
     if (compressed.byteLength !== file.size)
       throw new Error(`Bucket segment size mismatch: ${file.key}`);
+    if (SHA256.test(file.oid) && sha256(compressed) !== file.oid) {
+      throw new Error(`Bucket segment object identity mismatch: ${file.key}`);
+    }
     const raw = new Uint8Array(await gunzipAsync(compressed));
     if (sha256(raw) !== file.content_sha256)
       throw new Error(`Bucket segment checksum mismatch: ${file.key}`);

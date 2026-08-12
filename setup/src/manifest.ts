@@ -23,7 +23,7 @@ export function manifestFromSpace(
   return {
     ...config,
     requiredVariables: [
-      "DATASET_REPO",
+      "RAW_BUCKET",
       "INDEX_BUCKET",
       "ALLOWED_USERS",
       "POOL_ADMINS",

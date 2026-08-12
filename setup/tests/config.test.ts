@@ -18,7 +18,7 @@ describe("setup config helpers", () => {
     expect(defaultSetupConfig("alice")).toEqual({
       namespace: "alice",
       spaceRepo: "alice/xtap-pool",
-      datasetRepo: "alice/xtap-pool-data",
+      rawBucket: "alice/xtap-pool-data",
       indexBucket: "alice/xtap-pool-bucket",
       allowedUsers: ["alice"],
       poolAdmins: ["alice"],
@@ -35,7 +35,7 @@ describe("setup config helpers", () => {
       "alice",
       "team/xtap-pool",
       new Map([
-        ["DATASET_REPO", "team/tweets"],
+        ["RAW_BUCKET", "team/tweets"],
         ["INDEX_BUCKET", "team/tweets-index-bucket"],
         ["ALLOWED_USERS", "alice,bob"],
         ["POOL_ADMINS", "bob"],
@@ -45,7 +45,7 @@ describe("setup config helpers", () => {
     expect(config).toEqual({
       namespace: "team",
       spaceRepo: "team/xtap-pool",
-      datasetRepo: "team/tweets",
+      rawBucket: "team/tweets",
       indexBucket: "team/tweets-index-bucket",
       allowedUsers: ["alice", "bob"],
       poolAdmins: ["bob"],
@@ -58,7 +58,7 @@ describe("setup config helpers", () => {
     expect(config).toEqual({
       namespace: "team",
       spaceRepo: "team/xtap-pool",
-      datasetRepo: "team/xtap-pool-data",
+      rawBucket: "team/xtap-pool-data",
       indexBucket: "team/xtap-pool-bucket",
       allowedUsers: ["alice"],
       poolAdmins: ["alice"],

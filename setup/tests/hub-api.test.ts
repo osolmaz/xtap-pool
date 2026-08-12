@@ -13,12 +13,12 @@ import {
 describe("space variable parsing", () => {
   it("accepts current and simple API shapes", () => {
     const variables = parseSpaceVariables({
-      DATASET_REPO: { value: "alice/xtap-pool-data" },
+      RAW_BUCKET: { value: "alice/xtap-pool-data" },
       ALLOWED_USERS: "alice,bob",
       IGNORED: { value: 42 },
     });
     expect([...variables.entries()]).toEqual([
-      ["DATASET_REPO", "alice/xtap-pool-data"],
+      ["RAW_BUCKET", "alice/xtap-pool-data"],
       ["ALLOWED_USERS", "alice,bob"],
     ]);
   });
@@ -42,12 +42,12 @@ describe("space variable parsing", () => {
       if (requestUrl(input).endsWith("/secrets")) {
         return Promise.resolve(Response.json([{ key: "HF_TOKEN" }]));
       }
-      return Promise.resolve(Response.json({ DATASET_REPO: { value: "alice/xtap-pool-data" } }));
+      return Promise.resolve(Response.json({ RAW_BUCKET: { value: "alice/xtap-pool-data" } }));
     };
     const client = { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn };
 
     await expect(getSpaceVariables(client, "alice/xtap-pool")).resolves.toEqual(
-      new Map([["DATASET_REPO", "alice/xtap-pool-data"]]),
+      new Map([["RAW_BUCKET", "alice/xtap-pool-data"]]),
     );
     await expect(getSpaceSecrets(client, "alice/xtap-pool")).resolves.toEqual(
       new Set(["HF_TOKEN"]),

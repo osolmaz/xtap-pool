@@ -10,6 +10,7 @@ import { usersValue } from "./config.js";
 import { ENRICHMENT_JOB_DEFAULT_VARIABLES } from "./enrichment-job.js";
 import type { HubClient, HubRepo } from "./hub-api.js";
 import {
+  deleteSpaceVariable,
   getRepoPrivateState,
   getSpaceVariables,
   setSpaceSecret,
@@ -26,7 +27,7 @@ export async function deployPool(
   client: HubClient,
   config: SetupConfig,
 ): Promise<void> {
-  await ensureRepo(client, { type: "dataset", name: config.datasetRepo }, "private");
+  await ensureRepo(client, { type: "bucket", name: config.rawBucket }, "private");
   await ensureRepo(client, { type: "bucket", name: config.indexBucket }, "private");
   await ensureRepo(client, { type: "space", name: config.spaceRepo }, "public");
   await uploadSpace(root, client, config.spaceRepo);
@@ -49,7 +50,7 @@ export async function updateExistingPool(
   client: HubClient,
   config: SetupConfig,
 ): Promise<void> {
-  await assertRepoVisibility(client, { type: "dataset", name: config.datasetRepo }, "private");
+  await assertRepoVisibility(client, { type: "bucket", name: config.rawBucket }, "private");
   await assertRepoVisibility(client, { type: "bucket", name: config.indexBucket }, "private");
   await assertRepoVisibility(client, { type: "space", name: config.spaceRepo }, "public");
   await uploadSpace(root, client, config.spaceRepo);
@@ -63,7 +64,10 @@ export async function configureSpace(
 ): Promise<void> {
   const initializeGeneratedSecrets = options.initializeGeneratedSecrets ?? true;
   const variables = await getSpaceVariables(client, config.spaceRepo);
-  await setSpaceVariable(client, config.spaceRepo, "DATASET_REPO", config.datasetRepo);
+  if (variables.has("DATASET_REPO")) {
+    await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
+  }
+  await setSpaceVariable(client, config.spaceRepo, "RAW_BUCKET", config.rawBucket);
   await setSpaceVariable(client, config.spaceRepo, "INDEX_BUCKET", config.indexBucket);
   await setSpaceVariable(
     client,

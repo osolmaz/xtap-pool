@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { evaluateStorageWriteToken, verifyStorageWriteToken } from "../src/token.js";
 
-const datasetRepo = "alice/xtap-pool-data";
+const rawBucket = "alice/xtap-pool-data";
 const indexBucket = "alice/xtap-pool-bucket";
 const targets = [
-  { kind: "dataset", name: datasetRepo },
+  { kind: "bucket", name: rawBucket },
   { kind: "bucket", name: indexBucket },
 ] as const;
 
@@ -22,17 +22,17 @@ function whoami(scoped: readonly unknown[], role = "fineGrained"): unknown {
   };
 }
 
-function scope(name: string, permissions: readonly string[], type = "dataset"): unknown {
+function scope(name: string, permissions: readonly string[], type = "bucket"): unknown {
   return { entity: { type, name }, permissions };
 }
 
 function validScopes(): readonly unknown[] {
   const permissions = ["repo.access.read", "repo.content.read", "repo.write"];
-  return [scope(datasetRepo, permissions), scope(indexBucket, permissions, "bucket")];
+  return [scope(rawBucket, permissions), scope(indexBucket, permissions, "bucket")];
 }
 
 describe("storage token verification", () => {
-  it("accepts direct private-dataset and private-Bucket reads", async () => {
+  it("accepts direct private raw and index Bucket reads", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json(whoami(validScopes())))
@@ -41,7 +41,7 @@ describe("storage token verification", () => {
 
     const report = await verifyStorageWriteToken({
       token: "hf_good",
-      datasetRepo,
+      rawBucket,
       indexBucket,
       fetchFn,
     });
@@ -59,7 +59,7 @@ describe("storage token verification", () => {
     await expect(
       verifyStorageWriteToken({
         token: "hf_rejected",
-        datasetRepo,
+        rawBucket,
         indexBucket,
         fetchFn: rejectedFetch,
       }),
@@ -76,13 +76,13 @@ describe("storage token verification", () => {
     await expect(
       verifyStorageWriteToken({
         token: "hf_indeterminate",
-        datasetRepo,
+        rawBucket,
         indexBucket,
         fetchFn,
       }),
     ).resolves.toEqual({
       ok: false,
-      errors: [`Could not verify a direct read from ${datasetRepo} (500).`],
+      errors: [`Could not verify a direct read from ${rawBucket} (500).`],
     });
   });
 
@@ -95,7 +95,7 @@ describe("storage token verification", () => {
 
     const report = await verifyStorageWriteToken({
       token: "hf_bad",
-      datasetRepo,
+      rawBucket,
       indexBucket,
       fetchFn,
     });
@@ -107,11 +107,11 @@ describe("storage token verification", () => {
     });
   });
 
-  it("accepts exact read/write scopes on the dataset and Bucket", () => {
+  it("accepts exact read/write scopes on both Buckets", () => {
     const report = evaluateStorageWriteToken(whoami(validScopes()), targets);
     expect(report.ok).toBe(true);
     if (report.ok) {
-      expect(report.permissions).toContain(`dataset:${datasetRepo}:repo.content.read`);
+      expect(report.permissions).toContain(`bucket:${rawBucket}:repo.content.read`);
       expect(report.permissions).toContain(`bucket:${indexBucket}:repo.write`);
     }
   });
@@ -122,8 +122,8 @@ describe("storage token verification", () => {
       ok: false,
       errors: [
         "Token role is 'unknown', expected fine-grained.",
-        `Token must include repo.content.read on ${datasetRepo}.`,
-        `Token must include repo.content.write or repo.write on ${datasetRepo}.`,
+        `Token must include repo.content.read on ${rawBucket}.`,
+        `Token must include repo.content.write or repo.write on ${rawBucket}.`,
         `Token must include repo.content.read on ${indexBucket}.`,
         `Token must include repo.content.write or repo.write on ${indexBucket}.`,
       ],
@@ -135,7 +135,7 @@ describe("storage token verification", () => {
     const report = evaluateStorageWriteToken(
       whoami([
         {
-          entity: { type: "dataset", namespace: "alice", name: "xtap-pool-data" },
+          entity: { type: "bucket", namespace: "alice", name: "xtap-pool-data" },
           permissions,
         },
         scope(`buckets/${indexBucket}`, permissions, "buckets"),
@@ -163,14 +163,14 @@ describe("storage token verification", () => {
   it("requires read and write permission on both exact targets", () => {
     const missingBucketWrite = evaluateStorageWriteToken(
       whoami([
-        scope(datasetRepo, ["repo.content.read", "repo.content.write"]),
+        scope(rawBucket, ["repo.content.read", "repo.content.write"]),
         scope(indexBucket, ["repo.content.read"], "bucket"),
       ]),
       targets,
     );
     const unexpected = evaluateStorageWriteToken(
       whoami([
-        scope(datasetRepo, ["repo.content.read", "repo.settings.write"]),
+        scope(rawBucket, ["repo.content.read", "repo.settings.write"]),
         scope(indexBucket, ["repo.content.read", "repo.content.write"], "bucket"),
       ]),
       targets,

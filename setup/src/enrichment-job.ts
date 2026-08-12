@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 
 import {
   createScheduledJob,
@@ -165,7 +166,7 @@ export type EnrichmentJobInspection = {
 export async function desiredEnrichmentJob(
   client: HubClient,
   spaceRepo: string,
-  datasetRepo: string,
+  rawBucket: string,
   variables: ReadonlyMap<string, string>,
 ): Promise<DesiredEnrichmentJob> {
   const deployment = await readDeploymentManifest(client, spaceRepo);
@@ -181,7 +182,7 @@ export async function desiredEnrichmentJob(
   }
   const environment = {
     DATA_DIR: "/tmp/xtap-pool-enrichment",
-    DATASET_REPO: datasetRepo,
+    RAW_BUCKET: rawBucket,
     INDEX_BUCKET: indexBucket,
     ENRICH_ENABLED: "true",
     ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
@@ -270,7 +271,7 @@ export async function reconcileEnrichmentJob(
   }
   if (secrets === undefined) {
     throw new Error(
-      "Dataset-writer and inference token values are required to create the scheduled Job.",
+      "Bucket-writer and inference token values are required to create the scheduled Job.",
     );
   }
   for (const schedule of before.schedules) {
@@ -379,7 +380,7 @@ export type EnrichmentCanaryResult = {
 export async function runEnrichmentCanary(
   client: HubClient,
   desired: DesiredEnrichmentJob,
-  datasetRepo: string,
+  rawBucket: string,
   options: {
     pollIntervalMs?: number;
     receiptTimeoutMs?: number;
@@ -402,12 +403,12 @@ export async function runEnrichmentCanary(
   }
   const first =
     options.resumeJobId === undefined
-      ? await runOneCanaryJob(client, desired, datasetRepo, schedule.id, options)
-      : await recoverCanaryRun(client, desired, datasetRepo, options.resumeJobId);
+      ? await runOneCanaryJob(client, desired, rawBucket, schedule.id, options)
+      : await recoverCanaryRun(client, desired, rawBucket, options.resumeJobId);
   if (options.resumeJobId !== undefined) {
     assertCanaryContinuationBudget(first.receipt, desired, hardCeilingUsd);
   }
-  const second = await runOneCanaryJob(client, desired, datasetRepo, schedule.id, options);
+  const second = await runOneCanaryJob(client, desired, rawBucket, schedule.id, options);
   if (first.jobId === second.jobId) throw new Error("Hugging Face reused a physical Job ID.");
   if (first.receipt.contract_hash !== second.receipt.contract_hash) {
     throw new Error("Canary attempts used different enrichment contracts.");
@@ -427,7 +428,7 @@ export function canaryHardCeilingUsd(desired: DesiredEnrichmentJob): number {
 async function runOneCanaryJob(
   client: HubClient,
   desired: DesiredEnrichmentJob,
-  datasetRepo: string,
+  rawBucket: string,
   scheduleId: string,
   options: { pollIntervalMs?: number; receiptTimeoutMs?: number },
 ): Promise<EnrichmentCanaryRun> {
@@ -441,7 +442,7 @@ async function runOneCanaryJob(
   );
   const receipt = await waitForJobReceipt(
     client,
-    datasetRepo,
+    rawBucket,
     job.id,
     options.receiptTimeoutMs ?? 60_000,
     options.pollIntervalMs ?? 5_000,
@@ -453,7 +454,7 @@ async function runOneCanaryJob(
 async function recoverCanaryRun(
   client: HubClient,
   desired: DesiredEnrichmentJob,
-  datasetRepo: string,
+  rawBucket: string,
   jobId: string,
 ): Promise<EnrichmentCanaryRun> {
   const job = physicalJobSchema.parse(
@@ -465,7 +466,7 @@ async function recoverCanaryRun(
   if (!physicalJobMatches(job, desired)) {
     throw new Error(`Cannot resume from Hugging Face Job ${jobId} with a different contract.`);
   }
-  const receipt = await findJobReceipt(client, datasetRepo, jobId);
+  const receipt = await findJobReceipt(client, rawBucket, jobId);
   if (receipt === undefined) {
     throw new Error(`No durable enrichment receipt was found for Hugging Face Job ${jobId}.`);
   }
@@ -494,53 +495,68 @@ async function waitForJob(
 
 async function waitForJobReceipt(
   client: HubClient,
-  datasetRepo: string,
+  rawBucket: string,
   jobId: string,
   timeoutMs: number,
   pollIntervalMs: number,
 ): Promise<EnrichReceipt> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
-    const receipt = await findJobReceipt(client, datasetRepo, jobId);
+    const receipt = await findJobReceipt(client, rawBucket, jobId);
     if (receipt !== undefined) return receipt;
     await delay(pollIntervalMs);
   }
   throw new Error(`No durable enrichment receipt was found for Hugging Face Job ${jobId}.`);
 }
 
-// eslint-disable-next-line complexity -- Receipt discovery intentionally validates every external shard and line while ignoring malformed legacy rows.
+// eslint-disable-next-line complexity -- Receipt discovery verifies immutable Bucket segments before inspecting strict receipt rows.
 async function findJobReceipt(
   client: HubClient,
-  datasetRepo: string,
+  rawBucket: string,
   jobId: string,
 ): Promise<EnrichReceipt | undefined> {
   const paths: string[] = [];
   for await (const entry of listFiles({
-    repo: { type: "dataset", name: datasetRepo },
-    path: "enrichment/receipts",
+    repo: { type: "bucket", name: rawBucket },
+    path: "v1/segments/receipt",
     recursive: true,
     ...hubOptions(client),
   })) {
-    if (entry.type === "file" && entry.path.endsWith(".jsonl")) paths.push(entry.path);
+    if (entry.type === "file" && entry.path.endsWith(".json.gz")) paths.push(entry.path);
   }
   paths.sort().reverse();
   for (const path of paths) {
     const blob = await downloadFile({
-      repo: { type: "dataset", name: datasetRepo },
+      repo: { type: "bucket", name: rawBucket },
       path,
       ...hubOptions(client),
     });
-    if (blob === null) throw new Error(`Receipt shard disappeared: ${path}.`);
-    for (const line of (await blob.text()).split("\n")) {
-      if (line.trim() === "") continue;
-      let candidate: unknown;
-      try {
-        candidate = JSON.parse(line);
-      } catch {
+    if (blob === null) throw new Error(`Receipt segment disappeared: ${path}.`);
+    const raw = gunzipSync(new Uint8Array(await blob.arrayBuffer()));
+    const expectedHash = /-([a-f0-9]{64})\.json\.gz$/u.exec(path)?.[1];
+    if (
+      expectedHash === undefined ||
+      createHash("sha256").update(raw).digest("hex") !== expectedHash
+    ) {
+      throw new Error(`Receipt segment checksum mismatch: ${path}.`);
+    }
+    const candidate = JSON.parse(raw.toString("utf8")) as { operations?: unknown };
+    if (!Array.isArray(candidate.operations)) throw new Error(`Invalid receipt segment: ${path}.`);
+    for (const operation of candidate.operations) {
+      if (typeof operation !== "object" || operation === null) continue;
+      const value = operation as { mode?: unknown; path?: unknown; lines?: unknown };
+      if (
+        value.mode !== "append" ||
+        typeof value.path !== "string" ||
+        !value.path.startsWith("enrichment/receipts/") ||
+        !Array.isArray(value.lines)
+      )
         continue;
+      for (const line of value.lines) {
+        if (typeof line !== "string") continue;
+        const receipt = parseEnrichReceipt(JSON.parse(line) as unknown);
+        if (receipt?.worker_id === jobId) return receipt;
       }
-      const receipt = parseEnrichReceipt(candidate);
-      if (receipt?.worker_id === jobId) return receipt;
     }
   }
   return undefined;

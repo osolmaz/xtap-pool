@@ -32,6 +32,16 @@ export async function setSpaceVariable(
   });
 }
 
+export async function deleteSpaceVariable(
+  client: HubClient,
+  spaceRepo: string,
+  key: string,
+): Promise<void> {
+  await hubRequest(client, `/api/spaces/${spaceRepo}/variables/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function setSpaceSecret(
   client: HubClient,
   spaceRepo: string,

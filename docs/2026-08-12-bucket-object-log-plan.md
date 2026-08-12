@@ -38,17 +38,17 @@ The first deployment keeps all owned wire and storage formats at version 1. This
 
 The import must preserve every valid record from these paths at the pinned revision:
 
-| Source | Durable value |
-| --- | --- |
-| `data/<contributor>/YYYY/MM/tweets-YYYY-MM-DD.jsonl` | Pooled tweets |
-| `enrichment/YYYY/MM/enrichment-YYYY-MM-DD.jsonl` | Enrichment rows |
-| `enrichment/attempts/YYYY/MM/attempts-YYYY-MM-DD.jsonl` | Attempt events |
-| `enrichment/registry/YYYY/MM/registry-YYYY-MM-DD.jsonl` | Free-label registry events |
-| `enrichment/receipts/YYYY-MM-DD.jsonl` | Worker receipts |
-| `config/pool.json` | Pool membership and administrators |
-| `config/service-accounts.json` | Service accounts |
-| `config/labels.json` | Taxonomy configuration |
-| `enrichment/vocabulary.json` | Durable vocabulary configuration |
+| Source                                                  | Durable value                      |
+| ------------------------------------------------------- | ---------------------------------- |
+| `data/<contributor>/YYYY/MM/tweets-YYYY-MM-DD.jsonl`    | Pooled tweets                      |
+| `enrichment/YYYY/MM/enrichment-YYYY-MM-DD.jsonl`        | Enrichment rows                    |
+| `enrichment/attempts/YYYY/MM/attempts-YYYY-MM-DD.jsonl` | Attempt events                     |
+| `enrichment/registry/YYYY/MM/registry-YYYY-MM-DD.jsonl` | Free-label registry events         |
+| `enrichment/receipts/YYYY-MM-DD.jsonl`                  | Worker receipts                    |
+| `config/pool.json`                                      | Pool membership and administrators |
+| `config/service-accounts.json`                          | Service accounts                   |
+| `config/labels.json`                                    | Taxonomy configuration             |
+| `enrichment/vocabulary.json`                            | Durable vocabulary configuration   |
 
 `index/current.json` is not imported. It belongs to the superseded index contract and is replaced by a new index manifest in the index Bucket.
 

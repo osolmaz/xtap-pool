@@ -7,7 +7,7 @@ vanilla JS — keep upstream style, record changes in `extension/VENDORED.md`).
 - Run `npm run check` before finishing.
 - Do not introduce `any` in TypeScript source files.
 - Keep domain logic out of HTTP route handlers; put it in `space/src/` modules.
-- The HF dataset repo is the system of record; the Space must never hold
+- The private raw HF Bucket is the system of record; the Space must never hold
   unpersisted data after an ingest request returns success.
 - Keep production deployments on Hugging Face: use Spaces for web services and
   Jobs for batch, scheduled, background, or resumable workers. GitHub Actions is
