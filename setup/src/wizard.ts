@@ -34,7 +34,6 @@ import {
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
-  resumeEnrichmentSchedules,
   suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
 import {
@@ -99,23 +98,17 @@ export async function runUpdateCommand(
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
   const legacyDataset = variables.get("DATASET_REPO");
   const legacy = legacyDataset !== undefined;
-  const cutover =
-    legacyDataset === undefined
-      ? undefined
-      : await beginLegacyCutover(
-          root,
-          { accessToken },
-          config,
-          variables,
-          legacyDataset,
-          options.cutoverReport,
-        );
-  try {
-    await finishUpdate(root, { accessToken }, config, variables, legacy);
-  } catch (error) {
-    if (cutover !== undefined) await cutover.restore();
-    throw error;
+  if (legacyDataset !== undefined) {
+    await beginLegacyCutover(
+      root,
+      { accessToken },
+      config,
+      variables,
+      legacyDataset,
+      options.cutoverReport,
+    );
   }
+  await finishUpdate(root, { accessToken }, config, variables, legacy);
 }
 
 async function finishUpdate(
@@ -164,7 +157,7 @@ async function beginLegacyCutover(
   variables: ReadonlyMap<string, string>,
   legacyDataset: string,
   reportPath: string | undefined,
-): Promise<{ restore(): Promise<void> }> {
+): Promise<void> {
   if (reportPath === undefined) {
     throw new Error(
       "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
@@ -177,34 +170,16 @@ async function beginLegacyCutover(
     config.rawBucket,
     variables,
   );
-  const suspendedScheduleIds = await quiesceEnrichmentWriters(client, legacyJob);
-  let spacePaused = false;
-  try {
-    await pauseSpaceRuntime(client, config.spaceRepo);
-    spacePaused = true;
-    await waitForSpaceStage(client, config.spaceRepo, "PAUSED");
-    await verifyCurrentBucketProof(
-      root,
-      client.accessToken,
-      config.rawBucket,
-      legacyDataset,
-      initialProof.source.revision,
-    );
-  } catch (error) {
-    if (spacePaused) {
-      await restartSpaceRuntime(client, config.spaceRepo);
-      await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
-    }
-    await resumeEnrichmentSchedules(client, legacyJob, suspendedScheduleIds);
-    throw error;
-  }
-  return {
-    async restore(): Promise<void> {
-      await restartSpaceRuntime(client, config.spaceRepo);
-      await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
-      await resumeEnrichmentSchedules(client, legacyJob, suspendedScheduleIds);
-    },
-  };
+  await quiesceEnrichmentWriters(client, legacyJob);
+  await pauseSpaceRuntime(client, config.spaceRepo);
+  await waitForSpaceStage(client, config.spaceRepo, "PAUSED");
+  await verifyCurrentBucketProof(
+    root,
+    client.accessToken,
+    config.rawBucket,
+    legacyDataset,
+    initialProof.source.revision,
+  );
 }
 
 type CutoverProof = {
