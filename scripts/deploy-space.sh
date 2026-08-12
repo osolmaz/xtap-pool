@@ -56,7 +56,8 @@ For a confirmed new pool with no legacy data, set ALLOW_EMPTY_POOL=1 explicitly.
 EOF
     exit 2
   fi
-  RAW_BUCKET="$RAW_BUCKET" PINNED_IMPORT_REPORT="$PINNED_IMPORT_REPORT" python3 <<'PY'
+  SPACE_REPO="$SPACE_REPO" RAW_BUCKET="$RAW_BUCKET" \
+    PINNED_IMPORT_REPORT="$PINNED_IMPORT_REPORT" python3 <<'PY'
 import json
 import os
 import re
