@@ -90,6 +90,7 @@ describe("setup config helpers", () => {
     expect(validateNamespace("bad namespace")).toContain("username or organization");
     expect(validateRepoId("alice/xtap-pool")).toBeUndefined();
     expect(validateRepoId("xtap-pool")).toContain("owner/name");
+    expect(validateUserList("")).toContain("at least one");
     expect(validateUserList("alice,bob")).toBeUndefined();
     expect(validateUserList("alice, bad user")).toContain("comma-separated");
   });
