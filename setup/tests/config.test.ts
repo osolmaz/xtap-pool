@@ -75,6 +75,16 @@ describe("setup config helpers", () => {
     });
   });
 
+  it("rejects invalid existing Space and Bucket configuration", () => {
+    expect(() => existingSpaceConfig("alice", "bad", new Map())).toThrow("owner/name");
+    expect(() =>
+      existingSpaceConfig("alice", "team/xtap-pool", new Map([["RAW_BUCKET", "bad"]])),
+    ).toThrow("Invalid RAW_BUCKET");
+    expect(() =>
+      existingSpaceConfig("alice", "team/xtap-pool", new Map([["INDEX_BUCKET", "bad"]])),
+    ).toThrow("Invalid INDEX_BUCKET");
+  });
+
   it("validates repo ids and user lists", () => {
     expect(validateNamespace("dutifuldev")).toBeUndefined();
     expect(validateNamespace("bad namespace")).toContain("username or organization");
