@@ -145,19 +145,19 @@ describe("storage token verification", () => {
     expect(report.ok).toBe(true);
   });
 
-  it("rejects classic tokens, unrelated scopes, and global permissions", () => {
+  it("rejects classic tokens", () => {
     const classic = evaluateStorageWriteToken(whoami(validScopes(), "write"), targets);
-    const unrelated = evaluateStorageWriteToken(
-      whoami([...validScopes(), scope("alice/other", ["repo.content.read"])]),
-      targets,
-    );
-    const global = whoami(validScopes()) as {
-      auth: { accessToken: { fineGrained: { global: string[] } } };
-    };
-    global.auth.accessToken.fineGrained.global = ["inference.serverless.write"];
     expect(classic.ok).toBe(false);
-    expect(unrelated.ok).toBe(false);
-    expect(evaluateStorageWriteToken(global, targets).ok).toBe(false);
+  });
+
+  it("accepts unrelated scopes while requiring the configured Bucket grants", () => {
+    const payload = whoami([
+      ...validScopes(),
+      scope("alice/other", ["repo.content.read"]),
+      scope("alice/legacy", ["repo.content.read", "repo.write"], "dataset"),
+    ]) as { auth: { accessToken: { fineGrained: { global: string[] } } } };
+    payload.auth.accessToken.fineGrained.global = ["inference.serverless.write"];
+    expect(evaluateStorageWriteToken(payload, targets).ok).toBe(true);
   });
 
   it("requires read and write permission on both exact targets", () => {

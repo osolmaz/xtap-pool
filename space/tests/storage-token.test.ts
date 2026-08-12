@@ -86,38 +86,27 @@ describe("storage credential readiness", () => {
     });
   });
 
-  it("rejects broad roles, global scopes, other resources, and unknown permissions", async () => {
+  it("rejects broad token roles", async () => {
     const broad: typeof fetch = () =>
       Promise.resolve(Response.json({ auth: { accessToken: { role: "write", fineGrained: {} } } }));
     await expect(check(broad)).resolves.toMatchObject({ credential: "invalid" });
+  });
 
-    const unexpected: typeof fetch = () =>
-      Promise.resolve(
-        Response.json(
-          whoami([
-            scope(rawBucket, ["repo.content.read", "repo.content.write", "repo.delete"]),
-            scope(indexBucket, ["repo.content.read", "repo.content.write"]),
-            scope("alice/other", ["repo.content.read"]),
-          ]),
-        ),
-      );
-    const unexpectedResult = await check(unexpected);
-    expect(unexpectedResult.credential).toBe("invalid");
-    if (unexpectedResult.credential === "ok") throw new Error("expected an invalid credential");
-    expect(unexpectedResult.error).toContain("Unexpected permission");
+  it("accepts unrelated scopes while requiring the configured Bucket grants", async () => {
+    const payload = whoami([
+      scope(rawBucket, ["repo.content.read", "repo.content.write", "repo.delete"]),
+      scope(indexBucket, ["repo.content.read", "repo.content.write"]),
+      scope("alice/other", ["repo.content.read"]),
+      scope("alice/legacy", ["repo.content.read", "repo.write"], "dataset"),
+    ]) as { auth: { accessToken: { fineGrained: { global: string[] } } } };
+    payload.auth.accessToken.fineGrained.global = ["inference.serverless.write"];
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(payload))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
-    const global: typeof fetch = () =>
-      Promise.resolve(
-        Response.json({
-          auth: {
-            accessToken: {
-              role: "fineGrained",
-              fineGrained: { global: ["inference.serverless.write"], scoped: validScopes() },
-            },
-          },
-        }),
-      );
-    await expect(check(global)).resolves.toMatchObject({ credential: "invalid" });
+    await expect(check(fetchFn)).resolves.toEqual({ credential: "ok" });
   });
 
   it("accepts Bucket entity aliases and read probes that return not found", async () => {
