@@ -56,7 +56,7 @@ For a confirmed new pool with no legacy data, set ALLOW_EMPTY_POOL=1 explicitly.
 EOF
     exit 2
   fi
-  SPACE_REPO="$SPACE_REPO" RAW_BUCKET="$RAW_BUCKET" \
+  SOURCE_PROOF="$(SPACE_REPO="$SPACE_REPO" RAW_BUCKET="$RAW_BUCKET" \
     PINNED_IMPORT_REPORT="$PINNED_IMPORT_REPORT" python3 <<'PY'
 import json
 import os
@@ -88,11 +88,22 @@ if "DATASET_REPO" in variables:
         "pin and import the final dataset revision, then remove DATASET_REPO in the "
         "coordinated cutover before using this deployment script"
     )
-current_revision = api.dataset_info(source_repo).sha
-if current_revision != source_revision:
+if api.dataset_info(source_repo).sha != source_revision:
     raise SystemExit("dataset advanced after the pinned import; quiesce writers and re-import")
-print("Verified the pinned final revision and completed legacy writer cutover.")
+print(source_repo)
+print(source_revision)
 PY
+)"
+  SOURCE_DATASET="$(head -n 1 <<<"$SOURCE_PROOF")"
+  SOURCE_REVISION="$(tail -n 1 <<<"$SOURCE_PROOF")"
+  echo "==> Re-verifying the pinned source against every current raw Bucket object"
+  VERIFY_REPORT="$INDEX_WORK/verified-report.json"
+  HF_TOKEN="$XTAP_STORAGE_TOKEN" npm --prefix "$ROOT" run storage:verify -- \
+    --dataset "$SOURCE_DATASET" \
+    --revision "$SOURCE_REVISION" \
+    --raw-bucket "$RAW_BUCKET" \
+    --report "$VERIFY_REPORT" \
+    --work-dir "$INDEX_WORK/verify"
 else
   echo "==> Initializing canonical raw configuration for the confirmed new pool"
   DATA_DIR="$INDEX_WORK" \
