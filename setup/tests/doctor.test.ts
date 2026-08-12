@@ -128,8 +128,23 @@ describe("doctor", () => {
       expect.objectContaining({
         code: "storage.segments",
         status: "warn",
-        details: { count: 0, records: 0 },
+        details: { count: 0, records: 0, tweets: 0 },
       }),
+    );
+  });
+
+  it("does not require live tweets when raw storage has only non-tweet records", async () => {
+    mockDownloads("{}\n", "enrichment/receipts/2026-08-12.jsonl");
+    hubMocks.listFiles.mockReturnValue(rawSegmentEntries());
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn: fetchFixture({ tweets: 0 }) },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn: fetchFixture({ tweets: 0 }) },
+    );
+
+    expect(report.checks).not.toContainEqual(
+      expect.objectContaining({ code: "live.indexed_storage" }),
     );
   });
 
@@ -863,14 +878,17 @@ const SOURCE_REVISION = "a".repeat(40);
 let rawSegmentPath = "";
 let rawSegmentBlob = new Blob([]);
 
-function mockDownloads(storageContent: string): void {
+function mockDownloads(
+  storageContent: string,
+  sourcePath = "data/alice/2026/07/tweets-2026-07-26.jsonl",
+): void {
   const lines = storageContent.trimEnd().split("\n");
   const raw = Buffer.from(
     `${JSON.stringify({
       schema_version: 1,
       transaction_id: "11111111-1111-4111-8111-111111111111",
       created_at: "2026-07-26T12:00:00.000Z",
-      operations: [{ path: "data/alice/2026/07/tweets.jsonl", mode: "append", lines }],
+      operations: [{ path: sourcePath, mode: "append", lines }],
     })}\n`,
   );
   const digest = createHash("sha256").update(raw).digest("hex");
