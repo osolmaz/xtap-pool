@@ -129,8 +129,6 @@ from huggingface_hub import HfApi
 space = os.environ["SPACE_REPO"]
 api = HfApi()
 variables = dict(api.get_space_variables(space))
-if "DATASET_REPO" in variables:
-    api.delete_space_variable(space, key="DATASET_REPO")
 for name in (
     "RAW_BUCKET",
     "INDEX_BUCKET",
@@ -157,5 +155,18 @@ rm -rf "$STAGE/docs" "$STAGE/extension"
 
 echo "==> Uploading to $SPACE_REPO"
 hf upload "$SPACE_REPO" "$STAGE" . --repo-type space --commit-message "deploy: $(git -C "$ROOT" rev-parse --short HEAD)"
+
+if [[ "${ALLOW_EMPTY_POOL:-0}" != "1" ]]; then
+  echo "==> Removing the retired dataset variable after replacement code is durable"
+  SPACE_REPO="$SPACE_REPO" python3 <<'PY'
+import os
+from huggingface_hub import HfApi
+
+api = HfApi()
+variables = dict(api.get_space_variables(os.environ["SPACE_REPO"]))
+if "DATASET_REPO" in variables:
+    api.delete_space_variable(os.environ["SPACE_REPO"], key="DATASET_REPO")
+PY
+fi
 
 echo "==> Done. Space: https://huggingface.co/spaces/$SPACE_REPO"

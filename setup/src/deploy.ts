@@ -23,6 +23,7 @@ type DeleteOperation = { operation: "delete"; path: string };
 type ConfigureSpaceOptions = {
   initializeGeneratedSecrets?: boolean;
   allowLegacyDatasetRemoval?: boolean;
+  retainLegacyDataset?: boolean;
 };
 
 export async function deployPool(
@@ -68,8 +69,10 @@ export async function updateExistingPool(
     await configureSpace(client, config, {
       initializeGeneratedSecrets: false,
       allowLegacyDatasetRemoval: true,
+      retainLegacyDataset: true,
     });
     await uploadSpace(root, client, config.spaceRepo);
+    await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
     return;
   }
   await uploadSpace(root, client, config.spaceRepo);
@@ -89,7 +92,7 @@ export async function configureSpace(
       "legacy DATASET_REPO is still configured; complete and verify the pinned Bucket import before cutover",
     );
   }
-  if (variables.has("DATASET_REPO")) {
+  if (variables.has("DATASET_REPO") && options.retainLegacyDataset !== true) {
     await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
   }
   await setSpaceVariable(client, config.spaceRepo, "RAW_BUCKET", config.rawBucket);
