@@ -170,7 +170,7 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
       return objects;
     },
     async download(key): Promise<Uint8Array | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path: key });
+      const blob = await downloadFile({ repo, accessToken, path: key, xet: false });
       return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
     },
     async upload(key, content): Promise<void> {

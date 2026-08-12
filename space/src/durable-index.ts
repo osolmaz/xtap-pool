@@ -394,7 +394,7 @@ export function createDurableIndexBucketClient(
   const repo = { type: "bucket", name: indexBucket } as const;
   return {
     async download(path, destination): Promise<boolean> {
-      const blob = await downloadFile({ repo, accessToken, path });
+      const blob = await downloadFile({ repo, accessToken, path, xet: false });
       if (blob === null) return false;
       await mkdir(dirname(destination), { recursive: true });
       await pipeline(Readable.fromWeb(blob.stream()), createWriteStream(destination));
@@ -409,7 +409,7 @@ export function createDurableIndexBucketClient(
       });
     },
     async readText(path): Promise<string | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path });
+      const blob = await downloadFile({ repo, accessToken, path, xet: false });
       return blob === null ? undefined : blob.text();
     },
     async writeText(path, content): Promise<void> {
