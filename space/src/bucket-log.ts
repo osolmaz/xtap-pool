@@ -162,11 +162,10 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
       })) {
         if (entry.type !== "file") continue;
         const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
-        objects.push({
-          key: entry.path,
-          ...(oid === undefined || oid.length === 0 ? {} : { oid }),
-          size: entry.size,
-        });
+        if (oid === undefined || oid.length === 0) {
+          throw new Error(`Bucket listing has no immutable object identity: ${entry.path}`);
+        }
+        objects.push({ key: entry.path, oid, size: entry.size });
       }
       return objects;
     },

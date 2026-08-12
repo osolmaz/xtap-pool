@@ -13,7 +13,7 @@ vi.mock("@huggingface/hub", async (importOriginal) => {
     listFiles: () => ({
       async *[Symbol.asyncIterator]() {
         for (const [path, content] of files) {
-          yield { type: "file", path, size: content.byteLength, oid: "listed" };
+          yield { type: "file", path, size: content.byteLength, xetHash: "listed" };
         }
       },
     }),
@@ -55,5 +55,18 @@ describe("raw storage initialization", () => {
     await expect(log.readText("config/service-accounts.json")).resolves.toContain('"accounts":[]');
     await expect(log.readText("config/labels.json")).resolves.toContain('"name":"ai"');
     await expect(log.readText("enrichment/vocabulary.json")).resolves.toContain('"labels":[]');
+  });
+
+  it("uses the current time when no clock override is supplied", async () => {
+    files.clear();
+    const workDir = mkdtempSync(join(tmpdir(), "xtap-storage-defaults-"));
+    await initializeRawStorage({
+      rawBucket: "alice/xtap-pool-data",
+      token: "token",
+      members: ["alice"],
+      admins: [],
+      workDir,
+    });
+    expect(files.size).toBe(1);
   });
 });
