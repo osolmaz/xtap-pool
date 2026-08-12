@@ -27,5 +27,9 @@ describe("storage rebuild state", () => {
       state: "unknown",
       error: "fetch failed",
     });
+    expect(storageStateFromRebuildError("non-error rejection")).toEqual({
+      state: "invalid",
+      error: "unknown error",
+    });
   });
 });
