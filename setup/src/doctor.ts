@@ -321,8 +321,13 @@ async function checkStorage(
         ? pass("storage.segments", `Storage has ${String(stats.segments)} verified raw segments.`, {
             count: stats.segments,
             records: stats.records,
+            tweets: stats.tweets,
           })
-        : warn("storage.segments", "Storage has no raw segments.", { count: 0, records: 0 }),
+        : warn("storage.segments", "Storage has no raw segments.", {
+            count: 0,
+            records: 0,
+            tweets: 0,
+          }),
     );
   } catch (error) {
     checks.push(fail("storage.segments", errorMessage(error)));
@@ -476,9 +481,9 @@ function pushOptionalCheck(checks: DoctorCheck[], check: DoctorCheck | undefined
 
 function recordIndexedStorageCheck(checks: DoctorCheck[], tweets: number | undefined): void {
   const segmentCount = checkNumber(checks, "storage.segments", "count") ?? 0;
-  const storageRecordCount = checkNumber(checks, "storage.segments", "records");
-  if (segmentCount === 0 || tweets === undefined || storageRecordCount === undefined) return;
-  checks.push(indexedStorageCheck(segmentCount, storageRecordCount, tweets));
+  const storageTweetCount = checkNumber(checks, "storage.segments", "tweets");
+  if (segmentCount === 0 || tweets === undefined || storageTweetCount === undefined) return;
+  checks.push(indexedStorageCheck(segmentCount, storageTweetCount, tweets));
 }
 
 function liveReadinessCheck(health: HealthPayload): DoctorCheck | undefined {
@@ -1030,7 +1035,7 @@ async function restartAndWaitDefault(spaceRepo: string): Promise<void> {
   task.stop("Space restarted");
 }
 
-type StorageSegmentStats = { segments: number; records: number };
+type StorageSegmentStats = { segments: number; records: number; tweets: number };
 
 // eslint-disable-next-line complexity -- Segment inspection validates every structural and checksum boundary.
 async function storageSegmentStats(
@@ -1049,10 +1054,11 @@ async function storageSegmentStats(
       if (entry.type === "file" && entry.path.endsWith(".json.gz")) paths.push(entry.path);
     }
   } catch (error) {
-    if (asRecord(error)["statusCode"] === 404) return { segments: 0, records: 0 };
+    if (asRecord(error)["statusCode"] === 404) return { segments: 0, records: 0, tweets: 0 };
     throw error;
   }
   let records = 0;
+  let tweets = 0;
   for (const path of paths) {
     const blob = await downloadFile({
       repo: { type: "bucket", name: rawBucket },
@@ -1077,12 +1083,18 @@ async function storageSegmentStats(
           throw new Error(`invalid raw Bucket append operation: ${path}`);
         }
         records += value["lines"].length;
+        if (
+          typeof value["path"] === "string" &&
+          /^data\/[^/]+\/\d{4}\/\d{2}\/tweets-\d{4}-\d{2}-\d{2}\.jsonl$/u.test(value["path"])
+        ) {
+          tweets += value["lines"].length;
+        }
       } else if (value["mode"] !== "write" || typeof value["content"] !== "string") {
         throw new Error(`invalid raw Bucket operation: ${path}`);
       }
     }
   }
-  return { segments: paths.length, records };
+  return { segments: paths.length, records, tweets };
 }
 
 function hubOptions(client: HubClient): { hubUrl?: string; fetch?: typeof fetch } {
