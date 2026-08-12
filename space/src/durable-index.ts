@@ -18,6 +18,7 @@ const INDEX_SCHEMA_VERSION = 1;
 const CURRENT_MANIFEST_KEY = "index/current.json";
 const DATABASE_PREFIX = "index/databases";
 const RETAINED_PREDECESSORS = 3;
+const PRUNE_GRACE_MS = 24 * 60 * 60 * 1000;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const DATABASE_KEY = /^index\/databases\/([a-f0-9]{64})\.sqlite$/u;
 
@@ -318,6 +319,7 @@ export class DurableIndex {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
       this.publishedKeys = [key, ...predecessors];
+      await this.pruneDatabases(this.publishedKeys);
       return manifest;
     } finally {
       await Promise.all([rm(publishPath, { force: true }), rm(verifyPath, { force: true })]);
@@ -364,6 +366,24 @@ export class DurableIndex {
 
   close(): void {
     this.store.close();
+  }
+
+  private async pruneDatabases(retained: readonly string[]): Promise<void> {
+    const keep = new Set(retained);
+    const activeRaw = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+    if (activeRaw === undefined) return;
+    const active = parseManifest(activeRaw, this.options);
+    keep.add(active.database.key);
+    for (const key of active.database.predecessors) keep.add(key);
+    const cutoff = Date.now() - PRUNE_GRACE_MS;
+    const files = await this.bucket.list(DATABASE_PREFIX);
+    const stale = files
+      .filter((file) => DATABASE_KEY.test(file.path) && !keep.has(file.path))
+      .filter((file) => file.uploadedAt !== undefined && Date.parse(file.uploadedAt) < cutoff)
+      .map((file) => file.path);
+    if (stale.length === 0) return;
+    if ((await this.bucket.readText(CURRENT_MANIFEST_KEY)) !== activeRaw) return;
+    await this.bucket.remove(stale);
   }
 }
 

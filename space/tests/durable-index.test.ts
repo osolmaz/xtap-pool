@@ -67,7 +67,7 @@ class MemoryIndexBucket implements DurableIndexBucketClient {
   async list(prefix: string): Promise<readonly BucketFile[]> {
     return [...this.files.keys()]
       .filter((path) => path.startsWith(prefix))
-      .map((path) => ({ path }));
+      .map((path) => ({ path, uploadedAt: "2000-01-01T00:00:00.000Z" }));
   }
 
   async remove(paths: readonly string[]): Promise<void> {
@@ -275,7 +275,7 @@ describe("DurableIndex", () => {
     index.close();
   });
 
-  it("records three predecessors without unsafe automatic deletion", async () => {
+  it("retains the active database and three predecessors after the pruning grace", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("retention"));
     for (let generation = 0; generation < 6; generation += 1) {
@@ -291,8 +291,8 @@ describe("DurableIndex", () => {
       database: { key: string; predecessors: string[] };
     };
     expect(manifest.database.predecessors).toHaveLength(3);
-    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite"))).toHaveLength(6);
-    expect(bucket.removed).toEqual([]);
+    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite"))).toHaveLength(4);
+    expect(bucket.removed).toHaveLength(2);
     index.close();
   });
 

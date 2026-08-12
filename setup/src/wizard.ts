@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -81,7 +81,7 @@ export async function runSetupWizard(root: string): Promise<void> {
 export async function runUpdateCommand(
   root: string,
   requestedSpaceRepo?: string,
-  options: { verifiedBucketCutover?: boolean } = {},
+  options: { cutoverReport?: string } = {},
 ): Promise<void> {
   intro("xtap-pool update");
   const accessToken = await activeHfToken();
@@ -89,10 +89,14 @@ export async function runUpdateCommand(
   const spaceRepo = requestedSpaceRepo ?? repoInNamespace(account.name, "xtap-pool");
   const variables = await getSpaceVariables({ accessToken }, spaceRepo);
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
-  if (variables.has("DATASET_REPO") && options.verifiedBucketCutover !== true) {
-    throw new Error(
-      "legacy DATASET_REPO is still configured; run the verified import and use --verified-bucket-cutover",
-    );
+  const legacy = variables.has("DATASET_REPO");
+  if (legacy) {
+    if (options.cutoverReport === undefined) {
+      throw new Error(
+        "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
+      );
+    }
+    await assertCutoverReport(options.cutoverReport, config.rawBucket);
   }
   const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
   if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.indexBucket))) {
@@ -103,7 +107,7 @@ export async function runUpdateCommand(
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
   await updateExistingPool(root, { accessToken }, config, {
-    allowLegacyDatasetRemoval: options.verifiedBucketCutover === true,
+    allowLegacyDatasetRemoval: legacy,
   });
   const refreshedVariables = await getSpaceVariables({ accessToken }, spaceRepo);
   const desired = await desiredEnrichmentJob(
@@ -119,6 +123,30 @@ export async function runUpdateCommand(
       ? `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`
       : `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nSuspended ${String(suspended)} stale enrichment schedule(s). Run doctor --fix to replace them.`,
   );
+}
+
+// eslint-disable-next-line complexity -- Cutover proof checks every independent no-loss report boundary.
+export async function assertCutoverReport(path: string, rawBucket: string): Promise<void> {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error(`verified Bucket cutover report is unreadable: ${path}`);
+  }
+  const report = candidate as {
+    target?: { bucket?: unknown; snapshot_revision?: unknown; objects?: unknown };
+    reconciliation?: { passed?: unknown };
+  };
+  if (
+    report.reconciliation?.passed !== true ||
+    report.target?.bucket !== rawBucket ||
+    typeof report.target.snapshot_revision !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(report.target.snapshot_revision) ||
+    typeof report.target.objects !== "number" ||
+    report.target.objects < 1
+  ) {
+    throw new Error("verified Bucket cutover report does not prove the target import");
+  }
 }
 
 export async function activeHfToken(): Promise<string> {

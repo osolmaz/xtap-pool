@@ -80,7 +80,8 @@ npm run doctor -- osolmaz/xtap-pool --fix --canary --enable-schedule
 npm run update
 npm run update -- osolmaz/xtap-pool
 # Only after the pinned import and index verification:
-npm run update -- osolmaz/xtap-pool --verified-bucket-cutover
+npm run update -- osolmaz/xtap-pool \
+  --verified-bucket-cutover=/secure/path/import-report.json
 ```
 
 Update reads the current `RAW_BUCKET` and `INDEX_BUCKET` variables, keeps all

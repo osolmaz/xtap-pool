@@ -18,7 +18,9 @@ try {
   const command = parseSetupCommand(process.argv.slice(2));
   if (command.kind === "setup") await runSetupWizard(root);
   else if (command.kind === "update")
-    await runUpdateCommand(root, command.spaceRepo, { verifiedBucketCutover: command.cutover });
+    await runUpdateCommand(root, command.spaceRepo, {
+      ...(command.cutoverReport === undefined ? {} : { cutoverReport: command.cutoverReport }),
+    });
   else {
     const accessToken = await activeHfToken();
     const account = await whoAmI({ accessToken });
