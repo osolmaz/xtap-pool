@@ -13,7 +13,7 @@ import {
   cancel,
   isCancel,
 } from "@clack/prompts";
-import { downloadFile, whoAmI } from "@huggingface/hub";
+import { datasetInfo, downloadFile, whoAmI } from "@huggingface/hub";
 
 import type { SetupConfig } from "./config.js";
 import {
@@ -89,14 +89,22 @@ export async function runUpdateCommand(
   const spaceRepo = requestedSpaceRepo ?? repoInNamespace(account.name, "xtap-pool");
   const variables = await getSpaceVariables({ accessToken }, spaceRepo);
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
-  const legacy = variables.has("DATASET_REPO");
-  if (legacy) {
+  const legacyDataset = variables.get("DATASET_REPO");
+  const legacy = legacyDataset !== undefined;
+  if (legacyDataset !== undefined) {
     if (options.cutoverReport === undefined) {
       throw new Error(
         "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
       );
     }
-    await assertCutoverReport(options.cutoverReport, config.rawBucket);
+    await assertCutoverReport(options.cutoverReport, config.rawBucket, legacyDataset, async () => {
+      const source = await datasetInfo({
+        name: legacyDataset,
+        accessToken,
+        additionalFields: ["sha"],
+      });
+      return source.sha;
+    });
   }
   const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
   if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.indexBucket))) {
@@ -126,7 +134,12 @@ export async function runUpdateCommand(
 }
 
 // eslint-disable-next-line complexity -- Cutover proof checks every independent no-loss report boundary.
-export async function assertCutoverReport(path: string, rawBucket: string): Promise<void> {
+export async function assertCutoverReport(
+  path: string,
+  rawBucket: string,
+  legacyDataset: string,
+  readDatasetHead: () => Promise<string>,
+): Promise<void> {
   let candidate: unknown;
   try {
     candidate = JSON.parse(await readFile(path, "utf8"));
@@ -134,18 +147,30 @@ export async function assertCutoverReport(path: string, rawBucket: string): Prom
     throw new Error(`verified Bucket cutover report is unreadable: ${path}`);
   }
   const report = candidate as {
+    schema_version?: unknown;
+    source?: { dataset?: unknown; revision?: unknown; objects?: unknown };
     target?: { bucket?: unknown; snapshot_revision?: unknown; objects?: unknown };
     reconciliation?: { passed?: unknown };
   };
   if (
+    report.schema_version !== 1 ||
     report.reconciliation?.passed !== true ||
+    report.source?.dataset !== legacyDataset ||
+    typeof report.source.revision !== "string" ||
+    !/^[a-f0-9]{40}$/u.test(report.source.revision) ||
+    typeof report.source.objects !== "number" ||
+    report.source.objects < 1 ||
     report.target?.bucket !== rawBucket ||
     typeof report.target.snapshot_revision !== "string" ||
     !/^[a-f0-9]{64}$/u.test(report.target.snapshot_revision) ||
     typeof report.target.objects !== "number" ||
     report.target.objects < 1
   ) {
-    throw new Error("verified Bucket cutover report does not prove the target import");
+    throw new Error("verified Bucket cutover report does not prove the source and target import");
+  }
+  const currentRevision = await readDatasetHead();
+  if (currentRevision !== report.source.revision) {
+    throw new Error("verified Bucket cutover report does not match the current dataset revision");
   }
 }
 

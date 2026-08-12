@@ -18,20 +18,46 @@ describe("index bootstrap contract", () => {
     ).toEqual({ llmModel: "custom/model", taxonomyVersion: "7" });
   });
 
-  it("accepts only exact passing cutover reports for the target Bucket", async () => {
+  it("accepts only exact passing cutover reports for the current source and target", async () => {
     const directory = await mkdtemp(join(tmpdir(), "xtap-cutover-report-"));
     const path = join(directory, "report.json");
+    const revision = "b".repeat(40);
     await writeFile(
       path,
       JSON.stringify({
+        schema_version: 1,
+        source: { dataset: "alice/xtap-pool-data", revision, objects: 3 },
         target: { bucket: "alice/xtap-pool-data", snapshot_revision: "a".repeat(64), objects: 4 },
         reconciliation: { passed: true },
       }),
     );
-    await expect(assertCutoverReport(path, "alice/xtap-pool-data")).resolves.toBeUndefined();
-    await expect(assertCutoverReport(path, "alice/other")).rejects.toThrow("does not prove");
     await expect(
-      assertCutoverReport(join(directory, "missing"), "alice/xtap-pool-data"),
+      assertCutoverReport(path, "alice/xtap-pool-data", "alice/xtap-pool-data", () =>
+        Promise.resolve(revision),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertCutoverReport(path, "alice/other", "alice/xtap-pool-data", () =>
+        Promise.resolve(revision),
+      ),
+    ).rejects.toThrow("does not prove");
+    await expect(
+      assertCutoverReport(path, "alice/xtap-pool-data", "alice/other", () =>
+        Promise.resolve(revision),
+      ),
+    ).rejects.toThrow("does not prove");
+    await expect(
+      assertCutoverReport(path, "alice/xtap-pool-data", "alice/xtap-pool-data", () =>
+        Promise.resolve("c".repeat(40)),
+      ),
+    ).rejects.toThrow("current dataset revision");
+    await expect(
+      assertCutoverReport(
+        join(directory, "missing"),
+        "alice/xtap-pool-data",
+        "alice/xtap-pool-data",
+        () => Promise.resolve(revision),
+      ),
     ).rejects.toThrow("unreadable");
   });
 
