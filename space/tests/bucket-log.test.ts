@@ -126,11 +126,28 @@ describe("BucketLog", () => {
       [],
     );
     const first = await state.log.createSnapshot();
+    expect(first.snapshot.files[0]?.oid).toBe(sha256(state.bucket.files.get(segmentKey)!));
     const second = await state.log.createSnapshot();
     expect(second.revision).toBe(first.revision);
     expect(second.snapshot).toEqual(first.snapshot);
     state.bucket.files.set(segmentKey, new Uint8Array([1, 2, 3]));
     await expect(state.log.loadSegment(first.snapshot.files[0]!)).rejects.toThrow("size mismatch");
+  });
+
+  it("derives snapshot object identity when Bucket listings omit it", async () => {
+    const state = log();
+    const key = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const originalList = state.bucket.list.bind(state.bucket);
+    state.bucket.list = async (prefix) =>
+      (await originalList(prefix)).map(({ key: objectKey, size }) => ({ key: objectKey, size }));
+
+    const { snapshot } = await state.log.createSnapshot();
+
+    expect(snapshot.files).toHaveLength(1);
+    expect(snapshot.files[0]?.oid).toBe(sha256(state.bucket.files.get(key)!));
   });
 
   it("orders configuration writes by timestamp and transaction ID", async () => {

@@ -1,9 +1,8 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 
 import { downloadFile, listFiles } from "@huggingface/hub";
 import { cancel, confirm, intro, isCancel, note, outro, password, spinner } from "@clack/prompts";
-
-import { validateTweet } from "@xtap-pool/shared";
 
 import { spacePublicUrl, validateUserList } from "./config.js";
 import {
@@ -55,7 +54,7 @@ export type DoctorCheck = {
 
 export type DoctorReport = {
   spaceRepo: string;
-  datasetRepo?: string;
+  rawBucket?: string;
   indexBucket?: string;
   summary: Record<DoctorStatus, number>;
   checks: readonly DoctorCheck[];
@@ -63,16 +62,16 @@ export type DoctorReport = {
 
 export type DoctorDeps = {
   fetchFn?: typeof fetch;
-  promptDatasetToken?: (datasetRepo: string) => Promise<string>;
-  confirmDatasetTokenRepair?: (datasetRepo: string, report: DoctorReport) => Promise<boolean>;
+  promptStorageToken?: (rawBucket: string) => Promise<string>;
+  confirmStorageTokenRepair?: (rawBucket: string, report: DoctorReport) => Promise<boolean>;
   promptInferenceToken?: () => Promise<string>;
   confirmGeneratedSecretRepair?: (
     keys: readonly GeneratedSecretKey[],
     report: DoctorReport,
   ) => Promise<boolean>;
-  validateDatasetToken?: (
+  validateStorageToken?: (
     token: string,
-    datasetRepo: string,
+    rawBucket: string,
     indexBucket: string,
   ) => Promise<readonly string[]>;
   validateInferenceToken?: (token: string) => Promise<readonly string[]>;
@@ -86,7 +85,7 @@ export type DoctorDeps = {
     desired: DesiredEnrichmentJob,
     secrets?: EnrichmentJobSecrets,
   ) => Promise<unknown>;
-  promptJobDatasetToken?: (datasetRepo: string) => Promise<string>;
+  promptJobStorageToken?: (rawBucket: string) => Promise<string>;
   promptJobInferenceToken?: () => Promise<string>;
   runJobCanary?: typeof runEnrichmentCanary;
   resumeJobSchedule?: typeof resumeEnrichmentSchedule;
@@ -113,7 +112,7 @@ export async function runDoctor(
   deps: DoctorDeps = {},
 ): Promise<DoctorReport> {
   let current = await collectDoctorReport(client, username, options.spaceRepo, deps);
-  if (options.fix && current.datasetRepo !== undefined) {
+  if (options.fix && current.rawBucket !== undefined) {
     await repairDoctorFindings(client, username, current, deps);
     current = await collectDoctorReport(client, username, options.spaceRepo, deps);
   }
@@ -155,12 +154,12 @@ export async function collectDoctorReport(
   }
 
   await checkSecrets(client, manifest, checks);
-  await checkDataset(client, manifest, checks);
+  await checkStorage(client, manifest, checks);
   await checkIndexBucket(client, manifest, checks);
   await checkEnrichmentJob(client, manifest, variables, checks, deps);
   await checkLiveHealth(manifest, checks, deps.fetchFn ?? fetch);
 
-  return report(spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
+  return report(spaceRepo, manifest.rawBucket, manifest.indexBucket, checks);
 }
 
 // eslint-disable-next-line complexity -- This boundary keeps canary evidence, paid approval, and activation in one fail-closed transaction.
@@ -171,7 +170,8 @@ async function runDoctorCanary(
   options: DoctorOptions,
   deps: DoctorDeps,
 ): Promise<DoctorReport> {
-  if (current.datasetRepo === undefined) throw new Error("Cannot run a canary without a dataset.");
+  if (current.rawBucket === undefined)
+    throw new Error("Cannot run a canary without raw Bucket storage.");
   if (current.summary.fail > 0) {
     throw new Error("Refusing the paid recovery canary while doctor checks are failing.");
   }
@@ -180,13 +180,13 @@ async function runDoctorCanary(
   const desired = await desiredEnrichmentJob(
     client,
     manifest.spaceRepo,
-    manifest.datasetRepo,
+    manifest.rawBucket,
     variables,
   );
   const canary = await (deps.runJobCanary ?? runEnrichmentCanary)(
     client,
     desired,
-    manifest.datasetRepo,
+    manifest.rawBucket,
     options.resumeCanaryJobId === undefined
       ? undefined
       : { resumeJobId: options.resumeCanaryJobId },
@@ -208,7 +208,7 @@ async function runDoctorCanary(
         "The recovery canary passed, but the recurring schedule remains suspended.",
       ),
     );
-    return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
+    return report(current.spaceRepo, manifest.rawBucket, manifest.indexBucket, checks);
   }
   const approved = await (deps.confirmScheduleEnable ?? confirmScheduleEnableDefault)(
     desired,
@@ -221,7 +221,7 @@ async function runDoctorCanary(
         "Recurring paid enrichment was not approved; schedule remains suspended.",
       ),
     );
-    return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, checks);
+    return report(current.spaceRepo, manifest.rawBucket, manifest.indexBucket, checks);
   }
   const inspection = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
   if (inspection.exactSchedules.length !== 1 || inspection.schedules.length !== 1) {
@@ -240,7 +240,7 @@ async function runDoctorCanary(
     throw new Error("Hugging Face did not confirm the enrichment schedule as active.");
   }
   const refreshed = await collectDoctorReport(client, username, current.spaceRepo, deps);
-  return report(current.spaceRepo, manifest.datasetRepo, manifest.indexBucket, [
+  return report(current.spaceRepo, manifest.rawBucket, manifest.indexBucket, [
     ...refreshed.checks,
     canaryCheck,
     pass("job.schedule.approval", "The approved Hugging Face schedule is active."),
@@ -295,37 +295,37 @@ async function checkSecrets(
   }
 }
 
-async function checkDataset(
+async function checkStorage(
   client: HubClient,
   manifest: PoolManifest,
   checks: DoctorCheck[],
 ): Promise<void> {
   try {
     const isPrivate = await getRepoPrivateState(client, {
-      type: "dataset",
-      name: manifest.datasetRepo,
+      type: "bucket",
+      name: manifest.rawBucket,
     });
     checks.push(
       isPrivate
-        ? pass("dataset.visibility", `${manifest.datasetRepo} is private.`)
-        : fail("dataset.visibility", `${manifest.datasetRepo} is public.`),
+        ? pass("storage.visibility", `${manifest.rawBucket} is private.`)
+        : fail("storage.visibility", `${manifest.rawBucket} is public.`),
     );
   } catch (error) {
-    checks.push(fail("dataset.visibility", errorMessage(error)));
+    checks.push(fail("storage.visibility", errorMessage(error)));
   }
 
   try {
-    const stats = await datasetJsonlStats(client, manifest.datasetRepo);
+    const stats = await storageSegmentStats(client, manifest.rawBucket);
     checks.push(
-      stats.files > 0
-        ? pass("dataset.files", `Dataset has ${String(stats.files)} data JSONL files.`, {
-            count: stats.files,
+      stats.segments > 0
+        ? pass("storage.segments", `Storage has ${String(stats.segments)} verified raw segments.`, {
+            count: stats.segments,
+            records: stats.records,
           })
-        : warn("dataset.files", "Dataset has no data JSONL files.", { count: stats.files }),
+        : warn("storage.segments", "Storage has no raw segments.", { count: 0, records: 0 }),
     );
-    if (stats.files > 0) checks.push(datasetRecordsCheck(stats));
   } catch (error) {
-    checks.push(fail("dataset.files", errorMessage(error)));
+    checks.push(fail("storage.segments", errorMessage(error)));
   }
 }
 
@@ -349,20 +349,16 @@ async function checkIndexBucket(
     return;
   }
   try {
-    const base = client.hubUrl ?? "https://huggingface.co";
-    const response = await (client.fetchFn ?? fetch)(
-      `${base}/datasets/${manifest.datasetRepo}/resolve/main/index/current.json`,
-      { headers: { authorization: `Bearer ${client.accessToken}` } },
-    );
+    const manifestFile = await downloadFile({
+      repo: { type: "bucket", name: manifest.indexBucket },
+      accessToken: client.accessToken,
+      path: "index/current.json",
+      ...hubOptions(client),
+    });
     checks.push(
-      response.ok
-        ? pass("index.manifest", "The durable index manifest exists.")
-        : fail(
-            "index.manifest",
-            response.status === 404
-              ? "The durable index manifest is missing."
-              : `Could not read the durable index manifest (${String(response.status)}).`,
-          ),
+      manifestFile === null
+        ? fail("index.manifest", "The durable index manifest is missing.")
+        : pass("index.manifest", "The durable index manifest exists."),
     );
   } catch (error) {
     checks.push(fail("index.manifest", errorMessage(error)));
@@ -380,7 +376,7 @@ async function checkEnrichmentJob(
     const desired = await desiredEnrichmentJob(
       client,
       manifest.spaceRepo,
-      manifest.datasetRepo,
+      manifest.rawBucket,
       variables,
     );
     const inspection = await (deps.inspectJob ?? inspectEnrichmentJob)(client, desired);
@@ -467,22 +463,22 @@ function recordHealthChecks(checks: DoctorCheck[], health: HealthPayload): void 
   const tweets = typeof health.tweets === "number" ? health.tweets : undefined;
   checks.push(healthCheck(tweets));
   pushOptionalCheck(checks, liveReadinessCheck(health));
-  pushOptionalCheck(checks, liveDatasetCredentialCheck(health));
-  pushOptionalCheck(checks, liveDatasetStateCheck(health));
+  pushOptionalCheck(checks, liveStorageCredentialCheck(health));
+  pushOptionalCheck(checks, liveStorageStateCheck(health));
   pushOptionalCheck(checks, liveEnrichmentCheck(health));
   pushOptionalCheck(checks, liveEnrichmentStateCheck(health));
-  recordIndexedDatasetCheck(checks, tweets);
+  recordIndexedStorageCheck(checks, tweets);
 }
 
 function pushOptionalCheck(checks: DoctorCheck[], check: DoctorCheck | undefined): void {
   if (check !== undefined) checks.push(check);
 }
 
-function recordIndexedDatasetCheck(checks: DoctorCheck[], tweets: number | undefined): void {
-  const datasetFileCount = checkNumber(checks, "dataset.files", "count") ?? 0;
-  const datasetRecordCount = checkNumber(checks, "dataset.records", "count");
-  if (datasetFileCount === 0 || tweets === undefined || datasetRecordCount === 0) return;
-  checks.push(indexedDatasetCheck(datasetFileCount, datasetRecordCount, tweets));
+function recordIndexedStorageCheck(checks: DoctorCheck[], tweets: number | undefined): void {
+  const segmentCount = checkNumber(checks, "storage.segments", "count") ?? 0;
+  const storageRecordCount = checkNumber(checks, "storage.segments", "records");
+  if (segmentCount === 0 || tweets === undefined || storageRecordCount === undefined) return;
+  checks.push(indexedStorageCheck(segmentCount, storageRecordCount, tweets));
 }
 
 function liveReadinessCheck(health: HealthPayload): DoctorCheck | undefined {
@@ -498,23 +494,23 @@ function liveReadinessCheck(health: HealthPayload): DoctorCheck | undefined {
   );
 }
 
-function liveDatasetCredentialCheck(health: HealthPayload): DoctorCheck | undefined {
-  const dataset = asRecord(asRecord(health.readiness)["dataset"]);
-  const credential = text(dataset["credential"]);
-  if (credential === "ok") return pass("live.dataset", "The live Space accepts HF_TOKEN.");
+function liveStorageCredentialCheck(health: HealthPayload): DoctorCheck | undefined {
+  const storage = asRecord(asRecord(health.readiness)["storage"]);
+  const credential = text(storage["credential"]);
+  if (credential === "ok") return pass("live.storage", "The live Space accepts HF_TOKEN.");
   if (credential === "invalid") {
-    const error = credentialError(dataset);
+    const error = credentialError(storage);
     return fail(
-      "live.dataset",
+      "live.storage",
       error.length > 0
         ? `The live Space reports an unusable HF_TOKEN: ${error}`
         : "The live Space reports an unusable HF_TOKEN.",
     );
   }
   if (credential === "unknown") {
-    const error = credentialError(dataset);
+    const error = credentialError(storage);
     return warn(
-      "live.dataset",
+      "live.storage",
       error.length > 0
         ? `The live Space could not verify HF_TOKEN yet: ${error}`
         : "The live Space could not verify HF_TOKEN yet.",
@@ -523,25 +519,25 @@ function liveDatasetCredentialCheck(health: HealthPayload): DoctorCheck | undefi
   return undefined;
 }
 
-function liveDatasetStateCheck(health: HealthPayload): DoctorCheck | undefined {
-  const dataset = asRecord(asRecord(health.readiness)["dataset"]);
-  const state = text(dataset["state"]);
-  const error = text(dataset["error"]);
-  if (state === "ready") return pass("live.dataset_state", "The live dataset state is ready.");
+function liveStorageStateCheck(health: HealthPayload): DoctorCheck | undefined {
+  const storage = asRecord(asRecord(health.readiness)["storage"]);
+  const state = text(storage["state"]);
+  const error = text(storage["error"]);
+  if (state === "ready") return pass("live.storage_state", "The live storage state is ready.");
   if (state === "invalid") {
     return fail(
-      "live.dataset_state",
+      "live.storage_state",
       error.length > 0
-        ? `The live dataset state is invalid: ${error}`
-        : "The live dataset state is invalid.",
+        ? `The live storage state is invalid: ${error}`
+        : "The live storage state is invalid.",
     );
   }
   if (state === "unknown") {
     return warn(
-      "live.dataset_state",
+      "live.storage_state",
       error.length > 0
-        ? `The live dataset state is still resolving: ${error}`
-        : "The live dataset state is still resolving.",
+        ? `The live storage state is still resolving: ${error}`
+        : "The live storage state is still resolving.",
     );
   }
   return undefined;
@@ -601,7 +597,7 @@ function liveEnrichmentStateCheck(health: HealthPayload): DoctorCheck | undefine
 }
 
 function readinessErrors(readiness: Record<string, unknown>): string[] {
-  return ["dataset", "enrichment"]
+  return ["storage", "enrichment"]
     .map((key) => text(asRecord(readiness[key])["error"]))
     .filter((error) => error.length > 0);
 }
@@ -611,38 +607,25 @@ function credentialError(component: Record<string, unknown>): string {
   return explicit.length > 0 ? explicit : text(component["error"]);
 }
 
-function datasetRecordsCheck(stats: DatasetJsonlStats): DoctorCheck {
-  if (stats.records === 0) {
-    return fail(
-      "dataset.records",
-      "Dataset data JSONL files contain no valid tweet records. Repair empty or malformed dataset data before rotating credentials.",
-      { count: stats.records },
-    );
-  }
-  return pass("dataset.records", `Dataset has ${String(stats.records)} valid tweet records.`, {
-    count: stats.records,
-  });
-}
-
 function healthCheck(tweets: number | undefined): DoctorCheck {
   return tweets === undefined
     ? warn("live.healthz", "/healthz responded without a numeric tweets count.")
     : pass("live.healthz", `/healthz reports ${String(tweets)} indexed tweets.`, { tweets });
 }
 
-function indexedDatasetCheck(
-  datasetFileCount: number,
-  datasetRecordCount: number | undefined,
+function indexedStorageCheck(
+  storageFileCount: number,
+  storageRecordCount: number | undefined,
   tweets: number,
 ): DoctorCheck {
   if (tweets === 0) {
     return fail(
-      "live.indexed_dataset",
-      "The dataset has valid tweet records, but the live Space indexed zero tweets. Update or restart the Space, then check the Space HF_TOKEN dataset credential if it still cannot index them.",
-      { datasetFiles: datasetFileCount, datasetRecords: datasetRecordCount ?? 0, tweets },
+      "live.indexed_storage",
+      "The storage has valid tweet records, but the live Space indexed zero tweets. Update or restart the Space, then check the Space HF_TOKEN storage credential if it still cannot index them.",
+      { storageFiles: storageFileCount, storageRecords: storageRecordCount ?? 0, tweets },
     );
   }
-  return pass("live.indexed_dataset", "The live Space is indexing dataset-backed tweets.");
+  return pass("live.indexed_storage", "The live Space is indexing storage-backed tweets.");
 }
 
 async function repairDoctorFindings(
@@ -651,18 +634,18 @@ async function repairDoctorFindings(
   report: DoctorReport,
   deps: DoctorDeps,
 ): Promise<void> {
-  const datasetRepo = report.datasetRepo;
-  if (datasetRepo === undefined) return;
+  const rawBucket = report.rawBucket;
+  if (rawBucket === undefined) return;
   const repair = repairDependencies(deps);
   const jobVariablesChanged = await maybeRepairJobVariables(client, report);
   const webWorkerChanged = await maybeDisableSpaceEnrichment(client, report);
   const generatedChanged = await maybeRepairGeneratedSecrets(client, report, repair);
-  const datasetRepairKind = storageTokenRepairKind(report);
-  const datasetChanged =
-    generatedChanged && datasetRepairKind === "indeterminate"
+  const storageRepairKind = storageTokenRepairKind(report);
+  const storageChanged =
+    generatedChanged && storageRepairKind === "indeterminate"
       ? false
-      : await maybeRepairDatasetToken(client, report, datasetRepo, repair, datasetRepairKind);
-  if ([webWorkerChanged, generatedChanged, datasetChanged].includes(true)) {
+      : await maybeRepairStorageToken(client, report, rawBucket, repair, storageRepairKind);
+  if ([webWorkerChanged, generatedChanged, storageChanged].includes(true)) {
     await repair.restartAndWait(report.spaceRepo);
   }
   await maybeRepairEnrichmentJob(
@@ -671,11 +654,11 @@ async function repairDoctorFindings(
     report,
     repair,
     jobVariablesChanged,
-    datasetChanged,
+    storageChanged,
   );
 }
 
-type RepairDependencies = DatasetRepairDeps &
+type RepairDependencies = StorageRepairDeps &
   GeneratedSecretRepairDeps &
   JobRepairDeps & {
     restartAndWait: (spaceRepo: string) => Promise<void>;
@@ -684,15 +667,15 @@ type RepairDependencies = DatasetRepairDeps &
 // eslint-disable-next-line complexity -- Dependency defaults are centralized so every repair branch is injectable in tests.
 function repairDependencies(deps: DoctorDeps): RepairDependencies {
   return {
-    promptDatasetToken: deps.promptDatasetToken ?? promptDatasetTokenDefault,
-    confirmDatasetTokenRepair: deps.confirmDatasetTokenRepair ?? confirmDatasetTokenRepairDefault,
-    validateDatasetToken: deps.validateDatasetToken ?? validateDatasetTokenDefault,
+    promptStorageToken: deps.promptStorageToken ?? promptStorageTokenDefault,
+    confirmStorageTokenRepair: deps.confirmStorageTokenRepair ?? confirmStorageTokenRepairDefault,
+    validateStorageToken: deps.validateStorageToken ?? validateStorageTokenDefault,
     confirmGeneratedSecretRepair:
       deps.confirmGeneratedSecretRepair ?? confirmGeneratedSecretRepairDefault,
     validateInferenceToken: deps.validateInferenceToken ?? validateInferenceTokenDefault,
     inspectJob: deps.inspectJob ?? inspectEnrichmentJob,
     reconcileJob: deps.reconcileJob ?? reconcileEnrichmentJob,
-    promptJobDatasetToken: deps.promptJobDatasetToken ?? promptJobDatasetTokenDefault,
+    promptJobStorageToken: deps.promptJobStorageToken ?? promptJobStorageTokenDefault,
     promptJobInferenceToken: deps.promptJobInferenceToken ?? promptJobInferenceTokenDefault,
     restartAndWait: deps.restartAndWait ?? restartAndWaitDefault,
   };
@@ -758,34 +741,34 @@ async function maybeRepairGeneratedSecrets(
   return true;
 }
 
-type DatasetRepairDeps = {
-  promptDatasetToken: (datasetRepo: string) => Promise<string>;
-  confirmDatasetTokenRepair: (datasetRepo: string, report: DoctorReport) => Promise<boolean>;
-  validateDatasetToken: (
+type StorageRepairDeps = {
+  promptStorageToken: (rawBucket: string) => Promise<string>;
+  confirmStorageTokenRepair: (rawBucket: string, report: DoctorReport) => Promise<boolean>;
+  validateStorageToken: (
     token: string,
-    datasetRepo: string,
+    rawBucket: string,
     indexBucket: string,
   ) => Promise<readonly string[]>;
 };
 
-async function maybeRepairDatasetToken(
+async function maybeRepairStorageToken(
   client: HubClient,
   report: DoctorReport,
-  datasetRepo: string,
-  deps: DatasetRepairDeps,
+  rawBucket: string,
+  deps: StorageRepairDeps,
   repairKind = storageTokenRepairKind(report),
 ): Promise<boolean> {
   if (repairKind === undefined) return false;
   if (
     repairKind === "indeterminate" &&
-    !(await deps.confirmDatasetTokenRepair(datasetRepo, report))
+    !(await deps.confirmStorageTokenRepair(rawBucket, report))
   ) {
     return false;
   }
   const token = await promptForValidToken(
     "Storage credential rejected",
-    () => deps.promptDatasetToken(datasetRepo),
-    (candidate) => deps.validateDatasetToken(candidate, datasetRepo, requiredIndexBucket(report)),
+    () => deps.promptStorageToken(rawBucket),
+    (candidate) => deps.validateStorageToken(candidate, rawBucket, requiredIndexBucket(report)),
   );
   await setSpaceSecret(client, report.spaceRepo, "HF_TOKEN", token);
   return true;
@@ -801,11 +784,11 @@ type JobRepairDeps = {
     desired: DesiredEnrichmentJob,
     secrets?: EnrichmentJobSecrets,
   ) => Promise<unknown>;
-  promptJobDatasetToken: (datasetRepo: string) => Promise<string>;
+  promptJobStorageToken: (rawBucket: string) => Promise<string>;
   promptJobInferenceToken: () => Promise<string>;
-  validateDatasetToken: (
+  validateStorageToken: (
     token: string,
-    datasetRepo: string,
+    rawBucket: string,
     indexBucket: string,
   ) => Promise<readonly string[]>;
   validateInferenceToken: (token: string) => Promise<readonly string[]>;
@@ -817,11 +800,11 @@ async function maybeRepairEnrichmentJob(
   report: DoctorReport,
   deps: JobRepairDeps,
   variablesChanged: boolean,
-  datasetCredentialChanged: boolean,
+  storageCredentialChanged: boolean,
 ): Promise<void> {
   if (
     !variablesChanged &&
-    !datasetCredentialChanged &&
+    !storageCredentialChanged &&
     !report.checks.some((check) => check.code === "job.schedule" && check.status === "fail")
   ) {
     return;
@@ -831,21 +814,21 @@ async function maybeRepairEnrichmentJob(
   const desired = await desiredEnrichmentJob(
     client,
     manifest.spaceRepo,
-    manifest.datasetRepo,
+    manifest.rawBucket,
     variables,
   );
   const inspection = await deps.inspectJob(client, desired);
   if (inspection.activeJobs.length > 0) {
     throw new Error("Refusing Hugging Face schedule repair while an enrichment Job is active.");
   }
-  if (inspection.exactSchedules.length > 0 && !datasetCredentialChanged) {
+  if (inspection.exactSchedules.length > 0 && !storageCredentialChanged) {
     await deps.reconcileJob(client, desired);
     return;
   }
   const storageToken = await promptForValidToken(
     "Job storage credential rejected",
-    () => deps.promptJobDatasetToken(manifest.datasetRepo),
-    (candidate) => deps.validateDatasetToken(candidate, manifest.datasetRepo, manifest.indexBucket),
+    () => deps.promptJobStorageToken(manifest.rawBucket),
+    (candidate) => deps.validateStorageToken(candidate, manifest.rawBucket, manifest.indexBucket),
   );
   const inferenceToken = await promptForValidToken(
     "Job inference credential rejected",
@@ -872,9 +855,9 @@ function storageTokenRepairKind(report: DoctorReport): "definite" | "indetermina
   const failedCodes = new Set(
     report.checks.filter((check) => check.status === "fail").map((check) => check.code),
   );
-  if (failedCodes.has("space.secret.HF_TOKEN") || failedCodes.has("live.dataset"))
+  if (failedCodes.has("space.secret.HF_TOKEN") || failedCodes.has("live.storage"))
     return "definite";
-  if (failedCodes.has("live.indexed_dataset")) return "indeterminate";
+  if (failedCodes.has("live.indexed_storage")) return "indeterminate";
   if (failedCodes.has("live.healthz") && failedCodes.size === 1) return "indeterminate";
   return undefined;
 }
@@ -902,12 +885,12 @@ function generatedSecretsWithPossibleMalformedValues(
   return allSecretStatesKnown ? GENERATED_SECRET_KEYS : [];
 }
 
-async function validateDatasetTokenDefault(
+async function validateStorageTokenDefault(
   token: string,
-  datasetRepo: string,
+  rawBucket: string,
   indexBucket: string,
 ): Promise<readonly string[]> {
-  const validation = await verifyStorageWriteToken({ token, datasetRepo, indexBucket });
+  const validation = await verifyStorageWriteToken({ token, rawBucket, indexBucket });
   return validation.ok ? [] : validation.errors;
 }
 
@@ -916,22 +899,22 @@ async function validateInferenceTokenDefault(token: string): Promise<readonly st
   return validation.ok ? [] : validation.errors;
 }
 
-async function promptDatasetTokenDefault(datasetRepo: string): Promise<string> {
+async function promptStorageTokenDefault(rawBucket: string): Promise<string> {
   note(
-    `Paste a fine-grained token scoped to read/write ${datasetRepo} and the configured index Bucket. It will be written to the Space as HF_TOKEN.`,
+    `Paste a fine-grained token scoped to read/write ${rawBucket} and the configured index Bucket. It will be written to the Space as HF_TOKEN.`,
     "Storage credential",
   );
   return promptPassword("Storage-only HF_TOKEN");
 }
 
-async function confirmDatasetTokenRepairDefault(
-  datasetRepo: string,
+async function confirmStorageTokenRepairDefault(
+  rawBucket: string,
   report: DoctorReport,
 ): Promise<boolean> {
   note(
     [
       "The live Space health endpoint is unavailable, but doctor cannot prove the Space HF_TOKEN is the cause.",
-      `Replace HF_TOKEN only if you want to rotate the dataset credential for ${datasetRepo}.`,
+      `Replace HF_TOKEN only if you want to rotate the storage credential for ${rawBucket}.`,
       `Failing checks: ${report.checks
         .filter((check) => check.status === "fail")
         .map((check) => check.code)
@@ -940,7 +923,7 @@ async function confirmDatasetTokenRepairDefault(
     "Indeterminate repair",
   );
   const ok = await confirm({
-    message: `Replace the Space HF_TOKEN for ${datasetRepo}?`,
+    message: `Replace the Space HF_TOKEN for ${rawBucket}?`,
     initialValue: false,
   });
   if (isCancel(ok)) {
@@ -977,10 +960,10 @@ async function confirmGeneratedSecretRepairDefault(
   return ok;
 }
 
-async function promptJobDatasetTokenDefault(datasetRepo: string): Promise<string> {
+async function promptJobStorageTokenDefault(rawBucket: string): Promise<string> {
   note(
     [
-      `Paste a fine-grained token scoped to read/write ${datasetRepo} and the configured index Bucket.`,
+      `Paste a fine-grained token scoped to read/write ${rawBucket} and the configured index Bucket.`,
       "Hugging Face will encrypt it as HF_TOKEN on the scheduled Job.",
       "The value cannot be recovered from the existing Space secret.",
     ].join("\n"),
@@ -1047,86 +1030,58 @@ async function restartAndWaitDefault(spaceRepo: string): Promise<void> {
   task.stop("Space restarted");
 }
 
-type DatasetJsonlStats = { files: number; records: number };
+type StorageSegmentStats = { segments: number; records: number };
 
-async function datasetJsonlStats(
+async function storageSegmentStats(
   client: HubClient,
-  datasetRepo: string,
-): Promise<DatasetJsonlStats> {
-  const repo = { type: "dataset", name: datasetRepo } as const;
-  let paths: readonly string[];
+  rawBucket: string,
+): Promise<StorageSegmentStats> {
+  const paths: string[] = [];
   try {
-    paths = await listDatasetJsonlPaths(client, datasetRepo);
+    for await (const entry of listFiles({
+      repo: { type: "bucket", name: rawBucket },
+      accessToken: client.accessToken,
+      recursive: true,
+      path: "v1/segments",
+      ...hubOptions(client),
+    })) {
+      if (entry.type === "file" && entry.path.endsWith(".json.gz")) paths.push(entry.path);
+    }
   } catch (error) {
-    if (!isNotFound(error)) throw error;
-    await assertDatasetReadable(client, repo);
-    return { files: 0, records: 0 };
+    if (asRecord(error)["statusCode"] === 404) return { segments: 0, records: 0 };
+    throw error;
   }
   let records = 0;
   for (const path of paths) {
-    records += countValidTweets(await downloadDatasetText(client, datasetRepo, path));
-  }
-  return { files: paths.length, records };
-}
-
-async function listDatasetJsonlPaths(
-  client: HubClient,
-  datasetRepo: string,
-): Promise<readonly string[]> {
-  const paths: string[] = [];
-  for await (const entry of listFiles({
-    repo: { type: "dataset", name: datasetRepo },
-    accessToken: client.accessToken,
-    recursive: true,
-    path: "data",
-    ...hubOptions(client),
-  })) {
-    if (entry.type === "file" && entry.path.endsWith(".jsonl")) paths.push(entry.path);
-  }
-  return paths;
-}
-
-async function downloadDatasetText(
-  client: HubClient,
-  datasetRepo: string,
-  path: string,
-): Promise<string> {
-  const blob = await downloadFile({
-    repo: { type: "dataset", name: datasetRepo },
-    accessToken: client.accessToken,
-    path,
-    ...hubOptions(client),
-  });
-  if (blob === null) throw new Error(`dataset file not found: ${path}`);
-  return blob.text();
-}
-
-function countValidTweets(content: string): number {
-  let count = 0;
-  for (const line of content.split("\n")) {
-    if (line.trim() === "") continue;
-    let candidate: unknown;
-    try {
-      candidate = JSON.parse(line);
-    } catch {
-      continue;
+    const blob = await downloadFile({
+      repo: { type: "bucket", name: rawBucket },
+      accessToken: client.accessToken,
+      path,
+      ...hubOptions(client),
+    });
+    if (blob === null) throw new Error(`raw Bucket segment disappeared: ${path}`);
+    const raw = gunzipSync(new Uint8Array(await blob.arrayBuffer()));
+    const expected = /-([a-f0-9]{64})\.json\.gz$/u.exec(path)?.[1];
+    if (expected === undefined || createHash("sha256").update(raw).digest("hex") !== expected) {
+      throw new Error(`raw Bucket segment checksum mismatch: ${path}`);
     }
-    if (validateTweet(candidate).ok) count += 1;
+    const segment = asRecord(JSON.parse(raw.toString("utf8")) as unknown);
+    if (segment["schema_version"] !== 1 || !Array.isArray(segment["operations"])) {
+      throw new Error(`invalid raw Bucket segment: ${path}`);
+    }
+    for (const operation of segment["operations"]) {
+      const value = asRecord(operation);
+      if (value["mode"] === "append" && Array.isArray(value["lines"])) {
+        if (!value["lines"].every((line) => typeof line === "string" && line.length > 0)) {
+          throw new Error(`invalid raw Bucket append operation: ${path}`);
+        }
+        records += value["lines"].length;
+      } else if (value["mode"] !== "write" || typeof value["content"] !== "string") {
+        throw new Error(`invalid raw Bucket operation: ${path}`);
+      }
+    }
   }
-  return count;
-}
-
-async function assertDatasetReadable(
-  client: HubClient,
-  repo: { type: "dataset"; name: string },
-): Promise<void> {
-  for await (const _entry of listFiles({
-    repo,
-    accessToken: client.accessToken,
-    ...hubOptions(client),
-  })) {
-    return;
-  }
+  return { segments: paths.length, records };
 }
 
 function hubOptions(client: HubClient): { hubUrl?: string; fetch?: typeof fetch } {
@@ -1147,13 +1102,13 @@ function isNotFound(error: unknown): boolean {
 
 function report(
   spaceRepo: string,
-  datasetRepo: string | undefined,
+  rawBucket: string | undefined,
   indexBucket: string | undefined,
   checks: readonly DoctorCheck[],
 ): DoctorReport {
   return {
     spaceRepo,
-    ...(datasetRepo === undefined ? {} : { datasetRepo }),
+    ...(rawBucket === undefined ? {} : { rawBucket }),
     ...(indexBucket === undefined ? {} : { indexBucket }),
     summary: {
       pass: checks.filter((check) => check.status === "pass").length,

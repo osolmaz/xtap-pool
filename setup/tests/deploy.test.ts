@@ -32,11 +32,13 @@ describe("setup deployment helpers", () => {
     expect(new Headers(requests[0]?.init.headers).get("authorization")).toBe("Bearer hf_owner");
   });
 
-  it("can update variables without initializing generated secrets", async () => {
+  it("removes the dataset variable and updates Bucket variables without initializing secrets", async () => {
     const requests: { url: string; init: RequestInit }[] = [];
     const fetchFn: typeof fetch = (input, init) => {
       requests.push({ url: requestUrl(input), init: init ?? {} });
-      if (init?.method === "GET") return Promise.resolve(Response.json({}));
+      if (init?.method === "GET") {
+        return Promise.resolve(Response.json({ DATASET_REPO: { value: "alice/legacy" } }));
+      }
       return Promise.resolve(new Response(null, { status: 204 }));
     };
 
@@ -45,7 +47,7 @@ describe("setup deployment helpers", () => {
       {
         namespace: "alice",
         spaceRepo: "alice/xtap-pool",
-        datasetRepo: "alice/xtap-pool-data",
+        rawBucket: "alice/xtap-pool-data",
         indexBucket: "alice/xtap-pool-bucket",
         allowedUsers: ["alice"],
         poolAdmins: ["alice"],
@@ -57,13 +59,17 @@ describe("setup deployment helpers", () => {
       url: "https://hub.test/api/spaces/alice/xtap-pool/variables",
       init: { method: "GET" },
     });
+    expect(requests[1]).toMatchObject({
+      url: "https://hub.test/api/spaces/alice/xtap-pool/variables/DATASET_REPO",
+      init: { method: "DELETE" },
+    });
     const writes = requests
-      .slice(1)
+      .slice(2)
       .map((request) => requestBody(request.init))
       .filter((body): body is string => body !== undefined)
       .map(parseVariableWrite);
     expect(Object.fromEntries(writes.map(({ key, value }) => [key, value]))).toEqual({
-      DATASET_REPO: "alice/xtap-pool-data",
+      RAW_BUCKET: "alice/xtap-pool-data",
       INDEX_BUCKET: "alice/xtap-pool-bucket",
       ALLOWED_USERS: "alice",
       POOL_ADMINS: "alice",

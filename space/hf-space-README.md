@@ -21,23 +21,23 @@ Private tweet pool for a group of friends running the
 - `/` — tweet explorer and pool administration
 - `GET /healthz` and `GET /readyz` — machine-readable runtime health
 
-Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the
-dataset repo only), `POOL_SIGNING_SECRET`, `SESSION_SECRET`. Production
-classification does not run in the Space, and `ENRICH_ENABLED` must remain
-`false` there.
+Required Space secrets: `HF_TOKEN` (fine-grained, read/write access to the raw
+and index Buckets only), `POOL_SIGNING_SECRET`, and `SESSION_SECRET`.
+Production classification does not run in the Space, and `ENRICH_ENABLED` must
+remain `false` there.
 
-Required Space variables: `DATASET_REPO`, `ALLOWED_USERS` (initial
-comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins), `SPACE_HOST`
-(auto-injected by HF), and the bounded enrichment configuration reconciled by
-setup. Doctor creates a separate suspended Hugging Face Job with encrypted
-dataset-writer and inference secrets. The Job refuses missing pricing, cost
-ceilings, or a source revision that differs from the deployed Space image.
+Required Space variables: `RAW_BUCKET`, `INDEX_BUCKET`, `ALLOWED_USERS`
+(initial comma-separated HF usernames), `POOL_ADMINS` (bootstrap admins),
+`SPACE_HOST` (auto-injected by HF), and the bounded enrichment configuration
+reconciled by setup. Doctor creates a separate suspended Hugging Face Job with
+encrypted Bucket-writer and inference secrets. The Job refuses missing pricing,
+cost ceilings, or a source revision that differs from the deployed Space image.
 
-After setup, admins manage individual members and one allowed member organization
-in the Space Admin tab. Durable membership is stored in the private dataset repo
-at `config/pool.json`; the Space variables are kept as bootstrap and recovery
-inputs. The `member_orgs` config key remains an array for backwards
-compatibility, but only one organization grant is active.
+After setup, admins manage individual members and one allowed member
+organization in the Space Admin tab. Durable membership is stored in the raw
+Bucket at `config/pool.json`; the Space variables are bootstrap and recovery
+inputs. The `member_orgs` config key is an array, but only one organization
+grant can be active.
 
 Admins issue read-only machine credentials from the Admin tab. Only credential
 hashes are stored in `config/service-accounts.json`; raw credentials are shown

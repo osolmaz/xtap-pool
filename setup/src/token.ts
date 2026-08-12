@@ -10,7 +10,7 @@ const TARGET_PERMISSIONS = new Set([
 const READ_PERMISSION = "repo.content.read";
 const WRITE_PERMISSIONS = ["repo.content.write", "repo.write"] as const;
 
-type StorageTarget = { kind: "bucket" | "dataset"; name: string };
+type StorageTarget = { kind: "bucket"; name: string };
 
 export type StorageTokenReport =
   | {
@@ -26,7 +26,7 @@ export type StorageTokenReport =
 
 export async function verifyStorageWriteToken(params: {
   token: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   fetchFn?: typeof fetch;
 }): Promise<StorageTokenReport> {
@@ -38,7 +38,7 @@ export async function verifyStorageWriteToken(params: {
   }
   const payload: unknown = await response.json();
   const targets: readonly StorageTarget[] = [
-    { kind: "dataset", name: params.datasetRepo },
+    { kind: "bucket", name: params.rawBucket },
     { kind: "bucket", name: params.indexBucket },
   ];
   const permissions = evaluateStorageWriteToken(payload, targets);
@@ -49,13 +49,13 @@ export async function verifyStorageWriteToken(params: {
 
 async function storageReadErrors(params: {
   token: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   fetchFn?: typeof fetch;
 }): Promise<readonly string[]> {
   const fetchFn = params.fetchFn ?? fetch;
   const probes = [
-    { name: params.datasetRepo, url: datasetProbeUrl(params.datasetRepo), kind: "dataset" },
+    { name: params.rawBucket, url: bucketProbeUrl(params.rawBucket), kind: "Bucket" },
     { name: params.indexBucket, url: bucketProbeUrl(params.indexBucket), kind: "Bucket" },
   ];
   const errors: string[] = [];
@@ -74,12 +74,8 @@ async function storageReadErrors(params: {
   return errors;
 }
 
-function datasetProbeUrl(datasetRepo: string): string {
-  return `https://huggingface.co/datasets/${datasetRepo}/resolve/main/config/pool.json`;
-}
-
-function bucketProbeUrl(indexBucket: string): string {
-  return `https://huggingface.co/api/buckets/${indexBucket}`;
+function bucketProbeUrl(bucket: string): string {
+  return `https://huggingface.co/api/buckets/${bucket}`;
 }
 
 export function evaluateStorageWriteToken(
@@ -188,9 +184,8 @@ function entityLabel(entity: JsonObject): string {
   return `${kind}:${name}`;
 }
 
-function normalizeName(value: string, kind: StorageTarget["kind"]): string {
-  const prefix = kind === "dataset" ? /^datasets\// : /^buckets\//;
-  return value.replace(prefix, "");
+function normalizeName(value: string, _kind: StorageTarget["kind"]): string {
+  return value.replace(/^buckets\//, "");
 }
 
 function asRecord(value: unknown): JsonObject {

@@ -1,7 +1,7 @@
 export type SetupConfig = {
   namespace: string;
   spaceRepo: string;
-  datasetRepo: string;
+  rawBucket: string;
   indexBucket: string;
   allowedUsers: readonly string[];
   poolAdmins: readonly string[];
@@ -14,7 +14,7 @@ export function defaultSetupConfig(username: string): SetupConfig {
   return {
     namespace: username,
     spaceRepo: `${username}/xtap-pool`,
-    datasetRepo: `${username}/xtap-pool-data`,
+    rawBucket: `${username}/xtap-pool-data`,
     indexBucket: `${username}/xtap-pool-bucket`,
     allowedUsers: [username],
     poolAdmins: [username],
@@ -29,10 +29,10 @@ export function existingSpaceConfig(
   const spaceError = validateRepoId(spaceRepo);
   if (spaceError !== undefined) throw new Error(spaceError);
   const namespace = spaceRepo.split("/")[0] ?? "";
-  const datasetRepo = variables.get("DATASET_REPO") ?? repoInNamespace(namespace, "xtap-pool-data");
-  const datasetError = validateRepoId(datasetRepo);
-  if (datasetError !== undefined)
-    throw new Error(`Invalid DATASET_REPO on ${spaceRepo}: ${datasetRepo}`);
+  const rawBucket = variables.get("RAW_BUCKET") ?? repoInNamespace(namespace, "xtap-pool-data");
+  const rawBucketError = validateRepoId(rawBucket);
+  if (rawBucketError !== undefined)
+    throw new Error(`Invalid RAW_BUCKET on ${spaceRepo}: ${rawBucket}`);
   const indexBucket =
     variables.get("INDEX_BUCKET") ?? repoInNamespace(namespace, "xtap-pool-bucket");
   const bucketError = validateRepoId(indexBucket);
@@ -43,7 +43,7 @@ export function existingSpaceConfig(
   return {
     namespace,
     spaceRepo,
-    datasetRepo,
+    rawBucket,
     indexBucket,
     allowedUsers,
     poolAdmins,

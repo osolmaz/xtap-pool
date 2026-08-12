@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hubMocks = vi.hoisted(() => ({
@@ -57,7 +60,7 @@ describe("Hugging Face enrichment Job", () => {
       schedule: "17 */6 * * *",
       timeoutSeconds: 2700,
       environment: {
-        DATASET_REPO: "alice/xtap-pool-data",
+        RAW_BUCKET: "alice/xtap-pool-data",
         INDEX_BUCKET: "alice/xtap-pool-bucket",
         ENRICH_ENABLED: "true",
         ENRICH_MAX_COST_USD: "2",
@@ -344,16 +347,26 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.getJob
       .mockResolvedValueOnce(physicalFixture(desired, "job-1", "COMPLETED"))
       .mockResolvedValueOnce(physicalFixture(desired, "job-2", "STOPPED"));
+    const receipts = receiptSegment([
+      receiptFixture("other-job"),
+      receiptFixture("job-1"),
+      {
+        ...receiptFixture("job-2"),
+        units: 0,
+        calls: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cost_usd: 0,
+      },
+    ]);
     hubMocks.listFiles.mockReturnValue(
-      asyncIterableOf([{ type: "file", path: "enrichment/receipts/2026-07-28.jsonl" }]),
+      asyncIterableOf([{ type: "file", path: receipts.segmentPath }]),
     );
     hubMocks.downloadFile.mockImplementation((options: { path?: string }) =>
       Promise.resolve(
         options.path === ".xtap-deployment.json"
           ? new Blob([JSON.stringify({ source_revision: REVISION })])
-          : new Blob([
-              `\nnot-json\n{}\n${JSON.stringify(receiptFixture("other-job"))}\n${JSON.stringify(receiptFixture("job-1"))}\n${JSON.stringify({ ...receiptFixture("job-2"), units: 0, calls: 0, prompt_tokens: 0, completion_tokens: 0, cost_usd: 0 })}\n`,
-            ]),
+          : receipts,
       ),
     );
 
@@ -378,18 +391,15 @@ describe("Hugging Face enrichment Job", () => {
         secrets: undefined,
       })
       .mockResolvedValueOnce(physicalFixture(desired, "job-2", "COMPLETED"));
+    const receipts = receiptSegment([receiptFixture("job-1"), receiptFixture("job-2")]);
     hubMocks.listFiles.mockReturnValue(
-      asyncIterableOf([{ type: "file", path: "enrichment/receipts/2026-07-28.jsonl" }]),
+      asyncIterableOf([{ type: "file", path: receipts.segmentPath }]),
     );
     hubMocks.downloadFile.mockImplementation((options: { path?: string }) =>
       Promise.resolve(
         options.path === ".xtap-deployment.json"
           ? new Blob([JSON.stringify({ source_revision: REVISION })])
-          : new Blob([
-              [receiptFixture("job-1"), receiptFixture("job-2")]
-                .map((receipt) => JSON.stringify(receipt))
-                .join("\n"),
-            ]),
+          : receipts,
       ),
     );
 
@@ -528,7 +538,12 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.runScheduledJob.mockResolvedValue(physicalFixture(desired, "gone", "RUNNING"));
     hubMocks.getJob.mockResolvedValue(physicalFixture(desired, "gone", "STOPPED"));
     hubMocks.listFiles.mockReturnValue(
-      asyncIterableOf([{ type: "file", path: "enrichment/receipts/gone.jsonl" }]),
+      asyncIterableOf([
+        {
+          type: "file",
+          path: "v1/segments/receipt/2026/07/28/gone-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json.gz",
+        },
+      ]),
     );
     hubMocks.downloadFile.mockResolvedValue(null);
     await expect(
@@ -536,7 +551,7 @@ describe("Hugging Face enrichment Job", () => {
         pollIntervalMs: 0,
         receiptTimeoutMs: 100,
       }),
-    ).rejects.toThrow("Receipt shard disappeared");
+    ).rejects.toThrow("Receipt segment disappeared");
   });
 
   it.each([
@@ -548,12 +563,7 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
     hubMocks.runScheduledJob.mockResolvedValue(physicalFixture(desired, "job-1", "RUNNING"));
     hubMocks.getJob.mockResolvedValue(physicalFixture(desired, "job-1", "STOPPED"));
-    hubMocks.listFiles.mockReturnValue(
-      asyncIterableOf([{ type: "file", path: "enrichment/receipts/receipt.jsonl" }]),
-    );
-    hubMocks.downloadFile.mockResolvedValue(
-      new Blob([`${JSON.stringify({ ...receiptFixture("job-1"), ...override })}\n`]),
-    );
+    mockReceiptSegment([{ ...receiptFixture("job-1"), ...override }]);
 
     await expect(
       runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
@@ -569,12 +579,7 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
     hubMocks.runScheduledJob.mockResolvedValue(physicalFixture(desired, "same", "RUNNING"));
     hubMocks.getJob.mockResolvedValue(physicalFixture(desired, "same", "STOPPED"));
-    hubMocks.listFiles.mockReturnValue(
-      asyncIterableOf([{ type: "file", path: "enrichment/receipts/receipt.jsonl" }]),
-    );
-    hubMocks.downloadFile.mockResolvedValue(
-      new Blob([`${JSON.stringify(receiptFixture("same"))}\n`]),
-    );
+    mockReceiptSegment([receiptFixture("same")]);
     await expect(
       runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
         pollIntervalMs: 0,
@@ -590,11 +595,10 @@ describe("Hugging Face enrichment Job", () => {
       .mockReset()
       .mockResolvedValueOnce(physicalFixture(desired, "job-1", "STOPPED"))
       .mockResolvedValueOnce(physicalFixture(desired, "job-2", "STOPPED"));
-    hubMocks.downloadFile.mockResolvedValue(
-      new Blob([
-        `${JSON.stringify(receiptFixture("job-1"))}\n${JSON.stringify({ ...receiptFixture("job-2"), contract_hash: "changed" })}\n`,
-      ]),
-    );
+    mockReceiptSegment([
+      receiptFixture("job-1"),
+      { ...receiptFixture("job-2"), contract_hash: "changed" },
+    ]);
     await expect(
       runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
         pollIntervalMs: 0,
@@ -613,7 +617,9 @@ describe("Hugging Face enrichment Job", () => {
       true,
     );
     hubMocks.listScheduledJobs.mockResolvedValue([exact, stale, alreadySuspended]);
-    hubMocks.runScheduledJob.mockResolvedValue(physicalFixture(desired, "job", "RUNNING"));
+    hubMocks.runScheduledJob
+      .mockReset()
+      .mockResolvedValue(physicalFixture(desired, "job", "RUNNING"));
 
     await expect(suspendMismatchedEnrichmentSchedules(client, desired)).resolves.toBe(1);
     expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
@@ -653,6 +659,31 @@ function asyncIterableOf(entries: readonly unknown[]): AsyncIterable<unknown> {
       };
     },
   };
+}
+
+function mockReceiptSegment(receipts: readonly unknown[]): void {
+  const blob = receiptSegment(receipts);
+  hubMocks.listFiles.mockReturnValue(asyncIterableOf([{ type: "file", path: blob.segmentPath }]));
+  hubMocks.downloadFile.mockResolvedValue(blob);
+}
+
+function receiptSegment(receipts: readonly unknown[]): Blob & { readonly segmentPath: string } {
+  const segment = {
+    schema_version: 1,
+    transaction_id: "00000000-0000-4000-8000-000000000001",
+    created_at: "2026-07-28T00:00:00.000Z",
+    operations: [
+      {
+        path: "enrichment/receipts/2026-07-28.jsonl",
+        mode: "append",
+        lines: receipts.map((receipt) => JSON.stringify(receipt)),
+      },
+    ],
+  };
+  const raw = Buffer.from(JSON.stringify(segment));
+  const blob = new Blob([gzipSync(raw)]) as Blob & { segmentPath: string };
+  blob.segmentPath = `v1/segments/receipt/2026/07/28/receipt-${createHash("sha256").update(raw).digest("hex")}.json.gz`;
+  return blob;
 }
 
 function receiptFixture(workerId: string): Record<string, unknown> {

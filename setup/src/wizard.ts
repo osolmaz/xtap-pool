@@ -36,7 +36,6 @@ import {
   suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
 import { getSpaceVariables, setSpaceSecret } from "./hub-api.js";
-import { defaultTweetsDirectory, expandHomePath } from "./path.js";
 import { captureCommand, inheritCommand } from "./process.js";
 import { verifyInferenceToken } from "./inference-token.js";
 import { verifyStorageWriteToken } from "./token.js";
@@ -51,8 +50,7 @@ export async function runSetupWizard(root: string): Promise<void> {
   task.start("Creating repos, deploying Space, and setting generated secrets");
   await deployPool(root, { accessToken }, config);
   task.stop("Space deployed");
-  const storageToken = await promptStorageToken(config.datasetRepo, config.indexBucket);
-  await maybeSeed(root, config);
+  const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
   await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
   await bootstrapIndex(root, config, storageToken);
   await inheritCommand("hf", ["spaces", "restart", config.spaceRepo, "--format", "json"]);
@@ -70,7 +68,7 @@ export async function runSetupWizard(root: string): Promise<void> {
   const desired = await desiredEnrichmentJob(
     { accessToken },
     config.spaceRepo,
-    config.datasetRepo,
+    config.rawBucket,
     variables,
   );
   await reconcileEnrichmentJob({ accessToken }, desired, { storageToken, inferenceToken });
@@ -87,8 +85,8 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   const variables = await getSpaceVariables({ accessToken }, spaceRepo);
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
   const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
-  if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.datasetRepo))) {
-    const storageToken = await promptStorageToken(config.datasetRepo, config.indexBucket);
+  if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.indexBucket))) {
+    const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
     await bootstrapIndex(root, config, storageToken, indexContractFromVariables(variables));
     await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
   }
@@ -99,7 +97,7 @@ export async function runUpdateCommand(root: string, requestedSpaceRepo?: string
   const desired = await desiredEnrichmentJob(
     { accessToken },
     config.spaceRepo,
-    config.datasetRepo,
+    config.rawBucket,
     refreshedVariables,
   );
   const suspended = await suspendMismatchedEnrichmentSchedules({ accessToken }, desired);
@@ -130,8 +128,8 @@ async function promptConfig(username: string): Promise<SetupConfig> {
     repoInNamespace(namespace, "xtap-pool"),
     validateRepoId,
   );
-  const datasetRepo = await promptText(
-    "Private dataset repo",
+  const rawBucket = await promptText(
+    "Private raw Bucket",
     repoInNamespace(namespace, "xtap-pool-data"),
     validateRepoId,
   );
@@ -149,7 +147,7 @@ async function promptConfig(username: string): Promise<SetupConfig> {
   return {
     namespace,
     spaceRepo,
-    datasetRepo,
+    rawBucket,
     indexBucket,
     allowedUsers: normalizeUsers(allowed),
     poolAdmins: normalizeUsers(admins),
@@ -160,7 +158,7 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
   note(
     [
       `Space: ${config.spaceRepo}`,
-      `Dataset: ${config.datasetRepo}`,
+      `Raw Bucket: ${config.rawBucket}`,
       `Index Bucket: ${config.indexBucket}`,
       `Allowed users: ${usersValue(config.allowedUsers)}`,
       `Pool admins: ${usersValue(config.poolAdmins)}`,
@@ -174,14 +172,11 @@ async function confirmPlan(config: SetupConfig): Promise<void> {
   }
 }
 
-export async function promptStorageToken(
-  datasetRepo: string,
-  indexBucket: string,
-): Promise<string> {
+export async function promptStorageToken(rawBucket: string, indexBucket: string): Promise<string> {
   note(
     [
       "Create one fine-grained storage token scoped exactly to:",
-      `- read/write ${datasetRepo}`,
+      `- read/write ${rawBucket}`,
       `- read/write ${indexBucket}`,
       "Setup will store it as HF_TOKEN on both the Space and its suspended enrichment Job.",
       tokenSettingsUrl(),
@@ -190,7 +185,7 @@ export async function promptStorageToken(
   );
   for (;;) {
     const token = await promptPassword("Paste the storage-only HF_TOKEN");
-    const report = await verifyStorageWriteToken({ token, datasetRepo, indexBucket });
+    const report = await verifyStorageWriteToken({ token, rawBucket, indexBucket });
     if (report.ok) {
       note(`${report.tokenName || "token"} on ${report.username || "unknown account"}`, "Verified");
       return token;
@@ -245,7 +240,7 @@ export async function bootstrapIndex(
       env: {
         ...process.env,
         DATA_DIR: dataDir,
-        DATASET_REPO: config.datasetRepo,
+        RAW_BUCKET: config.rawBucket,
         INDEX_BUCKET: config.indexBucket,
         HF_TOKEN: storageToken,
         LLM_MODEL: contract.llmModel,
@@ -259,32 +254,14 @@ export async function bootstrapIndex(
 
 async function durableIndexManifestExists(
   accessToken: string,
-  datasetRepo: string,
+  indexBucket: string,
 ): Promise<boolean> {
   const blob = await downloadFile({
-    repo: { type: "dataset", name: datasetRepo },
+    repo: { type: "bucket", name: indexBucket },
     path: "index/current.json",
     accessToken,
   });
   return blob !== null;
-}
-
-async function maybeSeed(root: string, config: SetupConfig): Promise<void> {
-  const seed = await confirm({
-    message: "Import existing xTap JSONL files now?",
-    initialValue: false,
-  });
-  if (isCancel(seed) || !seed) return;
-  const username = await promptText(
-    "Imported tweets belong to which HF user?",
-    config.allowedUsers[0] ?? config.namespace,
-  );
-  const source = await promptText("Existing xTap output directory", defaultTweetsDirectory());
-  await inheritCommand(
-    "scripts/seed-dataset.sh",
-    [config.datasetRepo, username, expandHomePath(source)],
-    { cwd: root },
-  );
 }
 
 async function promptText(
