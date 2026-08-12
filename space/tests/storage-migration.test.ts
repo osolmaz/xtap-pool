@@ -237,6 +237,10 @@ describe("pinned storage migration", () => {
   });
 
   it("rejects malformed, deleted, duplicated, and changed source rows", async () => {
+    const emptyRows = fixture();
+    emptyRows.source.files.set("data/osolmaz/2026/08/tweets-2026-08-13.jsonl", bytes("\n"));
+    await expect(importPinnedDataset(options(emptyRows))).rejects.toThrow("no valid records");
+
     const malformed = fixture();
     malformed.source.files.set("data/osolmaz/2026/08/tweets-2026-08-13.jsonl", bytes("not-json\n"));
     await expect(importPinnedDataset(options(malformed))).rejects.toThrow("invalid JSON");
