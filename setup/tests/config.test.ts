@@ -52,6 +52,16 @@ describe("setup config helpers", () => {
     });
   });
 
+  it("preserves a custom legacy storage name during cutover", () => {
+    const config = existingSpaceConfig(
+      "alice",
+      "team/xtap-pool",
+      new Map([["DATASET_REPO", "archive/custom-pool-data"]]),
+    );
+
+    expect(config.rawBucket).toBe("archive/custom-pool-data");
+  });
+
   it("uses sane update defaults when optional Space variables are missing", () => {
     const config = existingSpaceConfig("alice", "team/xtap-pool", new Map());
 
