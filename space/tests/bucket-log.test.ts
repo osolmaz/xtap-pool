@@ -276,6 +276,18 @@ describe("BucketLog", () => {
     await expect(state.log.discoverSnapshot(first.snapshot.files)).resolves.toEqual(first);
   });
 
+  it("rejects a valid segment stored under the wrong category key", async () => {
+    const state = log();
+    const key = await state.log.commitBatch([], [{ path: "config/pool.json", content: "{}" }]);
+    const content = state.bucket.files.get(key)!;
+    state.bucket.files.delete(key);
+    state.bucket.files.set(key.replace("/config/", "/tweet/"), content);
+
+    await expect(state.log.createSnapshot()).rejects.toThrow(
+      "segment key does not match its contents",
+    );
+  });
+
   it("rejects changed bytes that retain the same object size", async () => {
     const state = log();
     await state.log.commitBatch(

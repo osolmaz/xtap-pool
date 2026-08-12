@@ -275,7 +275,7 @@ describe("DurableIndex", () => {
     index.close();
   });
 
-  it("retains the active database and three predecessors", async () => {
+  it("records three predecessors without unsafe automatic deletion", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("retention"));
     for (let generation = 0; generation < 6; generation += 1) {
@@ -291,8 +291,8 @@ describe("DurableIndex", () => {
       database: { key: string; predecessors: string[] };
     };
     expect(manifest.database.predecessors).toHaveLength(3);
-    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite"))).toHaveLength(4);
-    expect(bucket.removed).toHaveLength(2);
+    expect([...bucket.files.keys()].filter((key) => key.endsWith(".sqlite"))).toHaveLength(6);
+    expect(bucket.removed).toEqual([]);
     index.close();
   });
 
