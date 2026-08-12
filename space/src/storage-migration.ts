@@ -23,6 +23,12 @@ const PINNED_REVISION = /^[a-f0-9]{40}$/u;
 const SOURCE_PATH =
   /^(?:data\/[^/]+\/\d{4}\/\d{2}\/tweets-\d{4}-\d{2}-\d{2}\.jsonl|enrichment\/\d{4}\/\d{2}\/enrichment-\d{4}-\d{2}-\d{2}\.jsonl|enrichment\/attempts\/\d{4}\/\d{2}\/attempts-\d{4}-\d{2}-\d{2}\.jsonl|enrichment\/registry\/\d{4}\/\d{2}\/registry-\d{4}-\d{2}-\d{2}\.jsonl|enrichment\/receipts\/\d{4}-\d{2}-\d{2}\.jsonl)$/u;
 const CONFIG_PATHS = new Set<string>(RAW_CONFIG_PATHS);
+const REQUIRED_CONFIG_PATHS = new Set([
+  "config/pool.json",
+  "config/service-accounts.json",
+  "config/labels.json",
+  "enrichment/vocabulary.json",
+]);
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export type PinnedSourceObject = { path: string; oid: string; size: number };
@@ -373,6 +379,10 @@ function approvedObjects(objects: readonly PinnedSourceObject[]): PinnedSourceOb
   const paths = approved.map((object) => object.path);
   if (new Set(paths).size !== paths.length)
     throw new Error("pinned dataset contains duplicate approved paths");
+  const missing = [...REQUIRED_CONFIG_PATHS].filter((path) => !paths.includes(path));
+  if (missing.length > 0) {
+    throw new Error(`pinned dataset is missing required configuration: ${missing.join(", ")}`);
+  }
   return approved;
 }
 

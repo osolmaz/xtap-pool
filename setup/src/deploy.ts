@@ -52,10 +52,26 @@ export async function updateExistingPool(
   root: string,
   client: HubClient,
   config: SetupConfig,
+  options: { allowLegacyDatasetRemoval?: boolean } = {},
 ): Promise<void> {
   await assertRepoVisibility(client, { type: "bucket", name: config.rawBucket }, "private");
   await assertRepoVisibility(client, { type: "bucket", name: config.indexBucket }, "private");
   await assertRepoVisibility(client, { type: "space", name: config.spaceRepo }, "public");
+  const variables = await getSpaceVariables(client, config.spaceRepo);
+  const legacy = variables.has("DATASET_REPO");
+  if (legacy && options.allowLegacyDatasetRemoval !== true) {
+    throw new Error(
+      "legacy DATASET_REPO is still configured; complete and verify the pinned Bucket import before cutover",
+    );
+  }
+  if (legacy) {
+    await configureSpace(client, config, {
+      initializeGeneratedSecrets: false,
+      allowLegacyDatasetRemoval: true,
+    });
+    await uploadSpace(root, client, config.spaceRepo);
+    return;
+  }
   await uploadSpace(root, client, config.spaceRepo);
   await configureSpace(client, config, { initializeGeneratedSecrets: false });
 }
