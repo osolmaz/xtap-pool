@@ -21,10 +21,23 @@ describe("createHuggingFaceOrgResolver", () => {
     });
   });
 
-  it("rejects missing organizations", async () => {
-    const fetchFn: typeof fetch = () => Promise.resolve(new Response("no", { status: 404 }));
+  it("rejects missing and malformed organizations", async () => {
+    const missing: typeof fetch = () => Promise.resolve(new Response("no", { status: 404 }));
     await expect(
-      createHuggingFaceOrgResolver("https://huggingface.co", fetchFn)("missing"),
+      createHuggingFaceOrgResolver("https://huggingface.co", missing)("missing"),
     ).rejects.toThrow("Hugging Face organization not found: missing");
+
+    const malformed: typeof fetch = () => Promise.resolve(Response.json({ name: "broken" }));
+    await expect(
+      createHuggingFaceOrgResolver("https://huggingface.co", malformed)("broken"),
+    ).rejects.toThrow("organization response was invalid");
+  });
+
+  it("omits an absent display name", async () => {
+    const fetchFn: typeof fetch = () =>
+      Promise.resolve(Response.json({ _id: "org-hf", name: "HuggingFace" }));
+    await expect(
+      createHuggingFaceOrgResolver("https://huggingface.co", fetchFn)("huggingface"),
+    ).resolves.toEqual({ name: "huggingface", sub: "org-hf" });
   });
 });
