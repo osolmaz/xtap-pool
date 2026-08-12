@@ -70,6 +70,30 @@ describe("raw storage initialization", () => {
     expect(files.size).toBe(1);
   });
 
+  it("rejects an existing transaction log with incomplete configuration", async () => {
+    files.clear();
+    const workDir = mkdtempSync(join(tmpdir(), "xtap-storage-incomplete-"));
+    const now = () => new Date("2026-08-12T12:00:00.000Z");
+    const log = new BucketLog(
+      "alice/xtap-pool-data",
+      createRawBucketClient("alice/xtap-pool-data", "token"),
+      workDir,
+      now,
+    );
+    await log.writeText("config/pool.json", '{"version":1}\n');
+
+    await expect(
+      initializeRawStorage({
+        rawBucket: "alice/xtap-pool-data",
+        token: "token",
+        members: ["alice"],
+        admins: ["alice"],
+        workDir,
+        now,
+      }),
+    ).rejects.toThrow("incomplete configuration");
+  });
+
   it("preserves complete configuration in an existing transaction log", async () => {
     files.clear();
     const workDir = mkdtempSync(join(tmpdir(), "xtap-storage-existing-"));
