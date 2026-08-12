@@ -7,9 +7,12 @@
 # HF_TOKEN secret.
 #
 # Usage:
-#   XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh <namespace>
+#   PINNED_IMPORT_REPORT=/safe/path/report.json XTAP_STORAGE_TOKEN=... \
+#     scripts/deploy-space.sh <namespace>
 #   SPACE_REPO=<ns>/<name> RAW_BUCKET=<ns>/<name> INDEX_BUCKET=<ns>/<name> \
-#     XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh
+#     PINNED_IMPORT_REPORT=/safe/path/report.json XTAP_STORAGE_TOKEN=... \
+#     scripts/deploy-space.sh
+# Set ALLOW_EMPTY_POOL=1 only for a confirmed new pool with no legacy data.
 set -euo pipefail
 
 NAMESPACE="${1:-${NAMESPACE:-}}"
@@ -42,6 +45,35 @@ Rerun with XTAP_STORAGE_TOKEN set. The script will bootstrap the durable index
 and install the same value as the Space HF_TOKEN.
 EOF
   exit 2
+fi
+
+if [[ "${ALLOW_EMPTY_POOL:-0}" != "1" ]]; then
+  if [[ -z "${PINNED_IMPORT_REPORT:-}" || ! -f "$PINNED_IMPORT_REPORT" ]]; then
+    cat >&2 <<EOF
+PINNED_IMPORT_REPORT must name the verified report from storage:import.
+The deployment will not bootstrap an empty replacement over a legacy pool.
+For a confirmed new pool with no legacy data, set ALLOW_EMPTY_POOL=1 explicitly.
+EOF
+    exit 2
+  fi
+  RAW_BUCKET="$RAW_BUCKET" PINNED_IMPORT_REPORT="$PINNED_IMPORT_REPORT" python3 <<'PY'
+import json
+import os
+import re
+
+with open(os.environ["PINNED_IMPORT_REPORT"], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("reconciliation", {}).get("passed") is not True:
+    raise SystemExit("pinned import report did not pass reconciliation")
+target = report.get("target", {})
+if target.get("bucket") != os.environ["RAW_BUCKET"]:
+    raise SystemExit("pinned import report targets a different raw Bucket")
+if not isinstance(target.get("objects"), int) or target["objects"] < 1:
+    raise SystemExit("pinned import report has no imported objects")
+if re.fullmatch(r"[a-f0-9]{64}", str(target.get("snapshot_revision", ""))) is None:
+    raise SystemExit("pinned import report has no valid snapshot revision")
+print("Verified the pinned import report before index bootstrap.")
+PY
 fi
 
 echo "==> Bootstrapping and verifying the durable index"

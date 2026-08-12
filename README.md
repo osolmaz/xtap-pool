@@ -88,11 +88,15 @@ signing or session secrets.
 
 The lower-level deployment script is also available. Supplying
 `XTAP_STORAGE_TOKEN` authorizes the script to bootstrap the index and install
-that value as the Space `HF_TOKEN` secret.
+that value as the Space `HF_TOKEN` secret. An existing pool also requires the
+verified report from the pinned dataset import. This guard prevents an empty
+Bucket projection from replacing legacy data. Use `ALLOW_EMPTY_POOL=1` only
+for a confirmed new pool.
 
 ```sh
-scripts/deploy-space.sh <namespace> # creates resources, then stops for the token
-XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh <namespace>
+scripts/deploy-space.sh <namespace> # creates resources, then stops for credentials
+PINNED_IMPORT_REPORT=/secure/path/import-report.json \
+  XTAP_STORAGE_TOKEN=... scripts/deploy-space.sh <namespace>
 ```
 
 ## Import the retired dataset

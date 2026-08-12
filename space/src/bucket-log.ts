@@ -69,7 +69,8 @@ export const bucketSegmentSchema = z
 const snapshotFileSchema = z
   .object({
     key: z.string().regex(SEGMENT_KEY),
-    oid: z.string().min(1),
+    oid: z.string().regex(SHA256),
+    listed_oid: z.string().min(1).optional(),
     size: z.number().int().nonnegative(),
     content_sha256: z.string().regex(SHA256),
   })
@@ -260,6 +261,7 @@ export class BucketLog {
    * Content-addressed keys and the prior verified snapshot authenticate known
    * objects; every new object is downloaded and fully verified once.
    */
+  // eslint-disable-next-line complexity -- Head discovery checks append-only membership, size, provider identity, and verified content identity.
   async discoverSnapshot(
     known?: readonly BucketSnapshotFile[],
   ): Promise<{ revision: string; snapshot: BucketSnapshot }> {
@@ -280,7 +282,20 @@ export class BucketLog {
         if (old.size !== object.size) {
           throw new Error(`Bucket object size changed while discovering head: ${object.key}`);
         }
-        files.push(old);
+        if (object.oid !== undefined && old.listed_oid === object.oid) {
+          files.push(old);
+          continue;
+        }
+        let verified: BucketSnapshotFile;
+        try {
+          verified = await this.verifyListedObject(object);
+        } catch (error) {
+          throw new Error(`raw Bucket source segment changed: ${object.key}`, { cause: error });
+        }
+        if (verified.oid !== old.oid) {
+          throw new Error(`raw Bucket source segment changed: ${object.key}`);
+        }
+        files.push(object.oid === undefined ? old : verified);
         continue;
       }
       files.push(await this.verifyListedObject(object));
@@ -475,6 +490,7 @@ export class BucketLog {
     return {
       key: object.key,
       oid: sha256(compressed),
+      ...(object.oid === undefined ? {} : { listed_oid: object.oid }),
       size: object.size,
       content_sha256: segmentHash(object.key),
     };

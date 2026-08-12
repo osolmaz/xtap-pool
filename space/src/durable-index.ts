@@ -114,6 +114,7 @@ type MetadataRow = {
 type SegmentRow = {
   key: string;
   oid: string;
+  listed_oid: string | null;
   byte_length: number;
   content_sha256: string;
   tweet_rows: number;
@@ -477,6 +478,7 @@ function ensureIndexTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS source_segments (
       key TEXT PRIMARY KEY,
       oid TEXT NOT NULL,
+      listed_oid TEXT,
       byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
       content_sha256 TEXT NOT NULL,
       tweet_rows INTEGER NOT NULL CHECK (tweet_rows >= 0),
@@ -497,6 +499,7 @@ function snapshotFileFromRow(row: SegmentRow): BucketSnapshotFile {
   return {
     key: row.key,
     oid: row.oid,
+    ...(row.listed_oid === null ? {} : { listed_oid: row.listed_oid }),
     size: row.byte_length,
     content_sha256: row.content_sha256,
   };
@@ -505,6 +508,7 @@ function snapshotFileFromRow(row: SegmentRow): BucketSnapshotFile {
 function assertSameSourceFile(row: SegmentRow, file: BucketSnapshotFile): void {
   if (
     row.oid !== file.oid ||
+    row.listed_oid !== (file.listed_oid ?? null) ||
     row.byte_length !== file.size ||
     row.content_sha256 !== file.content_sha256
   ) {
@@ -519,11 +523,12 @@ function insertSourceRow(
 ): void {
   db.prepare(
     `INSERT INTO source_segments
-    (key, oid, byte_length, content_sha256, tweet_rows, enrichment_rows, attempt_rows, registry_rows, receipt_rows)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    (key, oid, listed_oid, byte_length, content_sha256, tweet_rows, enrichment_rows, attempt_rows, registry_rows, receipt_rows)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     file.key,
     file.oid,
+    file.listed_oid ?? null,
     file.size,
     file.content_sha256,
     counts.tweet,
