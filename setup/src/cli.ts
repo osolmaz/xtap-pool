@@ -2,7 +2,7 @@ import { validateRepoId } from "./config.js";
 
 export type SetupCommand =
   | { kind: "setup" }
-  | { kind: "update"; spaceRepo?: string; cutover: boolean }
+  | { kind: "update"; spaceRepo?: string; cutoverReport?: string }
   | {
       kind: "doctor";
       spaceRepo?: string;
@@ -21,20 +21,30 @@ export function parseSetupCommand(argv: readonly string[]): SetupCommand {
   throw new Error(`Unknown command: ${command ?? ""}. Use setup, update, or doctor.`);
 }
 
+// eslint-disable-next-line complexity -- Update parsing validates the optional proof-bearing cutover flag at the CLI boundary.
 function parseUpdate(args: readonly string[]): SetupCommand {
-  const cutover = args.includes("--verified-bucket-cutover");
-  const positional = args.filter((arg) => arg !== "--verified-bucket-cutover");
-  const [maybeSpaceRepo, ...extra] = positional;
-  if (
-    extra.length > 0 ||
-    args.some((arg) => arg.startsWith("--") && arg !== "--verified-bucket-cutover")
-  ) {
-    throw new Error("Usage: npm run update -- [owner/xtap-pool] [--verified-bucket-cutover]");
+  const reportFlag = args.find((arg) => arg.startsWith("--verified-bucket-cutover="));
+  const cutoverReport = reportFlag?.slice("--verified-bucket-cutover=".length);
+  if (reportFlag !== undefined && cutoverReport?.length === 0) {
+    throw new Error("--verified-bucket-cutover requires an import report path.");
   }
-  if (maybeSpaceRepo === undefined) return { kind: "update", cutover };
+  const positional = args.filter((arg) => arg !== reportFlag);
+  const [maybeSpaceRepo, ...extra] = positional;
+  if (extra.length > 0 || args.some((arg) => arg.startsWith("--") && arg !== reportFlag)) {
+    throw new Error(
+      "Usage: npm run update -- [owner/xtap-pool] [--verified-bucket-cutover=<import-report>]",
+    );
+  }
+  if (maybeSpaceRepo === undefined) {
+    return { kind: "update", ...(cutoverReport === undefined ? {} : { cutoverReport }) };
+  }
   const error = validateRepoId(maybeSpaceRepo);
   if (error !== undefined) throw new Error(error);
-  return { kind: "update", spaceRepo: maybeSpaceRepo, cutover };
+  return {
+    kind: "update",
+    spaceRepo: maybeSpaceRepo,
+    ...(cutoverReport === undefined ? {} : { cutoverReport }),
+  };
 }
 
 // eslint-disable-next-line complexity -- One small parser rejects conflicting repair/canary activation flags at the CLI boundary.

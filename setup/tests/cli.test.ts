@@ -7,17 +7,22 @@ describe("setup CLI command parsing", () => {
     expect(parseSetupCommand([])).toEqual({ kind: "setup" });
   });
 
-  it("parses update mode with an optional Space repo", () => {
-    expect(parseSetupCommand(["update"])).toEqual({ kind: "update", cutover: false });
+  it("parses update mode with an optional Space repo and cutover report", () => {
+    expect(parseSetupCommand(["update"])).toEqual({ kind: "update" });
     expect(parseSetupCommand(["update", "alice/xtap-pool"])).toEqual({
       kind: "update",
       spaceRepo: "alice/xtap-pool",
-      cutover: false,
     });
-    expect(parseSetupCommand(["update", "alice/xtap-pool", "--verified-bucket-cutover"])).toEqual({
+    expect(
+      parseSetupCommand([
+        "update",
+        "alice/xtap-pool",
+        "--verified-bucket-cutover=/safe/report.json",
+      ]),
+    ).toEqual({
       kind: "update",
       spaceRepo: "alice/xtap-pool",
-      cutover: true,
+      cutoverReport: "/safe/report.json",
     });
   });
 
@@ -54,6 +59,9 @@ describe("setup CLI command parsing", () => {
     expect(() => parseSetupCommand(["deploy"])).toThrow("Unknown command");
     expect(() => parseSetupCommand(["update", "not-a-repo"])).toThrow("owner/name");
     expect(() => parseSetupCommand(["update", "alice/xtap-pool", "extra"])).toThrow("Usage");
+    expect(() => parseSetupCommand(["update", "--verified-bucket-cutover="])).toThrow(
+      "requires an import report path",
+    );
     expect(() => parseSetupCommand(["doctor", "alice/xtap-pool", "extra"])).toThrow("Usage");
     expect(() => parseSetupCommand(["doctor", "--enable-schedule"])).toThrow("require --canary");
     expect(() => parseSetupCommand(["doctor", "--resume-canary-job=job-1"])).toThrow(
