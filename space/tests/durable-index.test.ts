@@ -259,6 +259,22 @@ describe("DurableIndex", () => {
     index.close();
   });
 
+  it("rejects publication when another publisher changes the active manifest", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("publication-race"));
+    const originalRead = bucket.readText.bind(bucket);
+    let reads = 0;
+    bucket.readText = async (path) => {
+      reads += 1;
+      if (path === "index/current.json" && reads === 2) return "concurrent";
+      return originalRead(path);
+    };
+
+    await expect(index.publish()).rejects.toThrow("changed during publication");
+    expect(bucket.removed).toEqual([]);
+    index.close();
+  });
+
   it("retains the active database and three predecessors", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("retention"));

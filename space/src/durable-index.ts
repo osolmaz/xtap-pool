@@ -267,6 +267,7 @@ export class DurableIndex {
   }
 
   async publish(): Promise<DurableIndexManifest> {
+    const baselineManifest = await this.bucket.readText(CURRENT_MANIFEST_KEY);
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new Error("durable index metadata is missing");
     assertDatabaseIntegrity(this.store.database);
@@ -303,6 +304,10 @@ export class DurableIndex {
         throw new Error(`uploaded durable index database is unavailable: ${key}`);
       await assertFileSha256(verifyPath, sha);
       validateStandaloneDatabase(verifyPath, manifest, this.options);
+      const beforeSwap = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+      if (beforeSwap !== baselineManifest) {
+        throw new Error("durable index manifest changed during publication");
+      }
       const encoded = `${JSON.stringify(manifest, null, 2)}\n`;
       await this.bucket.writeText(CURRENT_MANIFEST_KEY, encoded);
       const stored = await this.bucket.readText(CURRENT_MANIFEST_KEY);
@@ -313,6 +318,10 @@ export class DurableIndex {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
       this.publishedKeys = [key, ...predecessors];
+      const active = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+      if (active !== encoded) {
+        throw new Error("durable index manifest was replaced during publication");
+      }
       await this.pruneDatabases(this.publishedKeys);
       return manifest;
     } finally {
