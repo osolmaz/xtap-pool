@@ -93,6 +93,14 @@ if current_revision != source_revision:
     raise SystemExit("dataset advanced after the pinned import; quiesce writers and re-import")
 print("Verified the pinned final revision and completed legacy writer cutover.")
 PY
+else
+  echo "==> Initializing canonical raw configuration for the confirmed new pool"
+  DATA_DIR="$INDEX_WORK" \
+  RAW_BUCKET="$RAW_BUCKET" \
+  HF_TOKEN="$XTAP_STORAGE_TOKEN" \
+  ALLOWED_USERS="$ALLOWED_USERS" \
+  POOL_ADMINS="${POOL_ADMINS:-$ALLOWED_USERS}" \
+  npm --prefix "$ROOT" run storage:initialize
 fi
 
 echo "==> Bootstrapping and verifying the durable index"
