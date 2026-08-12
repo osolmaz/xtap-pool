@@ -106,8 +106,8 @@ export async function importPinnedDataset(
   const source = options.source ?? createPinnedDatasetSource(options.dataset, options.revision);
   const objects = approvedObjects(await source.list());
   const prepared: PreparedSource[] = [];
-  for (const object of objects) {
-    prepared.push(await prepareSource(options, source, object));
+  for (const [index, object] of objects.entries()) {
+    prepared.push(await prepareSource(options, source, object, index));
   }
   for (const item of prepared) {
     const key = await options.log.putSegment(item.segment);
@@ -129,7 +129,9 @@ export async function verifyPinnedDataset(
   const source = options.source ?? createPinnedDatasetSource(options.dataset, options.revision);
   const objects = approvedObjects(await source.list());
   const prepared: PreparedSource[] = [];
-  for (const object of objects) prepared.push(await prepareSource(options, source, object));
+  for (const [index, object] of objects.entries()) {
+    prepared.push(await prepareSource(options, source, object, index));
+  }
   const { revision: snapshotRevision, snapshot } = await options.log.createSnapshot();
   const report = await reconcilePrepared(options, prepared, snapshotRevision, snapshot);
   await writeReport(options.reportPath, report);
@@ -177,6 +179,7 @@ async function prepareSource(
   options: StorageMigrationOptions,
   source: PinnedDatasetSource,
   object: PinnedSourceObject,
+  sourceOrder: number,
 ): Promise<PreparedSource> {
   const bytes = await source.download(object.path);
   const content = decodeUtf8(bytes, object.path);
@@ -195,7 +198,7 @@ async function prepareSource(
   const segment = bucketSegmentSchema.parse({
     schema_version: 1,
     transaction_id: deterministicUuid(digest),
-    created_at: deterministicTimestamp(digest),
+    created_at: deterministicTimestamp(sourceOrder),
     operations: [operation],
   });
   const category = operation.mode === "write" ? "config" : sourceKind(operation.path);
@@ -377,12 +380,10 @@ function isApprovedPath(path: string): boolean {
   return SOURCE_PATH.test(path) || CONFIG_PATHS.has(path);
 }
 
-function deterministicTimestamp(digest: string): string {
-  // Imported configuration must sort before every post-cutover runtime write.
-  const start = Date.parse("1970-01-01T00:00:00.000Z");
-  const span = Date.parse("2000-01-01T00:00:00.000Z") - start;
-  const offset = Number.parseInt(digest.slice(0, 12), 16) % span;
-  return new Date(start + offset).toISOString();
+function deterministicTimestamp(sourceOrder: number): string {
+  // Preserve sorted source-shard chronology and sort every imported write
+  // before post-cutover runtime transactions.
+  return new Date(sourceOrder).toISOString();
 }
 
 function assertPinnedRevision(revision: string): void {

@@ -188,6 +188,8 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
 export class BucketLog {
   private lastReceipt: EnrichReceipt | undefined;
   private lastCreatedAtMs = 0;
+  private readonly knownFiles = new Map<string, BucketSnapshotFile>();
+  private readonly newlyVerifiedSegments = new Map<string, BucketSegment>();
 
   constructor(
     readonly name: string,
@@ -244,47 +246,65 @@ export class BucketLog {
     const existing = await this.client.download(key);
     if (existing === undefined) await this.client.upload(key, compressed);
     await this.verifyStoredSegment(key, raw);
+    this.knownFiles.set(key, {
+      key,
+      oid: sha256(compressed),
+      size: compressed.byteLength,
+      content_sha256: digest,
+    });
     return key;
   }
 
-  // eslint-disable-next-line complexity -- Snapshot creation verifies the listing, bytes, schema, and canonical form.
-  async createSnapshot(): Promise<{ revision: string; snapshot: BucketSnapshot }> {
+  /**
+   * Discover the current append-only head without reading old segment bodies.
+   * Content-addressed keys and the prior verified snapshot authenticate known
+   * objects; every new object is downloaded and fully verified once.
+   */
+  async discoverSnapshot(
+    known?: readonly BucketSnapshotFile[],
+  ): Promise<{ revision: string; snapshot: BucketSnapshot }> {
+    const baseline = known ?? [...this.knownFiles.values()];
+    const previous = new Map(baseline.map((file) => [file.key, file]));
     const objects = [...(await this.client.list(SEGMENT_PREFIX))].sort((a, b) =>
       a.key.localeCompare(b.key),
     );
+    const listed = new Set(objects.map((object) => object.key));
+    const deleted = baseline.filter((file) => !listed.has(file.key));
+    if (deleted.length > 0) {
+      throw new Error(`raw Bucket source segments were deleted: ${deleted[0]?.key ?? "unknown"}`);
+    }
     const files: BucketSnapshotFile[] = [];
     for (const object of objects) {
-      const compressed = await this.client.download(object.key);
-      if (compressed === undefined) {
-        throw new Error(`Bucket object disappeared while creating snapshot: ${object.key}`);
+      const old = previous.get(object.key);
+      if (old !== undefined) {
+        if (old.size !== object.size) {
+          throw new Error(`Bucket object size changed while discovering head: ${object.key}`);
+        }
+        files.push(old);
+        continue;
       }
-      if (compressed.byteLength !== object.size) {
-        throw new Error(`Bucket object size changed while creating snapshot: ${object.key}`);
-      }
-      let raw: Uint8Array;
-      try {
-        raw = new Uint8Array(await gunzipAsync(compressed));
-      } catch {
-        throw new Error(`Bucket object is not valid gzip: ${object.key}`);
-      }
-      if (sha256(raw) !== segmentHash(object.key)) {
-        throw new Error(`Bucket object checksum mismatch: ${object.key}`);
-      }
-      const segment = bucketSegmentSchema.parse(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)),
-      );
-      validateOperations(segment.operations);
-      if (!equalBytes(canonicalBytes(segment), raw)) {
-        throw new Error(`Bucket object is not canonical: ${object.key}`);
-      }
-      files.push({
-        key: object.key,
-        oid: sha256(compressed),
-        size: object.size,
-        content_sha256: segmentHash(object.key),
-      });
+      files.push(await this.verifyListedObject(object));
     }
     const snapshot = bucketSnapshotSchema.parse({ schema_version: 1, bucket: this.name, files });
+    this.rememberFiles(snapshot.files);
+    return { revision: sha256(canonicalBytes(snapshot)), snapshot };
+  }
+
+  /** Build and durably store a fully verified checkpoint of the current head. */
+  async createSnapshot(): Promise<{ revision: string; snapshot: BucketSnapshot }> {
+    const discovered = await this.discoverSnapshot([]);
+    this.newlyVerifiedSegments.clear();
+    return this.storeSnapshot(discovered.snapshot);
+  }
+
+  /** Store an exact snapshot after all listed segment metadata was verified. */
+  async storeSnapshot(
+    candidate: BucketSnapshot,
+  ): Promise<{ revision: string; snapshot: BucketSnapshot }> {
+    const snapshot = bucketSnapshotSchema.parse(candidate);
+    if (snapshot.bucket !== this.name) {
+      throw new Error(`Bucket snapshot source mismatch: ${snapshot.bucket}`);
+    }
     const raw = canonicalBytes(snapshot);
     const revision = sha256(raw);
     const key = `${SNAPSHOT_PREFIX}/${revision}.json`;
@@ -312,6 +332,7 @@ export class BucketLog {
     const snapshot = bucketSnapshotSchema.parse(candidate);
     if (snapshot.bucket !== this.name)
       throw new Error(`Bucket snapshot source mismatch: ${snapshot.bucket}`);
+    this.rememberFiles(snapshot.files);
     return snapshot;
   }
 
@@ -319,6 +340,11 @@ export class BucketLog {
   async loadSegment(file: BucketSnapshotFile): Promise<BucketSegment> {
     if (segmentHash(file.key) !== file.content_sha256) {
       throw new Error(`Bucket snapshot segment hash mismatch: ${file.key}`);
+    }
+    const verified = this.newlyVerifiedSegments.get(file.key);
+    if (verified !== undefined) {
+      this.newlyVerifiedSegments.delete(file.key);
+      return verified;
     }
     const compressed = await this.client.download(file.key);
     if (compressed === undefined) throw new Error(`Bucket segment is missing: ${file.key}`);
@@ -345,7 +371,7 @@ export class BucketLog {
 
   async readText(path: string): Promise<string | undefined> {
     assertConfigPath(path);
-    const { snapshot } = await this.createSnapshot();
+    const { snapshot } = await this.discoverSnapshot();
     let latest: { order: string; value: string } | undefined;
     for (const file of snapshot.files.filter(
       (item) => item.key.includes("/config/") || item.key.includes("/mixed/"),
@@ -414,6 +440,44 @@ export class BucketLog {
     const next = Math.max(observed, this.lastCreatedAtMs + 1);
     this.lastCreatedAtMs = next;
     return new Date(next).toISOString();
+  }
+
+  private rememberFiles(files: readonly BucketSnapshotFile[]): void {
+    this.knownFiles.clear();
+    for (const file of files) this.knownFiles.set(file.key, file);
+  }
+
+  private async verifyListedObject(object: BucketObject): Promise<BucketSnapshotFile> {
+    const compressed = await this.client.download(object.key);
+    if (compressed === undefined) {
+      throw new Error(`Bucket object disappeared while creating snapshot: ${object.key}`);
+    }
+    if (compressed.byteLength !== object.size) {
+      throw new Error(`Bucket object size changed while creating snapshot: ${object.key}`);
+    }
+    let raw: Uint8Array;
+    try {
+      raw = new Uint8Array(await gunzipAsync(compressed));
+    } catch {
+      throw new Error(`Bucket object is not valid gzip: ${object.key}`);
+    }
+    if (sha256(raw) !== segmentHash(object.key)) {
+      throw new Error(`Bucket object checksum mismatch: ${object.key}`);
+    }
+    const segment = bucketSegmentSchema.parse(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw)),
+    );
+    validateOperations(segment.operations);
+    if (!equalBytes(canonicalBytes(segment), raw)) {
+      throw new Error(`Bucket object is not canonical: ${object.key}`);
+    }
+    this.newlyVerifiedSegments.set(object.key, segment);
+    return {
+      key: object.key,
+      oid: sha256(compressed),
+      size: object.size,
+      content_sha256: segmentHash(object.key),
+    };
   }
 
   private async verifyStoredSegment(key: string, expected: Uint8Array): Promise<void> {

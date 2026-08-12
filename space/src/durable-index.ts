@@ -197,16 +197,25 @@ export class DurableIndex {
   }
 
   async advanceToLatest(): Promise<IndexAdvance> {
-    const { revision } = await this.options.log.createSnapshot();
-    return this.advanceToRevision(revision);
+    const previous = sourceRows(this.store.database);
+    const { revision, snapshot } = await this.options.log.discoverSnapshot(
+      [...previous.values()].map(snapshotFileFromRow),
+    );
+    return this.advanceToSnapshot(revision, snapshot, previous, false);
   }
 
   async advanceToRevision(revision: string): Promise<IndexAdvance> {
     const snapshot = await this.options.log.loadSnapshot(revision);
     const previous = sourceRows(this.store.database);
-    for (const file of snapshot.files) {
-      await this.options.log.loadSegment(file);
-    }
+    return this.advanceToSnapshot(revision, snapshot, previous, true);
+  }
+
+  private async advanceToSnapshot(
+    revision: string,
+    snapshot: Awaited<ReturnType<BucketLog["loadSnapshot"]>>,
+    previous: ReadonlyMap<string, SegmentRow>,
+    verifyKnown: boolean,
+  ): Promise<IndexAdvance> {
     const currentKeys = new Set(snapshot.files.map((file) => file.key));
     const deleted = [...previous.keys()].filter((key) => !currentKeys.has(key));
     if (deleted.length > 0)
@@ -219,13 +228,8 @@ export class DurableIndex {
     for (const file of snapshot.files) {
       const old = previous.get(file.key);
       if (old !== undefined) {
-        if (
-          old.oid !== file.oid ||
-          old.byte_length !== file.size ||
-          old.content_sha256 !== file.content_sha256
-        ) {
-          throw new Error(`raw Bucket source segment changed: ${file.key}`);
-        }
+        assertSameSourceFile(old, file);
+        if (verifyKnown) await this.options.log.loadSegment(file);
         continue;
       }
       staged.push({ file, segment: await this.options.log.loadSegment(file) });
@@ -264,6 +268,16 @@ export class DurableIndex {
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new Error("durable index metadata is missing");
     assertDatabaseIntegrity(this.store.database);
+    const checkpoint = await this.options.log.storeSnapshot({
+      schema_version: 1,
+      bucket: this.options.rawBucket,
+      files: [...sourceRows(this.store.database).values()]
+        .map(snapshotFileFromRow)
+        .sort((left, right) => left.key.localeCompare(right.key)),
+    });
+    if (checkpoint.revision !== metadata.raw_snapshot_revision) {
+      throw new Error("durable index source revision does not match its checkpoint");
+    }
     const counts = databaseCounts(this.store.database);
     const publishPath = `${this.options.databasePath}.${randomUUID()}.publish`;
     const verifyPath = `${this.options.databasePath}.${randomUUID()}.verify`;
@@ -477,6 +491,25 @@ function ensureIndexTables(db: Database.Database): void {
 function sourceRows(db: Database.Database): Map<string, SegmentRow> {
   const rows = db.prepare("SELECT * FROM source_segments").all() as SegmentRow[];
   return new Map(rows.map((row) => [row.key, row]));
+}
+
+function snapshotFileFromRow(row: SegmentRow): BucketSnapshotFile {
+  return {
+    key: row.key,
+    oid: row.oid,
+    size: row.byte_length,
+    content_sha256: row.content_sha256,
+  };
+}
+
+function assertSameSourceFile(row: SegmentRow, file: BucketSnapshotFile): void {
+  if (
+    row.oid !== file.oid ||
+    row.byte_length !== file.size ||
+    row.content_sha256 !== file.content_sha256
+  ) {
+    throw new Error(`raw Bucket source segment changed: ${file.key}`);
+  }
 }
 
 function insertSourceRow(
