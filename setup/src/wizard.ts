@@ -103,6 +103,7 @@ export async function runUpdateCommand(
     legacyDataset === undefined
       ? undefined
       : await beginLegacyCutover(
+          root,
           { accessToken },
           config,
           variables,
@@ -157,6 +158,7 @@ async function finishUpdate(
 }
 
 async function beginLegacyCutover(
+  root: string,
   client: { accessToken: string },
   config: SetupConfig,
   variables: ReadonlyMap<string, string>,
@@ -168,6 +170,7 @@ async function beginLegacyCutover(
       "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
     );
   }
+  const initialProof = await readCutoverReport(reportPath, config.rawBucket, legacyDataset);
   const legacyJob = await desiredEnrichmentJob(
     client,
     config.spaceRepo,
@@ -180,14 +183,13 @@ async function beginLegacyCutover(
     await pauseSpaceRuntime(client, config.spaceRepo);
     spacePaused = true;
     await waitForSpaceStage(client, config.spaceRepo, "PAUSED");
-    await assertCutoverReport(reportPath, config.rawBucket, legacyDataset, async () => {
-      const source = await datasetInfo({
-        name: legacyDataset,
-        accessToken: client.accessToken,
-        additionalFields: ["sha"],
-      });
-      return source.sha;
-    });
+    await verifyCurrentBucketProof(
+      root,
+      client.accessToken,
+      config.rawBucket,
+      legacyDataset,
+      initialProof.source.revision,
+    );
   } catch (error) {
     if (spacePaused) {
       await restartSpaceRuntime(client, config.spaceRepo);
@@ -205,13 +207,17 @@ async function beginLegacyCutover(
   };
 }
 
+type CutoverProof = {
+  source: { dataset: string; revision: string; objects: number };
+  target: { bucket: string; snapshot_revision: string; objects: number };
+};
+
 // eslint-disable-next-line complexity -- Cutover proof checks every independent no-loss report boundary.
-export async function assertCutoverReport(
+export async function readCutoverReport(
   path: string,
   rawBucket: string,
   legacyDataset: string,
-  readDatasetHead: () => Promise<string>,
-): Promise<void> {
+): Promise<CutoverProof> {
   let candidate: unknown;
   try {
     candidate = JSON.parse(await readFile(path, "utf8"));
@@ -240,9 +246,61 @@ export async function assertCutoverReport(
   ) {
     throw new Error("verified Bucket cutover report does not prove the source and target import");
   }
+  return report as CutoverProof;
+}
+
+export async function assertCutoverReport(
+  path: string,
+  rawBucket: string,
+  legacyDataset: string,
+  readDatasetHead: () => Promise<string>,
+): Promise<void> {
+  const report = await readCutoverReport(path, rawBucket, legacyDataset);
   const currentRevision = await readDatasetHead();
   if (currentRevision !== report.source.revision) {
     throw new Error("verified Bucket cutover report does not match the current dataset revision");
+  }
+}
+
+async function verifyCurrentBucketProof(
+  root: string,
+  accessToken: string,
+  rawBucket: string,
+  dataset: string,
+  revision: string,
+): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "xtap-pool-cutover-verify-"));
+  const report = join(directory, "report.json");
+  try {
+    await inheritCommand(
+      "npm",
+      [
+        "run",
+        "storage:verify",
+        "--",
+        "--dataset",
+        dataset,
+        "--revision",
+        revision,
+        "--raw-bucket",
+        rawBucket,
+        "--report",
+        report,
+        "--work-dir",
+        join(directory, "work"),
+      ],
+      { cwd: root, env: { ...process.env, HF_TOKEN: accessToken } },
+    );
+    await assertCutoverReport(report, rawBucket, dataset, async () => {
+      const source = await datasetInfo({
+        name: dataset,
+        accessToken,
+        additionalFields: ["sha"],
+      });
+      return source.sha;
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 }
 
