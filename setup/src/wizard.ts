@@ -34,6 +34,7 @@ import {
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
+  resumeEnrichmentSchedules,
   suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
 import {
@@ -85,7 +86,6 @@ export async function runSetupWizard(root: string): Promise<void> {
   );
 }
 
-// eslint-disable-next-line complexity -- Update coordinates the legacy quiesce and hard-cutover gates.
 export async function runUpdateCommand(
   root: string,
   requestedSpaceRepo?: string,
@@ -99,59 +99,110 @@ export async function runUpdateCommand(
   const config = existingSpaceConfig(account.name, spaceRepo, variables);
   const legacyDataset = variables.get("DATASET_REPO");
   const legacy = legacyDataset !== undefined;
-  if (legacyDataset !== undefined) {
-    if (options.cutoverReport === undefined) {
-      throw new Error(
-        "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
-      );
-    }
-    const legacyJob = await desiredEnrichmentJob(
-      { accessToken },
-      config.spaceRepo,
-      config.rawBucket,
-      variables,
-    );
-    await quiesceEnrichmentWriters({ accessToken }, legacyJob);
-    await pauseSpaceRuntime({ accessToken }, config.spaceRepo);
-    await waitForSpaceStage({ accessToken }, config.spaceRepo, "PAUSED");
-    await assertCutoverReport(options.cutoverReport, config.rawBucket, legacyDataset, async () => {
-      const source = await datasetInfo({
-        name: legacyDataset,
-        accessToken,
-        additionalFields: ["sha"],
-      });
-      return source.sha;
-    });
+  const cutover =
+    legacyDataset === undefined
+      ? undefined
+      : await beginLegacyCutover(
+          { accessToken },
+          config,
+          variables,
+          legacyDataset,
+          options.cutoverReport,
+        );
+  try {
+    await finishUpdate(root, { accessToken }, config, variables, legacy);
+  } catch (error) {
+    if (cutover !== undefined) await cutover.restore();
+    throw error;
   }
-  const indexBucketCreated = await ensureIndexBucket({ accessToken }, config.indexBucket);
-  if (indexBucketCreated || !(await durableIndexManifestExists(accessToken, config.indexBucket))) {
+}
+
+async function finishUpdate(
+  root: string,
+  client: { accessToken: string },
+  config: SetupConfig,
+  variables: ReadonlyMap<string, string>,
+  legacy: boolean,
+): Promise<void> {
+  const indexBucketCreated = await ensureIndexBucket(client, config.indexBucket);
+  if (
+    indexBucketCreated ||
+    !(await durableIndexManifestExists(client.accessToken, config.indexBucket))
+  ) {
     const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
     await bootstrapIndex(root, config, storageToken, indexContractFromVariables(variables));
-    await setSpaceSecret({ accessToken }, config.spaceRepo, "HF_TOKEN", storageToken);
+    await setSpaceSecret(client, config.spaceRepo, "HF_TOKEN", storageToken);
   }
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
-  await updateExistingPool(root, { accessToken }, config, {
-    allowLegacyDatasetRemoval: legacy,
-  });
+  await updateExistingPool(root, client, config, { allowLegacyDatasetRemoval: legacy });
   if (legacy) {
-    await restartSpaceRuntime({ accessToken }, config.spaceRepo);
-    await waitForSpaceStage({ accessToken }, config.spaceRepo, "RUNNING");
+    await restartSpaceRuntime(client, config.spaceRepo);
+    await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
   }
-  const refreshedVariables = await getSpaceVariables({ accessToken }, spaceRepo);
+  const refreshedVariables = await getSpaceVariables(client, config.spaceRepo);
   const desired = await desiredEnrichmentJob(
-    { accessToken },
+    client,
     config.spaceRepo,
     config.rawBucket,
     refreshedVariables,
   );
-  const suspended = await suspendMismatchedEnrichmentSchedules({ accessToken }, desired);
+  const suspended = await suspendMismatchedEnrichmentSchedules(client, desired);
   task.stop("Space updated");
   outro(
     suspended === 0
       ? `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`
       : `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nSuspended ${String(suspended)} stale enrichment schedule(s). Run doctor --fix to replace them.`,
   );
+}
+
+async function beginLegacyCutover(
+  client: { accessToken: string },
+  config: SetupConfig,
+  variables: ReadonlyMap<string, string>,
+  legacyDataset: string,
+  reportPath: string | undefined,
+): Promise<{ restore(): Promise<void> }> {
+  if (reportPath === undefined) {
+    throw new Error(
+      "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
+    );
+  }
+  const legacyJob = await desiredEnrichmentJob(
+    client,
+    config.spaceRepo,
+    config.rawBucket,
+    variables,
+  );
+  const suspendedScheduleIds = await quiesceEnrichmentWriters(client, legacyJob);
+  let spacePaused = false;
+  try {
+    await pauseSpaceRuntime(client, config.spaceRepo);
+    spacePaused = true;
+    await waitForSpaceStage(client, config.spaceRepo, "PAUSED");
+    await assertCutoverReport(reportPath, config.rawBucket, legacyDataset, async () => {
+      const source = await datasetInfo({
+        name: legacyDataset,
+        accessToken: client.accessToken,
+        additionalFields: ["sha"],
+      });
+      return source.sha;
+    });
+  } catch (error) {
+    if (spacePaused) {
+      await restartSpaceRuntime(client, config.spaceRepo);
+      await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
+    }
+    await resumeEnrichmentSchedules(client, legacyJob, suspendedScheduleIds);
+    throw error;
+  }
+  return {
+    async restore(): Promise<void> {
+      await restartSpaceRuntime(client, config.spaceRepo);
+      await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
+      await resumeEnrichmentSchedules(client, legacyJob, suspendedScheduleIds);
+    },
+  };
 }
 
 // eslint-disable-next-line complexity -- Cutover proof checks every independent no-loss report boundary.

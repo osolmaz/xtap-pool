@@ -624,7 +624,7 @@ describe("Hugging Face enrichment Job", () => {
 
     await expect(
       quiesceEnrichmentWriters(client, desired, { pollIntervalMs: 0, timeoutMs: 100 }),
-    ).resolves.toBe(2);
+    ).resolves.toEqual(["exact", "stale"]);
     expect(hubMocks.suspendScheduledJob).toHaveBeenCalledTimes(2);
     expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
       expect.objectContaining({ jobId: "exact" }),
