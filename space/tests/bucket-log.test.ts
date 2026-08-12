@@ -204,6 +204,78 @@ describe("BucketLog", () => {
     await expect(noncanonical.log.createSnapshot()).rejects.toThrow("not canonical");
   });
 
+  it("rejects deletion and resize while discovering an indexed head", async () => {
+    const deleted = log();
+    await deleted.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const deletedHead = await deleted.log.discoverSnapshot();
+    deleted.bucket.files.clear();
+    await expect(deleted.log.discoverSnapshot(deletedHead.snapshot.files)).rejects.toThrow(
+      "were deleted",
+    );
+
+    const resized = log();
+    await resized.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const resizedHead = await resized.log.discoverSnapshot();
+    const originalList = resized.bucket.list.bind(resized.bucket);
+    resized.bucket.list = async (prefix) =>
+      (await originalList(prefix)).map((object) => ({ ...object, size: object.size + 1 }));
+    await expect(resized.log.discoverSnapshot(resizedHead.snapshot.files)).rejects.toThrow(
+      "size changed",
+    );
+  });
+
+  it("reuses known metadata when the listed object identity is unchanged", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const first = await state.log.discoverSnapshot();
+    state.bucket.download = async () => {
+      throw new Error("known body must not be downloaded");
+    };
+
+    await expect(state.log.discoverSnapshot(first.snapshot.files)).resolves.toEqual(first);
+  });
+
+  it("rejects a same-size rewrite while discovering an indexed head", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const first = await state.log.discoverSnapshot();
+    const file = first.snapshot.files[0]!;
+    const content = state.bucket.files.get(file.key)!;
+    const changed = new Uint8Array(content);
+    changed[changed.length - 1] = (changed.at(-1) ?? 0) ^ 1;
+    state.bucket.files.set(file.key, changed);
+
+    await expect(state.log.discoverSnapshot(first.snapshot.files)).rejects.toThrow(
+      "source segment changed",
+    );
+  });
+
+  it("revalidates known bodies when Bucket listings omit object identity", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [],
+    );
+    const first = await state.log.discoverSnapshot();
+    const originalList = state.bucket.list.bind(state.bucket);
+    state.bucket.list = async (prefix) =>
+      (await originalList(prefix)).map(({ key, size }) => ({ key, size }));
+
+    await expect(state.log.discoverSnapshot(first.snapshot.files)).resolves.toEqual(first);
+  });
+
   it("rejects changed bytes that retain the same object size", async () => {
     const state = log();
     await state.log.commitBatch(
