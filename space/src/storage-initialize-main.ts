@@ -15,11 +15,11 @@ if (
 ) {
   throw new Error("HF_TOKEN, RAW_BUCKET, DATA_DIR, and ALLOWED_USERS are required");
 }
-const key = await initializeRawStorage({
+const result = await initializeRawStorage({
   rawBucket,
   token,
   members,
   admins,
   workDir: resolve(workDir, "raw-cache"),
 });
-console.log(JSON.stringify({ ok: true, segment: key }));
+console.log(JSON.stringify({ ok: true, ...result }));

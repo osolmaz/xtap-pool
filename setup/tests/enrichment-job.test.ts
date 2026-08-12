@@ -24,6 +24,7 @@ import {
   desiredEnrichmentJob,
   desiredEnrichmentJobHash,
   inspectEnrichmentJob,
+  quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
   resumeEnrichmentSchedule,
   runEnrichmentCanary,
@@ -605,6 +606,32 @@ describe("Hugging Face enrichment Job", () => {
         receiptTimeoutMs: 100,
       }),
     ).rejects.toThrow("different enrichment contracts");
+  });
+
+  it("suspends all owned schedules and waits for active writers during cutover", async () => {
+    const desired = await desiredFixture();
+    const exact = scheduleFixture(desired, "exact", false);
+    const stale = scheduleFixture({ ...desired, schedule: "0 0 * * *" }, "stale", false);
+    const suspended = scheduleFixture({ ...desired, schedule: "30 0 * * *" }, "suspended", true);
+    hubMocks.listScheduledJobs
+      .mockResolvedValueOnce([exact, stale, suspended])
+      .mockResolvedValue(
+        [exact, stale, suspended].map((schedule) => ({ ...schedule, suspend: true })),
+      );
+    hubMocks.listJobs
+      .mockResolvedValueOnce([physicalFixture(desired, "active", "RUNNING")])
+      .mockResolvedValue([]);
+
+    await expect(
+      quiesceEnrichmentWriters(client, desired, { pollIntervalMs: 0, timeoutMs: 100 }),
+    ).resolves.toBe(2);
+    expect(hubMocks.suspendScheduledJob).toHaveBeenCalledTimes(2);
+    expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "exact" }),
+    );
+    expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "stale" }),
+    );
   });
 
   it("suspends only stale owned schedules and triggers a suspended exact schedule", async () => {

@@ -347,6 +347,37 @@ export async function suspendMismatchedEnrichmentSchedules(
   return suspended;
 }
 
+/** Suspend every owned schedule and wait for already-running writers to finish. */
+// eslint-disable-next-line complexity -- Quiescing must verify schedules and active Jobs in one bounded lifecycle.
+export async function quiesceEnrichmentWriters(
+  client: HubClient,
+  desired: DesiredEnrichmentJob,
+  options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+): Promise<number> {
+  const before = await inspectEnrichmentJob(client, desired);
+  let suspended = 0;
+  for (const schedule of before.schedules) {
+    if (schedule.suspend) continue;
+    await suspendScheduledJob({
+      namespace: desired.namespace,
+      jobId: schedule.id,
+      ...hubOptions(client),
+    });
+    suspended += 1;
+  }
+  const deadline = Date.now() + (options.timeoutMs ?? (desired.timeoutSeconds + 300) * 1_000);
+  for (;;) {
+    const inspection = await inspectEnrichmentJob(client, desired);
+    if (inspection.schedules.every((schedule) => schedule.suspend)) {
+      if (inspection.activeJobs.length === 0) return suspended;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("Enrichment writers did not quiesce before the deadline.");
+    }
+    await delay(options.pollIntervalMs ?? 2_000);
+  }
+}
+
 export async function triggerEnrichmentJob(
   client: HubClient,
   desired: DesiredEnrichmentJob,

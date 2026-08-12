@@ -75,6 +75,37 @@ export async function getRepoPrivateState(client: HubClient, repo: HubRepo): Pro
   return payload["private"];
 }
 
+export async function pauseSpaceRuntime(client: HubClient, spaceRepo: string): Promise<void> {
+  const runtime = await hubRequestJson(client, `/api/spaces/${spaceRepo}/pause`, {
+    method: "POST",
+  });
+  assertSpaceStage(runtime, "PAUSED");
+}
+
+export async function restartSpaceRuntime(client: HubClient, spaceRepo: string): Promise<void> {
+  await hubRequest(client, `/api/spaces/${spaceRepo}/restart`, { method: "POST" });
+}
+
+export async function waitForSpaceStage(
+  client: HubClient,
+  spaceRepo: string,
+  expected: "PAUSED" | "RUNNING",
+  options: { pollIntervalMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+  const deadline = Date.now() + (options.timeoutMs ?? 600_000);
+  for (;;) {
+    const runtime = await hubRequestJson(client, `/api/spaces/${spaceRepo}/runtime`, {
+      method: "GET",
+    });
+    if (runtime["stage"] === expected) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`Space ${spaceRepo} did not reach ${expected} before the deadline.`);
+    }
+    await delay(pollIntervalMs);
+  }
+}
+
 export function parseSpaceVariables(payload: unknown): ReadonlyMap<string, string> {
   const result = new Map<string, string>();
   for (const [key, value] of Object.entries(asRecord(payload))) {
@@ -128,6 +159,16 @@ async function hubRequestJson(
   const response = await hubRequest(client, path, init);
   const payload: unknown = await response.json();
   return asRecord(payload);
+}
+
+function assertSpaceStage(runtime: JsonObject, expected: string): void {
+  if (runtime["stage"] !== expected) {
+    throw new Error(`Space runtime did not report ${expected}.`);
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function asRecord(value: unknown): JsonObject {

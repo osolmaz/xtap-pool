@@ -32,10 +32,17 @@ import { deployPool, ensureIndexBucket, updateExistingPool } from "./deploy.js";
 import {
   desiredEnrichmentJob,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
   suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
-import { getSpaceVariables, setSpaceSecret } from "./hub-api.js";
+import {
+  getSpaceVariables,
+  pauseSpaceRuntime,
+  restartSpaceRuntime,
+  setSpaceSecret,
+  waitForSpaceStage,
+} from "./hub-api.js";
 import { captureCommand, inheritCommand } from "./process.js";
 import { verifyInferenceToken } from "./inference-token.js";
 import { verifyStorageWriteToken } from "./token.js";
@@ -78,6 +85,7 @@ export async function runSetupWizard(root: string): Promise<void> {
   );
 }
 
+// eslint-disable-next-line complexity -- Update coordinates the legacy quiesce and hard-cutover gates.
 export async function runUpdateCommand(
   root: string,
   requestedSpaceRepo?: string,
@@ -97,6 +105,15 @@ export async function runUpdateCommand(
         "legacy DATASET_REPO is still configured; use --verified-bucket-cutover=<import-report>",
       );
     }
+    const legacyJob = await desiredEnrichmentJob(
+      { accessToken },
+      config.spaceRepo,
+      config.rawBucket,
+      variables,
+    );
+    await quiesceEnrichmentWriters({ accessToken }, legacyJob);
+    await pauseSpaceRuntime({ accessToken }, config.spaceRepo);
+    await waitForSpaceStage({ accessToken }, config.spaceRepo, "PAUSED");
     await assertCutoverReport(options.cutoverReport, config.rawBucket, legacyDataset, async () => {
       const source = await datasetInfo({
         name: legacyDataset,
@@ -117,6 +134,10 @@ export async function runUpdateCommand(
   await updateExistingPool(root, { accessToken }, config, {
     allowLegacyDatasetRemoval: legacy,
   });
+  if (legacy) {
+    await restartSpaceRuntime({ accessToken }, config.spaceRepo);
+    await waitForSpaceStage({ accessToken }, config.spaceRepo, "RUNNING");
+  }
   const refreshedVariables = await getSpaceVariables({ accessToken }, spaceRepo);
   const desired = await desiredEnrichmentJob(
     { accessToken },

@@ -1,7 +1,10 @@
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import { DEFAULT_TAXONOMY } from "./enrich-config.js";
 
-/** Write the complete canonical configuration for a confirmed new empty pool. */
+export type StorageInitializationResult =
+  { initialized: false } | { initialized: true; segment: string };
+
+/** Write canonical configuration only when the transaction log is empty. */
 export async function initializeRawStorage(options: {
   rawBucket: string;
   token: string;
@@ -9,16 +12,25 @@ export async function initializeRawStorage(options: {
   admins: readonly string[];
   workDir: string;
   now?: () => Date;
-}): Promise<string> {
+}): Promise<StorageInitializationResult> {
   const now = options.now ?? (() => new Date());
-  const log = new BucketLog(
-    options.rawBucket,
-    createRawBucketClient(options.rawBucket, options.token),
-    options.workDir,
-    now,
-  );
+  const client = createRawBucketClient(options.rawBucket, options.token);
+  const existing = await client.list("v1/segments");
+  const log = new BucketLog(options.rawBucket, client, options.workDir, now);
+  if (existing.length > 0) {
+    const configurations = await Promise.all(
+      [
+        "config/pool.json",
+        "config/service-accounts.json",
+        "config/labels.json",
+        "enrichment/vocabulary.json",
+      ].map((path) => log.readText(path)),
+    );
+    if (configurations.every((content) => content !== undefined)) return { initialized: false };
+    throw new Error("existing raw Bucket transaction log has incomplete configuration");
+  }
   const timestamp = now().toISOString();
-  return log.commitBatch(
+  const segment = await log.commitBatch(
     [],
     [
       {
@@ -38,4 +50,5 @@ export async function initializeRawStorage(options: {
     ],
     "Initialize raw pool configuration",
   );
+  return { initialized: true, segment };
 }
