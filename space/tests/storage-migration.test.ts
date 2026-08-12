@@ -8,7 +8,11 @@ import { describe, expect, it } from "vitest";
 
 import { BucketLog, sha256 } from "../src/bucket-log.js";
 import type { BucketObject, RawBucketClient } from "../src/bucket-log.js";
-import { importPinnedDataset, verifyPinnedDataset } from "../src/storage-migration.js";
+import {
+  createPinnedDatasetSource,
+  importPinnedDataset,
+  verifyPinnedDataset,
+} from "../src/storage-migration.js";
 import type { PinnedDatasetSource, PinnedSourceObject } from "../src/storage-migration.js";
 import { makePooled } from "./helpers.js";
 
@@ -113,12 +117,13 @@ describe("pinned storage migration", () => {
     ).resolves.toMatchObject({ reconciliation: { passed: true } });
   });
 
-  it("refuses an unpinned source before touching storage", async () => {
+  it("requires a pinned source and a configured token", async () => {
     const state = fixture();
     await expect(importPinnedDataset({ ...options(state), revision: "main" })).rejects.toThrow(
       "40-character commit SHA",
     );
     expect(state.bucket.files.size).toBe(0);
+    expect(() => createPinnedDatasetSource(DATASET, REVISION, "")).toThrow("HF_TOKEN");
   });
 
   it("rejects malformed, deleted, duplicated, and changed source rows", async () => {
@@ -158,12 +163,35 @@ describe("pinned storage migration", () => {
     await importPinnedDataset(options(unsupported));
     expect(unsupported.bucket.files.size).toBeGreaterThan(0);
 
+    const empty = fixture();
+    empty.source.files.clear();
+    await expect(importPinnedDataset(options(empty))).rejects.toThrow(
+      "no approved durable objects",
+    );
+
     const invalid = fixture();
     invalid.source.files.set(
       "data/osolmaz/2026/08/tweets-2026-08-13.jsonl",
       new Uint8Array([0xff]),
     );
     await expect(importPinnedDataset(options(invalid))).rejects.toThrow("not valid UTF-8");
+
+    const wrongSize = fixture();
+    wrongSize.source.list = async () =>
+      (await MemorySource.prototype.list.call(wrongSize.source)).map((object) => ({
+        ...object,
+        size: object.size + 1,
+      }));
+    await expect(importPinnedDataset(options(wrongSize))).rejects.toThrow("size mismatch");
+
+    const duplicatePath = fixture();
+    duplicatePath.source.list = async () => {
+      const listed = await MemorySource.prototype.list.call(duplicatePath.source);
+      return [...listed, listed[0]!];
+    };
+    await expect(importPinnedDataset(options(duplicatePath))).rejects.toThrow(
+      "duplicate approved paths",
+    );
 
     const state = fixture();
     await importPinnedDataset(options(state));
