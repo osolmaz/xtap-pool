@@ -95,6 +95,9 @@ describe("setup config helpers", () => {
   });
 
   it("formats derived values", () => {
+    expect(
+      existingSpaceConfig("alice", "team/xtap-pool", new Map([["ALLOWED_USERS", ""]])).allowedUsers,
+    ).toEqual(["alice"]);
     expect(repoInNamespace("alice", "pool")).toBe("alice/pool");
     expect(spacePublicUrl("alice/xtap-pool")).toBe("https://alice-xtap-pool.hf.space");
     expect(tokenSettingsUrl()).toContain("tokenType=fineGrained");
