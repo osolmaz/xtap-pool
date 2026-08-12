@@ -921,7 +921,7 @@ function scheduledJobFixture(): ScheduledEnrichmentJob {
       spaceId: "alice/xtap-pool",
       command: ["node", "space/dist/src/enrich-job-main.js"],
       environment: jobEnvironment(),
-      flavor: "cpu-basic",
+      flavor: "cpu-upgrade",
       timeout: 2700,
       retry: 0,
       secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
