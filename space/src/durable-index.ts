@@ -318,11 +318,6 @@ export class DurableIndex {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
       this.publishedKeys = [key, ...predecessors];
-      const active = await this.bucket.readText(CURRENT_MANIFEST_KEY);
-      if (active !== encoded) {
-        throw new Error("durable index manifest was replaced during publication");
-      }
-      await this.pruneDatabases(this.publishedKeys);
       return manifest;
     } finally {
       await Promise.all([rm(publishPath, { force: true }), rm(verifyPath, { force: true })]);
@@ -369,14 +364,6 @@ export class DurableIndex {
 
   close(): void {
     this.store.close();
-  }
-
-  private async pruneDatabases(retained: readonly string[]): Promise<void> {
-    const keep = new Set(retained);
-    const files = await this.bucket.list(DATABASE_PREFIX);
-    await this.bucket.remove(
-      files.map((file) => file.path).filter((path) => DATABASE_KEY.test(path) && !keep.has(path)),
-    );
   }
 }
 

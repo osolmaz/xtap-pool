@@ -381,6 +381,7 @@ export class BucketLog {
     validateOperations(segment.operations);
     if (!equalBytes(canonicalBytes(segment), raw))
       throw new Error(`Bucket segment is not canonical: ${file.key}`);
+    assertSegmentKeyMatches(file.key, segment, file.content_sha256);
     return segment;
   }
 
@@ -486,6 +487,7 @@ export class BucketLog {
     if (!equalBytes(canonicalBytes(segment), raw)) {
       throw new Error(`Bucket object is not canonical: ${object.key}`);
     }
+    assertSegmentKeyMatches(object.key, segment, segmentHash(object.key));
     this.newlyVerifiedSegments.set(object.key, segment);
     return {
       key: object.key,
@@ -665,6 +667,12 @@ function applyLines(
     rows += 1;
   }
   return rows;
+}
+
+function assertSegmentKeyMatches(key: string, segment: BucketSegment, contentSha256: string): void {
+  const day = segment.created_at.slice(0, 10);
+  const expected = `${SEGMENT_PREFIX}/${segmentCategory(segment.operations)}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(Date.parse(segment.created_at)).padStart(13, "0")}-${segment.transaction_id}-${contentSha256}.json.gz`;
+  if (key !== expected) throw new Error(`Bucket segment key does not match its contents: ${key}`);
 }
 
 function segmentCategory(operations: readonly BucketOperation[]): string {
