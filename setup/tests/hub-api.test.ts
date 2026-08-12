@@ -6,8 +6,11 @@ import {
   getSpaceVariables,
   parseSpaceSecrets,
   parseSpaceVariables,
+  pauseSpaceRuntime,
+  restartSpaceRuntime,
   setSpaceSecret,
   setSpaceVariable,
+  waitForSpaceStage,
 } from "../src/hub-api.js";
 
 describe("space variable parsing", () => {
@@ -74,6 +77,31 @@ describe("space variable parsing", () => {
         { type: "dataset", name: "alice/xtap-pool-data" },
       ),
     ).resolves.toBe(true);
+  });
+
+  it("pauses, verifies, and restarts a Space runtime", async () => {
+    const requests: string[] = [];
+    const fetchFn: typeof fetch = (input) => {
+      const url = requestUrl(input);
+      requests.push(url);
+      if (url.endsWith("/pause")) return Promise.resolve(Response.json({ stage: "PAUSED" }));
+      if (url.endsWith("/runtime")) return Promise.resolve(Response.json({ stage: "PAUSED" }));
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+    const client = { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn };
+
+    await pauseSpaceRuntime(client, "alice/xtap-pool");
+    await waitForSpaceStage(client, "alice/xtap-pool", "PAUSED", {
+      pollIntervalMs: 0,
+      timeoutMs: 100,
+    });
+    await restartSpaceRuntime(client, "alice/xtap-pool");
+
+    expect(requests).toEqual([
+      "https://hub.test/api/spaces/alice/xtap-pool/pause",
+      "https://hub.test/api/spaces/alice/xtap-pool/runtime",
+      "https://hub.test/api/spaces/alice/xtap-pool/restart",
+    ]);
   });
 
   it("surfaces Hub errors with status and body", async () => {

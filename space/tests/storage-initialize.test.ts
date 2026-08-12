@@ -69,4 +69,22 @@ describe("raw storage initialization", () => {
     });
     expect(files.size).toBe(1);
   });
+
+  it("preserves complete configuration in an existing transaction log", async () => {
+    files.clear();
+    const workDir = mkdtempSync(join(tmpdir(), "xtap-storage-existing-"));
+    const options = {
+      rawBucket: "alice/xtap-pool-data",
+      token: "token",
+      members: ["alice"],
+      admins: ["alice"],
+      workDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+    };
+    await expect(initializeRawStorage(options)).resolves.toMatchObject({ initialized: true });
+    const before = new Map(files);
+
+    await expect(initializeRawStorage(options)).resolves.toEqual({ initialized: false });
+    expect(files).toEqual(before);
+  });
 });
