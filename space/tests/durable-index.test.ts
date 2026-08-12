@@ -22,6 +22,7 @@ const CONTRACT = "a".repeat(64);
 
 class MemoryRawBucket implements RawBucketClient {
   files = new Map<string, Uint8Array>();
+  downloads: string[] = [];
 
   async list(prefix: string): Promise<readonly BucketObject[]> {
     return [...this.files]
@@ -30,6 +31,7 @@ class MemoryRawBucket implements RawBucketClient {
   }
 
   async download(key: string): Promise<Uint8Array | undefined> {
+    this.downloads.push(key);
     const content = this.files.get(key);
     return content === undefined ? undefined : new Uint8Array(content);
   }
@@ -190,6 +192,19 @@ describe("DurableIndex", () => {
     });
     expect(restoredLog.latestReceipt()?.finished_at).toBe("2026-08-12T12:01:00.000Z");
     restored.close();
+  });
+
+  it("reads only new segment bodies while advancing the live head", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("incremental"));
+    await appendTweet("2");
+    raw.downloads = [];
+
+    const advance = await index.advanceToLatest();
+
+    expect(advance.filesChanged).toBe(1);
+    expect(raw.downloads.filter((key) => key.includes("/segments/"))).toHaveLength(1);
+    index.close();
   });
 
   it("retains the active database and three predecessors", async () => {

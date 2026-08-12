@@ -117,6 +117,35 @@ describe("pinned storage migration", () => {
     ).resolves.toMatchObject({ reconciliation: { passed: true } });
   });
 
+  it("preserves source-shard chronology for monotonic registry replay", async () => {
+    const state = fixture();
+    for (const [day, revision, status] of [
+      ["11", 2, "candidate"],
+      ["12", 3, "approved"],
+    ] as const) {
+      state.source.files.set(
+        `enrichment/registry/2026/08/registry-2026-08-${day}.jsonl`,
+        bytes(
+          `${JSON.stringify({
+            name: "inference",
+            status,
+            at: `2026-08-${day}T00:00:00.000Z`,
+            contract_hash: "contract",
+            registry_revision: revision,
+            quotes: [],
+            actor: "worker",
+          })}\n`,
+        ),
+      );
+    }
+
+    const report = await importPinnedDataset(options(state));
+    const registryKeys = report.files
+      .filter((file) => file.kind === "registry")
+      .map((file) => file.target_segment);
+    expect(registryKeys).toEqual([...registryKeys].sort());
+  });
+
   it("requires a pinned source and a configured token", async () => {
     const state = fixture();
     await expect(importPinnedDataset({ ...options(state), revision: "main" })).rejects.toThrow(
