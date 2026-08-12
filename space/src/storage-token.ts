@@ -84,8 +84,7 @@ function storageTokenErrors(payload: unknown, targets: readonly StorageTarget[])
     role === FINE_GRAINED_ROLE
       ? []
       : [`HF_TOKEN role is '${role || "unknown"}', expected fine-grained.`];
-  errors.push(...globalPermissionErrors(fineGrained));
-  const permissionsByTarget = scopedPermissionErrors(fineGrained, targets, errors);
+  const permissionsByTarget = scopedPermissions(fineGrained, targets);
   for (const target of targets) {
     const permissions = permissionsByTarget.get(targetKey(target)) ?? new Set<string>();
     if (!permissions.has(READ_PERMISSION)) {
@@ -98,42 +97,29 @@ function storageTokenErrors(payload: unknown, targets: readonly StorageTarget[])
   return errors;
 }
 
-function globalPermissionErrors(fineGrained: JsonObject): string[] {
-  return strings(fineGrained["global"]).map(
-    (permission) => `Unexpected global permission on HF_TOKEN: ${permission}.`,
-  );
-}
-
-function scopedPermissionErrors(
+function scopedPermissions(
   fineGrained: JsonObject,
   targets: readonly StorageTarget[],
-  errors: string[],
 ): Map<string, Set<string>> {
   const permissionsByTarget = new Map(
     targets.map((target) => [targetKey(target), new Set<string>()]),
   );
   for (const scope of array(fineGrained["scoped"])) {
-    collectScopePermissions(asRecord(scope), targets, permissionsByTarget, errors);
+    collectTargetPermissions(asRecord(scope), targets, permissionsByTarget);
   }
   return permissionsByTarget;
 }
 
-function collectScopePermissions(
+function collectTargetPermissions(
   scope: JsonObject,
   targets: readonly StorageTarget[],
   permissionsByTarget: Map<string, Set<string>>,
-  errors: string[],
 ): void {
   const entity = asRecord(scope["entity"]);
   const target = targets.find((candidate) => matchesTarget(entity, candidate));
+  if (target === undefined) return;
   for (const permission of strings(scope["permissions"])) {
-    if (target === undefined) {
-      errors.push(
-        `Unexpected permission outside configured storage on HF_TOKEN: ${permission} on ${entityLabel(entity)}.`,
-      );
-    } else if (!TARGET_PERMISSIONS.has(permission)) {
-      errors.push(`Unexpected permission on HF_TOKEN: ${permission}.`);
-    } else {
+    if (TARGET_PERMISSIONS.has(permission)) {
       permissionsByTarget.get(targetKey(target))?.add(permission);
     }
   }
@@ -157,12 +143,6 @@ function entityCandidates(entity: JsonObject): readonly string[] {
   return [text(entity["id"]), name, namespace && name ? `${namespace}/${name}` : ""].filter(
     (candidate) => candidate.length > 0,
   );
-}
-
-function entityLabel(entity: JsonObject): string {
-  const kind = text(entity["type"]) || "unknown";
-  const name = text(entity["name"]) || text(entity["id"]) || "unknown";
-  return `${kind}:${name}`;
 }
 
 function normalizeName(value: string): string {
