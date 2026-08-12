@@ -997,7 +997,7 @@ async function confirmScheduleEnableDefault(
   note(
     [
       `Canary hard ceiling: $${canaryHardCeilingUsd.toFixed(2)} across two Jobs.`,
-      `Recurring inference ceiling: $${perRun.toFixed(2)} per scheduled run, plus cpu-basic time.`,
+      `Recurring inference ceiling: $${perRun.toFixed(2)} per scheduled run, plus cpu-upgrade time.`,
       `Schedule: ${desired.schedule}.`,
       "Recurring cumulative spend can exceed $5 and requires explicit approval.",
     ].join("\n"),

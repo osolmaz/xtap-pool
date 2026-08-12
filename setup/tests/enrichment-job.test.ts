@@ -293,7 +293,7 @@ describe("Hugging Face enrichment Job", () => {
           spaceId: "alice/xtap-pool",
           command: ["node", "space/dist/src/enrich-job-main.js"],
           secrets: { HF_TOKEN: "hf_dataset", INFERENCE_TOKEN: "hf_inference" },
-          flavor: "cpu-basic",
+          flavor: "cpu-upgrade",
           timeoutSeconds: 2700,
         }),
       }),
@@ -376,7 +376,7 @@ describe("Hugging Face enrichment Job", () => {
       receiptTimeoutMs: 100,
     });
 
-    expect(result.hardCeilingUsd).toBeCloseTo(4.0165);
+    expect(result.hardCeilingUsd).toBeCloseTo(4.0465);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
     expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
   });
@@ -786,7 +786,7 @@ function scheduleFixture(
       spaceId: desired.spaceRepo,
       command: ["node", "space/dist/src/enrich-job-main.js"],
       environment: desired.environment,
-      flavor: "cpu-basic",
+      flavor: "cpu-upgrade",
       timeout: desired.timeoutSeconds,
       retry: 0,
       secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
@@ -806,7 +806,7 @@ function physicalFixture(
     spaceId: desired.spaceRepo,
     command: ["node", "space/dist/src/enrich-job-main.js"],
     environment: desired.environment,
-    flavor: "cpu-basic",
+    flavor: "cpu-upgrade",
     timeout: desired.timeoutSeconds,
     retry: 0,
     secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],

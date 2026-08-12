@@ -51,8 +51,9 @@ const JOB_SECRET_NAMES_LABEL = [...JOB_SECRET_NAMES].sort().join(".");
 const JOB_COMMAND = ["node", "space/dist/src/enrich-job-main.js"] as const;
 const ACTIVE_JOB_STAGES = new Set(["RUNNING", "PAUSED", "UPDATING"]);
 const SUCCESSFUL_JOB_STAGES = new Set(["STOPPED", "COMPLETED"]);
-// Rounded up from Hugging Face's current $0.000167/min cpu-basic rate.
-const CPU_BASIC_HOURLY_CEILING_USD = 0.011;
+// Rounded up from Hugging Face's current $0.0005/min cpu-upgrade rate.
+const JOB_HOURLY_CEILING_USD = 0.031;
+const JOB_FLAVOR = "cpu-upgrade";
 
 const nonempty = z.string().min(1);
 const positiveInteger = z.string().regex(/^[1-9][0-9]*$/u);
@@ -299,7 +300,7 @@ export async function reconcileEnrichmentJob(
       command: [...JOB_COMMAND],
       environment: { ...desired.environment },
       secrets: { HF_TOKEN: secrets.storageToken, INFERENCE_TOKEN: secrets.inferenceToken },
-      flavor: "cpu-basic",
+      flavor: JOB_FLAVOR,
       timeoutSeconds: desired.timeoutSeconds,
       attempts: 1,
       labels: { ...desired.labels },
@@ -466,7 +467,7 @@ export function canaryHardCeilingUsd(desired: DesiredEnrichmentJob): number {
   if (!Number.isFinite(inferencePerRun) || inferencePerRun <= 0) {
     throw new Error("ENRICH_MAX_COST_USD must be a measurable positive canary ceiling.");
   }
-  const cpuPerRun = (desired.timeoutSeconds / 3600) * CPU_BASIC_HOURLY_CEILING_USD;
+  const cpuPerRun = (desired.timeoutSeconds / 3600) * JOB_HOURLY_CEILING_USD;
   return 2 * (inferencePerRun + cpuPerRun);
 }
 
@@ -615,7 +616,7 @@ function assertCanaryContinuationBudget(
   if (receipt.cost_usd === undefined) {
     throw new Error("Cannot resume a canary without measured prior cost.");
   }
-  const computePerRun = (desired.timeoutSeconds / 3600) * CPU_BASIC_HOURLY_CEILING_USD;
+  const computePerRun = (desired.timeoutSeconds / 3600) * JOB_HOURLY_CEILING_USD;
   const nextRunCeiling = Number(desired.environment["ENRICH_MAX_COST_USD"]) + computePerRun;
   if (receipt.cost_usd + computePerRun + nextRunCeiling > hardCeilingUsd + 1e-9) {
     throw new Error("The resumed canary would exceed its cumulative cost ceiling.");
@@ -763,7 +764,7 @@ function desiredPhysicalJobProjection(desired: DesiredEnrichmentJob): Record<str
     spaceId: desired.spaceRepo,
     command: [...JOB_COMMAND],
     environment: desired.environment,
-    flavor: "cpu-basic",
+    flavor: JOB_FLAVOR,
     timeout: desired.timeoutSeconds,
     retries: 0,
     secrets: [...JOB_SECRET_NAMES].sort(),
