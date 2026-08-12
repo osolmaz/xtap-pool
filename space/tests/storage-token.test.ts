@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { checkStorageCredential } from "../src/storage-token.js";
+import { checkStorageCredential, storageCredentialOk } from "../src/storage-token.js";
 
 const rawBucket = "alice/xtap-pool-data";
 const indexBucket = "alice/xtap-pool-bucket";
@@ -37,7 +37,11 @@ describe("storage credential readiness", () => {
       .mockResolvedValueOnce(new Response("{}", { status: 200 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
-    await expect(check(fetchFn)).resolves.toEqual({ credential: "ok" });
+    const result = await check(fetchFn);
+    expect(result).toEqual({ credential: "ok" });
+    expect(storageCredentialOk(result)).toBe(true);
+    expect(storageCredentialOk({ credential: "invalid", error: "bad" })).toBe(false);
+    expect(storageCredentialOk({ credential: "unknown", error: "wait" })).toBe(false);
   });
 
   it("rejects a token whose index Bucket scope is missing", async () => {
@@ -82,12 +86,71 @@ describe("storage credential readiness", () => {
     });
   });
 
-  it("treats transient Hub failures as unknown so startup can retry", async () => {
+  it("rejects broad roles, global scopes, other resources, and unknown permissions", async () => {
+    const broad: typeof fetch = () =>
+      Promise.resolve(Response.json({ auth: { accessToken: { role: "write", fineGrained: {} } } }));
+    await expect(check(broad)).resolves.toMatchObject({ credential: "invalid" });
+
+    const unexpected: typeof fetch = () =>
+      Promise.resolve(
+        Response.json(
+          whoami([
+            scope(rawBucket, ["repo.content.read", "repo.content.write", "repo.delete"]),
+            scope(indexBucket, ["repo.content.read", "repo.content.write"]),
+            scope("alice/other", ["repo.content.read"]),
+          ]),
+        ),
+      );
+    const unexpectedResult = await check(unexpected);
+    expect(unexpectedResult.credential).toBe("invalid");
+    if (unexpectedResult.credential === "ok") throw new Error("expected an invalid credential");
+    expect(unexpectedResult.error).toContain("Unexpected permission");
+
+    const global: typeof fetch = () =>
+      Promise.resolve(
+        Response.json({
+          auth: {
+            accessToken: {
+              role: "fineGrained",
+              fineGrained: { global: ["inference.serverless.write"], scoped: validScopes() },
+            },
+          },
+        }),
+      );
+    await expect(check(global)).resolves.toMatchObject({ credential: "invalid" });
+  });
+
+  it("accepts Bucket entity aliases and read probes that return not found", async () => {
+    const aliases = [
+      scope(`buckets/${rawBucket}`, ["repo.content.read", "repo.write"], "buckets"),
+      {
+        entity: { type: "bucket", namespace: "alice", name: "xtap-pool-bucket" },
+        permissions: ["repo.content.read", "repo.content.write"],
+      },
+    ];
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(whoami(aliases)))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }));
+    await expect(check(fetchFn)).resolves.toEqual({ credential: "ok" });
+  });
+
+  it("treats thrown and transient Hub failures as unknown so startup can retry", async () => {
     const fetchFn: typeof fetch = () => Promise.resolve(new Response("oops", { status: 503 }));
 
     await expect(check(fetchFn)).resolves.toEqual({
       credential: "unknown",
       error: "Hugging Face rejected HF_TOKEN (503).",
     });
+
+    const direct = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(whoami(validScopes())))
+      .mockResolvedValueOnce(new Response("oops", { status: 500 }));
+    await expect(check(direct)).resolves.toMatchObject({ credential: "unknown" });
+
+    const thrown: typeof fetch = () => Promise.reject(new Error("offline"));
+    await expect(check(thrown)).resolves.toEqual({ credential: "unknown", error: "offline" });
   });
 });

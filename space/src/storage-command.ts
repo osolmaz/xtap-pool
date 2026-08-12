@@ -4,7 +4,7 @@ import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import { importPinnedDataset, verifyPinnedDataset } from "./storage-migration.js";
 
 type Command = "import" | "verify";
-type Arguments = {
+export type StorageCommandArguments = {
   dataset: string;
   revision: string;
   rawBucket: string;
@@ -13,7 +13,7 @@ type Arguments = {
 };
 
 export async function runStorageCommand(command: Command, argv: readonly string[]): Promise<void> {
-  const args = parseArguments(argv);
+  const args = parseStorageArguments(argv);
   const token = process.env["HF_TOKEN"];
   if (token === undefined || token.length === 0) throw new Error("HF_TOKEN is required");
   const log = new BucketLog(
@@ -42,7 +42,7 @@ export async function runStorageCommand(command: Command, argv: readonly string[
   );
 }
 
-function parseArguments(argv: readonly string[]): Arguments {
+export function parseStorageArguments(argv: readonly string[]): StorageCommandArguments {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
