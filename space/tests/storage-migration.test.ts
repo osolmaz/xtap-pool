@@ -80,6 +80,71 @@ function fixture(): {
   source.files.set("config/service-accounts.json", bytes('{"version":1,"accounts":[]}\n'));
   source.files.set("config/labels.json", bytes('{"version":1,"labels":[]}\n'));
   source.files.set("enrichment/vocabulary.json", bytes('{"version":1,"labels":[]}\n'));
+  source.files.set(
+    "enrichment/2026/08/enrichment-2026-08-12.jsonl",
+    bytes(
+      `${JSON.stringify({
+        unit_id: "1:author",
+        tweet_ids: ["1"],
+        input_hash: "input",
+        contract_hash: "contract",
+        preset_labels: [],
+        free_labels: [],
+        model: "model",
+        taxonomy_version: 1,
+        enriched_at: "2026-08-12T00:00:00.000Z",
+      })}\n`,
+    ),
+  );
+  source.files.set(
+    "enrichment/attempts/2026/08/attempts-2026-08-12.jsonl",
+    bytes(
+      `${JSON.stringify({
+        unit_id: "1:author",
+        input_hash: "input",
+        contract_hash: "contract",
+        attempt: 1,
+        outcome: "success",
+        at: "2026-08-12T00:00:00.000Z",
+      })}\n`,
+    ),
+  );
+  source.files.set(
+    "enrichment/registry/2026/08/registry-2026-08-12.jsonl",
+    bytes(
+      `${JSON.stringify({
+        name: "inference",
+        status: "approved",
+        at: "2026-08-12T00:00:00.000Z",
+        contract_hash: "contract",
+        registry_revision: 1,
+        quotes: [],
+        actor: "worker",
+      })}\n`,
+    ),
+  );
+  source.files.set(
+    "enrichment/receipts/2026-08-12.jsonl",
+    bytes(
+      `${JSON.stringify({
+        started_at: "2026-08-12T00:00:00.000Z",
+        finished_at: "2026-08-12T00:01:00.000Z",
+        units: 1,
+        calls: 1,
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        failures: 0,
+        retries: 0,
+        blocked: 0,
+        contract_hash: "contract",
+        worker_id: "worker",
+        discarded_assignments: 0,
+        new_candidates: 0,
+        new_approvals: 0,
+        new_rejections: 0,
+      })}\n`,
+    ),
+  );
   return {
     source,
     bucket,
@@ -103,12 +168,12 @@ describe("pinned storage migration", () => {
     const state = fixture();
     const first = await importPinnedDataset(options(state));
     expect(first.reconciliation).toMatchObject({
-      rows: { tweet: 1, enrichment: 0, attempt: 0, registry: 0, receipt: 0 },
+      rows: { tweet: 1, enrichment: 1, attempt: 1, registry: 1, receipt: 1 },
       unique_tweet_identities: 1,
       passed: true,
     });
-    expect(first.source.objects).toBe(5);
-    expect(first.target.objects).toBe(5);
+    expect(first.source.objects).toBe(9);
+    expect(first.target.objects).toBe(9);
     expect(JSON.parse(readFileSync(state.report, "utf8"))).toEqual(first);
     const keys = [...state.bucket.files.keys()];
 
