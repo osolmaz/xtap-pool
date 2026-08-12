@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await -- The fake implements an asynchronous storage interface. */
 import type { EnrichReceipt, PooledTweet } from "@xtap-pool/shared";
 
 import { tweetPathFor } from "../src/bucket-log.js";

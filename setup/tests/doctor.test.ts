@@ -1038,7 +1038,6 @@ function handleSecretsRequest(
   return Promise.resolve(secretsResponse(options));
 }
 
-// eslint-disable-next-line complexity -- The fixture routes every doctor dependency through one fake Hub.
 function handleReadRequest(url: string, options: FixtureOptions): Promise<Response> {
   if (url.includes("/api/buckets/alice/xtap-pool-data")) {
     return Promise.resolve(Response.json({ private: options.storagePrivate ?? true }));

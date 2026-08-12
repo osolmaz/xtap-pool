@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/require-await -- In-memory fakes implement asynchronous storage interfaces. */
+/* eslint-disable @typescript-eslint/no-non-null-assertion -- Assertions first prove fixture values exist. */
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
