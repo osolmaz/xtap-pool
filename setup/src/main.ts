@@ -17,7 +17,8 @@ const root = findProjectRoot(here);
 try {
   const command = parseSetupCommand(process.argv.slice(2));
   if (command.kind === "setup") await runSetupWizard(root);
-  else if (command.kind === "update") await runUpdateCommand(root, command.spaceRepo);
+  else if (command.kind === "update")
+    await runUpdateCommand(root, command.spaceRepo, { verifiedBucketCutover: command.cutover });
   else {
     const accessToken = await activeHfToken();
     const account = await whoAmI({ accessToken });

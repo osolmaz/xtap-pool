@@ -2,7 +2,7 @@ import { validateRepoId } from "./config.js";
 
 export type SetupCommand =
   | { kind: "setup" }
-  | { kind: "update"; spaceRepo?: string }
+  | { kind: "update"; spaceRepo?: string; cutover: boolean }
   | {
       kind: "doctor";
       spaceRepo?: string;
@@ -22,12 +22,19 @@ export function parseSetupCommand(argv: readonly string[]): SetupCommand {
 }
 
 function parseUpdate(args: readonly string[]): SetupCommand {
-  const [maybeSpaceRepo, ...extra] = args;
-  if (extra.length > 0) throw new Error("Usage: npm run update -- [owner/xtap-pool]");
-  if (maybeSpaceRepo === undefined) return { kind: "update" };
+  const cutover = args.includes("--verified-bucket-cutover");
+  const positional = args.filter((arg) => arg !== "--verified-bucket-cutover");
+  const [maybeSpaceRepo, ...extra] = positional;
+  if (
+    extra.length > 0 ||
+    args.some((arg) => arg.startsWith("--") && arg !== "--verified-bucket-cutover")
+  ) {
+    throw new Error("Usage: npm run update -- [owner/xtap-pool] [--verified-bucket-cutover]");
+  }
+  if (maybeSpaceRepo === undefined) return { kind: "update", cutover };
   const error = validateRepoId(maybeSpaceRepo);
   if (error !== undefined) throw new Error(error);
-  return { kind: "update", spaceRepo: maybeSpaceRepo };
+  return { kind: "update", spaceRepo: maybeSpaceRepo, cutover };
 }
 
 // eslint-disable-next-line complexity -- One small parser rejects conflicting repair/canary activation flags at the CLI boundary.

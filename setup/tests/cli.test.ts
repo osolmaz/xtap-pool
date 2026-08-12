@@ -8,10 +8,16 @@ describe("setup CLI command parsing", () => {
   });
 
   it("parses update mode with an optional Space repo", () => {
-    expect(parseSetupCommand(["update"])).toEqual({ kind: "update" });
+    expect(parseSetupCommand(["update"])).toEqual({ kind: "update", cutover: false });
     expect(parseSetupCommand(["update", "alice/xtap-pool"])).toEqual({
       kind: "update",
       spaceRepo: "alice/xtap-pool",
+      cutover: false,
+    });
+    expect(parseSetupCommand(["update", "alice/xtap-pool", "--verified-bucket-cutover"])).toEqual({
+      kind: "update",
+      spaceRepo: "alice/xtap-pool",
+      cutover: true,
     });
   });
 
