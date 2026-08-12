@@ -353,9 +353,9 @@ export async function quiesceEnrichmentWriters(
   client: HubClient,
   desired: DesiredEnrichmentJob,
   options: { pollIntervalMs?: number; timeoutMs?: number } = {},
-): Promise<number> {
+): Promise<readonly string[]> {
   const before = await inspectEnrichmentJob(client, desired);
-  let suspended = 0;
+  const suspendedScheduleIds: string[] = [];
   for (const schedule of before.schedules) {
     if (schedule.suspend) continue;
     await suspendScheduledJob({
@@ -363,18 +363,32 @@ export async function quiesceEnrichmentWriters(
       jobId: schedule.id,
       ...hubOptions(client),
     });
-    suspended += 1;
+    suspendedScheduleIds.push(schedule.id);
   }
   const deadline = Date.now() + (options.timeoutMs ?? (desired.timeoutSeconds + 300) * 1_000);
   for (;;) {
     const inspection = await inspectEnrichmentJob(client, desired);
     if (inspection.schedules.every((schedule) => schedule.suspend)) {
-      if (inspection.activeJobs.length === 0) return suspended;
+      if (inspection.activeJobs.length === 0) return suspendedScheduleIds;
     }
     if (Date.now() >= deadline) {
       throw new Error("Enrichment writers did not quiesce before the deadline.");
     }
     await delay(options.pollIntervalMs ?? 2_000);
+  }
+}
+
+export async function resumeEnrichmentSchedules(
+  client: HubClient,
+  desired: DesiredEnrichmentJob,
+  scheduleIds: readonly string[],
+): Promise<void> {
+  for (const scheduleId of scheduleIds) {
+    await resumeScheduledJob({
+      namespace: desired.namespace,
+      jobId: scheduleId,
+      ...hubOptions(client),
+    });
   }
 }
 
