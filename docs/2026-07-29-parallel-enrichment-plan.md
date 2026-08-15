@@ -1,27 +1,22 @@
-# Parallel enrichment implementation plan
+---
+title: Parallel enrichment plan
+author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
+date: 2026-07-29
+---
+
+# Parallel enrichment plan
 
 ## Status
 
-Proposed. The production worker still uses one inference request at a time. The active Hugging Face schedule remains non-concurrent and must keep that setting after this work.
+Implemented. The worker supports up to 32 provider calls in one physical Job, and production has completed 32-way runs with durable receipts. This update makes 32 the persistent setup default. The Hugging Face schedule remains physically non-concurrent so one coordinator owns queue selection, cost limits, registry order, Bucket commits, and receipts.
 
-This plan adds bounded request concurrency inside one physical Job. A single coordinator will continue to own queue selection, cost ceilings, registry order, dataset commits, and receipts.
+The normal six-hour schedule uses a $10 run limit. That limit covers the $8 reservation bound for one full 32-call wave. A backlog repair may temporarily use a $100 run limit and a 5.5-hour worker limit under an explicit cumulative budget. The normal limits return after the backlog clears, while concurrency stays at 32.
 
 ## Current performance
 
-The worker groups six conversation-author units into each call to `zai-org/GLM-5.2:fireworks-ai`. `drainClaimed` in `space/src/enrich-worker.ts` waits for every call before starting the next one.
+The worker groups six conversation-author units into each call to `zai-org/GLM-5.2:fireworks-ai`. Forty-five production receipts with concurrency 32 completed 111,079 units in 52.42 worker-hours for $179.171605. The aggregate rate was 2,119 durable units per hour at $1.61 per thousand units.
 
-Two completed production runs establish the current range:
-
-| Job                        | Units | Calls | Wall time | Durable units per hour |
-| -------------------------- | ----: | ----: | --------: | ---------------------: |
-| `6a68862586307671bcb84d6c` | 5,780 | 1,000 |    5h 15m |                  1,100 |
-| `6a68da0615e81eca66a8d39e` | 4,577 |   815 |    9h 25m |                    486 |
-
-The calls took 19 to 42 seconds on average. The most recent scheduled Job, `6a695e8ea9f4e0ab00b2c3c6`, made one request that timed out after 90 seconds. All six units entered retry state, and the Job stopped at the configured error-rate ceiling without completing a unit.
-
-At the latest audit, 14,119 units were pending and 313 were retrying. Sequential processing therefore needs roughly 13 to 30 healthy wall-clock hours at the measured rates. Provider timeouts extend that range.
-
-Current-contract receipts record 9,341 completed units at a cumulative inference cost of $11.6962276. That is about $1.25 per thousand completed units, including observed failures and retries. The remaining queue is projected to cost about $18 at the same rate. Concurrency should change elapsed time without materially changing the number of model tokens.
+The August 15 backlog contains 48,495 pending units. The aggregate history projects about 23 worker-hours and $78 of inference. The observed rate varies widely with provider errors and input mix, so the operating range is 15 to 40 worker-hours with a $100 expected repair ceiling. Each useful result and attempt event is durable before a worker exits.
 
 ## Decision
 
@@ -91,7 +86,9 @@ Add `ENRICH_MAX_CONCURRENT_CALLS` as a strict positive integer in the following 
 - `setup/src/enrichment-job.ts` for defaults, validation, desired schedule state, and exact schedule matching.
 - deployment and doctor output so the effective value is visible before activation.
 
-The merged revision defaults to `1`, preserving behavior until deployment configuration is changed. The replacement schedule is created suspended with `32`, then triggered manually under the approved bounded-run ceiling.
+The setup schedule template defaults to `32`. Setup stores this value as a Space variable, and doctor includes it in the exact schedule contract. Deployments and schedule repair therefore keep 32 unless an operator deliberately chooses a lower safe value. The generic worker parser keeps its fail-safe default of 1 when no deployment setting exists.
+
+The normal run limit is $10 because a full wave reserves at most $8. Backlog repair uses temporary $100 and 5.5-hour limits. The replacement schedule is always created suspended, checked with the bounded recovery canary, and enabled only after the canary passes. Canary commands whose hard ceiling is $5 or more must include `--approved-cost-ceiling-usd` with the operator's approved cumulative limit.
 
 Values above 32 fail configuration validation. A 32-call run also requires at least $8 of available reservation capacity under the current per-call bound. The configured run ceiling must cover in-flight reservations plus final commit and receipt work.
 
@@ -174,7 +171,7 @@ If the bounded run has provider failures or violates a ceiling, the replacement 
 Implementation and deployment follow this order:
 
 1. Add coordinator tests and the new strict receipt fields.
-2. Implement bounded inference admission and ordered commits with the default set to 1.
+2. Implement bounded inference admission and ordered commits with the persistent default set to 32.
 3. Run the full repository checks and review the change against `main`.
 4. Deploy the exact Space revision without changing the active schedule.
 5. Replace the schedule in suspended state at concurrency 32 and run the bounded recovery canary.
@@ -182,7 +179,7 @@ Implementation and deployment follow this order:
 7. Trigger the approved production run and verify its receipt before enabling cron.
 8. Resume the single exact schedule and continue publishing completed cutoffs while backfill drains.
 
-Rollback creates a suspended replacement schedule with concurrency 1 under the same source revision or deploys the previous reviewed revision. It never overlaps physical Jobs, deletes durable enrichment records, or rewrites historical receipts.
+Rollback creates a suspended replacement schedule at the highest measured stable concurrency under the same source revision, or deploys the previous reviewed revision. It never overlaps physical Jobs, deletes durable enrichment records, or rewrites historical receipts.
 
 ## External limits
 

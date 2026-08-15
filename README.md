@@ -60,19 +60,25 @@ be a separate token with the `Make calls to Inference Providers` permission.
 The flow does not copy credentials from another store, print them, or save them
 locally.
 
-Run the two-Job recovery canary while the schedule remains suspended. Its hard
-combined inference and CPU ceiling is below $5:
+Run the two-Job recovery canary while the schedule remains suspended. The
+default 32-call configuration has a combined hard ceiling above $5, so record
+the operator's explicit cumulative approval in the command:
 
 ```sh
-npm run doctor -- osolmaz/xtap-pool --fix --canary
+npm run doctor -- osolmaz/xtap-pool --fix --canary \
+  --approved-cost-ceiling-usd=25
 ```
 
 Enable the recurring schedule only after the canary passes and the operator
 confirms the displayed recurring cost:
 
 ```sh
-npm run doctor -- osolmaz/xtap-pool --fix --canary --enable-schedule
+npm run doctor -- osolmaz/xtap-pool --fix --canary \
+  --approved-cost-ceiling-usd=25 --enable-schedule
 ```
+
+The approved ceiling must cover the two-Job canary. It does not change either
+Job's configured run limit.
 
 ## Update an existing pool
 

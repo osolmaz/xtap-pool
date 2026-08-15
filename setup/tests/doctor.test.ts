@@ -209,7 +209,7 @@ describe("doctor", () => {
     expect(variableWrites).toEqual([
       { key: "ENRICH_JOB_SCHEDULE", value: "17 */6 * * *" },
       { key: "ENRICH_MAX_ERROR_RATE", value: "0.25" },
-      { key: "ENRICH_MAX_COST_USD", value: "2" },
+      { key: "ENRICH_MAX_COST_USD", value: "10" },
     ]);
     expect(report.checks).toContainEqual(
       expect.objectContaining({ code: "space.variable.ENRICH_JOB_SCHEDULE", status: "pass" }),
@@ -800,6 +800,7 @@ describe("doctor", () => {
         fix: false,
         canary: true,
         resumeCanaryJobId: "job-1",
+        approvedCostCeilingUsd: 500,
         enableSchedule: true,
       },
       {
@@ -818,7 +819,7 @@ describe("doctor", () => {
       expect.objectContaining({ accessToken: "hf_owner" }),
       expect.objectContaining({ spaceRepo: "alice/xtap-pool" }),
       "alice/xtap-pool-data",
-      { resumeJobId: "job-1" },
+      { resumeJobId: "job-1", approvedCostCeilingUsd: 500 },
     );
     expect(report.checks).toContainEqual(
       expect.objectContaining({ code: "job.schedule.approval", status: "pass" }),
@@ -943,10 +944,10 @@ function jobEnvironment(): Record<string, string> {
     RAW_BUCKET: "alice/xtap-pool-data",
     INDEX_BUCKET: "alice/xtap-pool-bucket",
     ENRICH_ENABLED: "true",
-    ENRICH_MAX_CONCURRENT_CALLS: "1",
+    ENRICH_MAX_CONCURRENT_CALLS: "32",
     ENRICH_MAX_ELAPSED_MS: "2400000",
     ENRICH_MAX_ERROR_RATE: "0.25",
-    ENRICH_MAX_COST_USD: "2",
+    ENRICH_MAX_COST_USD: "10",
     ENRICH_MAX_COST_PER_CALL_USD: "0.25",
     ENRICH_INPUT_TOKEN_USD: "0.0000014",
     ENRICH_OUTPUT_TOKEN_USD: "0.0000044",
@@ -1137,10 +1138,10 @@ function variablesResponse(overrides: Record<string, string> | undefined): Respo
     ENRICH_ENABLED: "false",
     ENRICH_JOB_SCHEDULE: "17 */6 * * *",
     ENRICH_JOB_TIMEOUT_SECONDS: "2700",
-    ENRICH_MAX_CONCURRENT_CALLS: "1",
+    ENRICH_MAX_CONCURRENT_CALLS: "32",
     ENRICH_MAX_ELAPSED_MS: "2400000",
     ENRICH_MAX_ERROR_RATE: "0.25",
-    ENRICH_MAX_COST_USD: "2",
+    ENRICH_MAX_COST_USD: "10",
     ENRICH_MAX_COST_PER_CALL_USD: "0.25",
     ENRICH_INPUT_TOKEN_USD: "0.0000014",
     ENRICH_OUTPUT_TOKEN_USD: "0.0000044",

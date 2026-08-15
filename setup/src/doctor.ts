@@ -40,6 +40,7 @@ export type DoctorOptions = {
   fix: boolean;
   canary?: boolean;
   resumeCanaryJobId?: string;
+  approvedCostCeilingUsd?: number;
   enableSchedule?: boolean;
 };
 
@@ -187,9 +188,16 @@ async function runDoctorCanary(
     client,
     desired,
     manifest.rawBucket,
-    options.resumeCanaryJobId === undefined
+    options.resumeCanaryJobId === undefined && options.approvedCostCeilingUsd === undefined
       ? undefined
-      : { resumeJobId: options.resumeCanaryJobId },
+      : {
+          ...(options.resumeCanaryJobId === undefined
+            ? {}
+            : { resumeJobId: options.resumeCanaryJobId }),
+          ...(options.approvedCostCeilingUsd === undefined
+            ? {}
+            : { approvedCostCeilingUsd: options.approvedCostCeilingUsd }),
+        },
   );
   const canaryCheck = pass(
     "job.canary",

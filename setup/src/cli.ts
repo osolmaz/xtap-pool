@@ -10,6 +10,7 @@ export type SetupCommand =
       fix: boolean;
       canary: boolean;
       resumeCanaryJobId?: string;
+      approvedCostCeilingUsd?: number;
       enableSchedule: boolean;
     };
 
@@ -54,6 +55,7 @@ function parseDoctor(args: readonly string[]): SetupCommand {
   let fix = false;
   let canary = false;
   let resumeCanaryJobId: string | undefined;
+  let approvedCostCeilingUsd: number | undefined;
   let enableSchedule = false;
   for (const arg of args) {
     if (arg === "--json") json = true;
@@ -63,16 +65,27 @@ function parseDoctor(args: readonly string[]): SetupCommand {
       const value = arg.slice("--resume-canary-job=".length);
       if (!/^[a-zA-Z0-9._-]+$/u.test(value)) throw new Error("Invalid canary Job ID.");
       resumeCanaryJobId = value;
+    } else if (arg.startsWith("--approved-cost-ceiling-usd=")) {
+      const value = Number(arg.slice("--approved-cost-ceiling-usd=".length));
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("--approved-cost-ceiling-usd requires a positive number.");
+      }
+      approvedCostCeilingUsd = value;
     } else if (arg === "--enable-schedule") enableSchedule = true;
     else if (spaceRepo === undefined) spaceRepo = arg;
     else {
       throw new Error(
-        "Usage: npm run doctor -- [owner/xtap-pool] [--json] [--fix] [--canary] [--resume-canary-job=<id>] [--enable-schedule]",
+        "Usage: npm run doctor -- [owner/xtap-pool] [--json] [--fix] [--canary] [--resume-canary-job=<id>] [--approved-cost-ceiling-usd=<usd>] [--enable-schedule]",
       );
     }
   }
-  if ((enableSchedule || resumeCanaryJobId !== undefined) && !canary) {
-    throw new Error("--enable-schedule and --resume-canary-job require --canary.");
+  if (
+    (enableSchedule || resumeCanaryJobId !== undefined || approvedCostCeilingUsd !== undefined) &&
+    !canary
+  ) {
+    throw new Error(
+      "--enable-schedule, --resume-canary-job, and --approved-cost-ceiling-usd require --canary.",
+    );
   }
   if (spaceRepo !== undefined) {
     const error = validateRepoId(spaceRepo);
@@ -85,6 +98,7 @@ function parseDoctor(args: readonly string[]): SetupCommand {
     fix,
     canary,
     ...(resumeCanaryJobId === undefined ? {} : { resumeCanaryJobId }),
+    ...(approvedCostCeilingUsd === undefined ? {} : { approvedCostCeilingUsd }),
     enableSchedule,
   };
 }
