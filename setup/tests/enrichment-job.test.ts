@@ -184,6 +184,15 @@ describe("Hugging Face enrichment Job", () => {
     ).rejects.toThrow(
       "ENRICH_MAX_COST_USD must be at least 8 to admit the configured concurrent call wave.",
     );
+
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "3");
+    invalid.set("ENRICH_MAX_COST_PER_CALL_USD", "0.1");
+    invalid.set("ENRICH_MAX_COST_USD", "0.3");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow(
+      "ENRICH_MAX_COST_USD must be at least 0.30000000000000004 to admit the configured concurrent call wave.",
+    );
   });
 
   it("classifies exact, stale, unrelated, and active Jobs", async () => {
