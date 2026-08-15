@@ -9,8 +9,10 @@ import {
   desiredEnrichmentJob,
   desiredEnrichmentJobHash,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  enrichmentJobCapacityError,
   enrichmentJobVariableError,
   inspectEnrichmentJob,
+  minimumEnrichmentJobCostUsd,
   reconcileEnrichmentJob,
   resumeEnrichmentSchedule,
   runEnrichmentCanary,
@@ -153,6 +155,8 @@ export async function collectDoctorReport(
   for (const key of manifest.requiredVariables) {
     checks.push(variableCheck(key, variables.get(key)));
   }
+  const capacityCheck = enrichmentReservationCapacityCheck(variables);
+  if (capacityCheck !== undefined) checks.push(capacityCheck);
 
   await checkSecrets(client, manifest, checks);
   await checkStorage(client, manifest, checks);
@@ -274,6 +278,40 @@ function variableValueError(key: string, value: string): string | undefined {
   }
   const enrichmentError = enrichmentJobVariableError(key, value);
   return enrichmentError === undefined ? undefined : `${key} is invalid: ${enrichmentError}`;
+}
+
+function enrichmentReservationCapacityCheck(
+  variables: ReadonlyMap<string, string>,
+): DoctorCheck | undefined {
+  const keys = [
+    "ENRICH_MAX_CONCURRENT_CALLS",
+    "ENRICH_MAX_COST_USD",
+    "ENRICH_MAX_COST_PER_CALL_USD",
+  ] as const;
+  if (
+    keys.some((key) => {
+      const value = variables.get(key);
+      return (
+        value === undefined ||
+        value.trim() === "" ||
+        enrichmentJobVariableError(key, value) !== undefined
+      );
+    })
+  ) {
+    return undefined;
+  }
+  const minimumCost = minimumEnrichmentJobCostUsd(variables);
+  if (minimumCost === undefined) return undefined;
+  const configuredCost = Number(variables.get("ENRICH_MAX_COST_USD"));
+  const error = enrichmentJobCapacityError(variables);
+  const details = { configuredCostUsd: configuredCost, minimumCostUsd: minimumCost };
+  return error === undefined
+    ? pass(
+        "job.reservation_capacity",
+        "The cost limit admits the configured concurrent call wave.",
+        details,
+      )
+    : fail("job.reservation_capacity", error, details);
 }
 
 async function checkSecrets(
@@ -695,7 +733,7 @@ function repairDependencies(deps: DoctorDeps): RepairDependencies {
 }
 
 async function maybeRepairJobVariables(client: HubClient, report: DoctorReport): Promise<boolean> {
-  let repairedIndexBucket = false;
+  let repaired = false;
   if (
     report.indexBucket !== undefined &&
     report.checks.some(
@@ -703,7 +741,7 @@ async function maybeRepairJobVariables(client: HubClient, report: DoctorReport):
     )
   ) {
     await setSpaceVariable(client, report.spaceRepo, "INDEX_BUCKET", report.indexBucket);
-    repairedIndexBucket = true;
+    repaired = true;
   }
   const missing = Object.entries(ENRICHMENT_JOB_DEFAULT_VARIABLES).filter(([key]) =>
     report.checks.some(
@@ -712,8 +750,22 @@ async function maybeRepairJobVariables(client: HubClient, report: DoctorReport):
   );
   for (const [key, value] of missing) {
     await setSpaceVariable(client, report.spaceRepo, key, value);
+    repaired = true;
   }
-  return repairedIndexBucket || missing.length > 0;
+
+  const variables = await getSpaceVariables(client, report.spaceRepo);
+  const minimumCost = minimumEnrichmentJobCostUsd(variables);
+  if (minimumCost !== undefined && enrichmentJobCapacityError(variables) !== undefined) {
+    const defaultCost = Number(ENRICHMENT_JOB_DEFAULT_VARIABLES["ENRICH_MAX_COST_USD"]);
+    await setSpaceVariable(
+      client,
+      report.spaceRepo,
+      "ENRICH_MAX_COST_USD",
+      String(Math.max(defaultCost, minimumCost)),
+    );
+    repaired = true;
+  }
+  return repaired;
 }
 
 async function maybeDisableSpaceEnrichment(

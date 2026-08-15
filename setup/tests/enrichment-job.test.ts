@@ -64,7 +64,7 @@ describe("Hugging Face enrichment Job", () => {
         RAW_BUCKET: "alice/xtap-pool-data",
         INDEX_BUCKET: "alice/xtap-pool-bucket",
         ENRICH_ENABLED: "true",
-        ENRICH_MAX_CONCURRENT_CALLS: "32",
+        ENRICH_MAX_CONCURRENT_CALLS: "8",
         ENRICH_MAX_COST_USD: "2",
         LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
         XTAP_SOURCE_REVISION: REVISION,
@@ -162,7 +162,7 @@ describe("Hugging Face enrichment Job", () => {
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow("1 through 32");
 
-    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "32");
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "8");
     invalid.set("ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "-0.1");
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
@@ -173,6 +173,17 @@ describe("Hugging Face enrichment Job", () => {
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow();
+  });
+
+  it("rejects a cost limit that cannot admit one concurrent reservation wave", async () => {
+    const invalid = variables();
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "32");
+
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
+    ).rejects.toThrow(
+      "ENRICH_MAX_COST_USD must be at least 8 to admit the configured concurrent call wave.",
+    );
   });
 
   it("classifies exact, stale, unrelated, and active Jobs", async () => {
@@ -754,7 +765,7 @@ function variables(): Map<string, string> {
     ["INDEX_BUCKET", "alice/xtap-pool-bucket"],
     ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
     ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
-    ["ENRICH_MAX_CONCURRENT_CALLS", "32"],
+    ["ENRICH_MAX_CONCURRENT_CALLS", "8"],
     ["ENRICH_MAX_ELAPSED_MS", "2400000"],
     ["ENRICH_MAX_ERROR_RATE", "0.25"],
     ["ENRICH_MAX_COST_USD", "2"],

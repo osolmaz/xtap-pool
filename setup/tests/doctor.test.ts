@@ -222,6 +222,93 @@ describe("doctor", () => {
     );
   });
 
+  it("reports a cost limit that cannot admit the configured reservation wave", async () => {
+    hubMocks.listFiles.mockReturnValue(rawSegmentEntries());
+    const fetchFn = fetchFixture({
+      tweets: 12,
+      variables: { ENRICH_MAX_COST_USD: "2" },
+    });
+
+    const report = await collectDoctorReport(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      "alice/xtap-pool",
+      { fetchFn },
+    );
+
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({
+        code: "job.reservation_capacity",
+        status: "fail",
+        message:
+          "ENRICH_MAX_COST_USD must be at least 8 to admit the configured concurrent call wave.",
+      }),
+    );
+  });
+
+  it("repairs a newly defaulted concurrency and its reservation capacity together", async () => {
+    hubMocks.listFiles.mockReturnValue(rawSegmentEntries());
+    const variableWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 12,
+      variables: {
+        ENRICH_MAX_CONCURRENT_CALLS: "",
+        ENRICH_MAX_COST_USD: "2",
+      },
+      variableWrites,
+    });
+
+    const report = await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      { fetchFn },
+    );
+
+    expect(variableWrites).toEqual([
+      { key: "ENRICH_MAX_CONCURRENT_CALLS", value: "32" },
+      { key: "ENRICH_MAX_COST_USD", value: "10" },
+    ]);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "job.reservation_capacity", status: "pass" }),
+    );
+  });
+
+  it("preserves a deliberate compatible concurrency and cost pair", async () => {
+    hubMocks.listFiles.mockReturnValue(rawSegmentEntries());
+    const variableWrites: { key: string; value: string }[] = [];
+    const fetchFn = fetchFixture({
+      tweets: 12,
+      variables: {
+        ENRICH_MAX_CONCURRENT_CALLS: "1",
+        ENRICH_MAX_COST_USD: "2",
+      },
+      variableWrites,
+    });
+    const inspectJob = (_client: unknown, desired: DesiredEnrichmentJob) => {
+      const schedule = scheduledJobFixture();
+      return Promise.resolve({
+        desired,
+        schedules: [schedule],
+        exactSchedules: [schedule],
+        mismatchedSchedules: [],
+        activeJobs: [],
+      });
+    };
+
+    const report = await runDoctor(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      "alice",
+      { spaceRepo: "alice/xtap-pool", json: true, fix: true },
+      { fetchFn, inspectJob },
+    );
+
+    expect(variableWrites).toEqual([]);
+    expect(report.checks).toContainEqual(
+      expect.objectContaining({ code: "job.reservation_capacity", status: "pass" }),
+    );
+  });
+
   it("fails required runtime variables that are present but empty", async () => {
     hubMocks.listFiles.mockReturnValue(rawSegmentEntries());
     const report = await collectDoctorReport(
