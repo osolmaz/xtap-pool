@@ -64,6 +64,7 @@ describe("Hugging Face enrichment Job", () => {
         RAW_BUCKET: "alice/xtap-pool-data",
         INDEX_BUCKET: "alice/xtap-pool-bucket",
         ENRICH_ENABLED: "true",
+        ENRICH_MAX_CONCURRENT_CALLS: "32",
         ENRICH_MAX_COST_USD: "2",
         LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
         XTAP_SOURCE_REVISION: REVISION,
@@ -161,7 +162,7 @@ describe("Hugging Face enrichment Job", () => {
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow("1 through 32");
 
-    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "1");
+    invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "32");
     invalid.set("ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT", "-0.1");
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
@@ -338,8 +339,12 @@ describe("Hugging Face enrichment Job", () => {
     expect(hubMocks.resumeScheduledJob).not.toHaveBeenCalled();
   });
 
-  it("runs two bounded physical Jobs and verifies their durable continuation receipts", async () => {
-    const desired = await desiredFixture();
+  it("runs two approved bounded physical Jobs and verifies their durable continuation receipts", async () => {
+    const base = await desiredFixture();
+    const desired = {
+      ...base,
+      environment: { ...base.environment, ENRICH_MAX_COST_USD: "3" },
+    };
     const exact = scheduleFixture(desired, "exact", true);
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
     hubMocks.runScheduledJob
@@ -372,11 +377,12 @@ describe("Hugging Face enrichment Job", () => {
     );
 
     const result = await runEnrichmentCanary(client, desired, "alice/xtap-pool-data", {
+      approvedCostCeilingUsd: 7,
       pollIntervalMs: 0,
       receiptTimeoutMs: 100,
     });
 
-    expect(result.hardCeilingUsd).toBeCloseTo(4.0465);
+    expect(result.hardCeilingUsd).toBeCloseTo(6.0465);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
     expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
   });
@@ -492,8 +498,13 @@ describe("Hugging Face enrichment Job", () => {
     };
     hubMocks.listScheduledJobs.mockResolvedValue([scheduleFixture(expensive, "expensive", true)]);
     await expect(runEnrichmentCanary(client, expensive, "alice/xtap-pool-data")).rejects.toThrow(
-      "requires explicit paid-run approval",
+      "Pass an explicit approved cost ceiling",
     );
+    await expect(
+      runEnrichmentCanary(client, expensive, "alice/xtap-pool-data", {
+        approvedCostCeilingUsd: 6,
+      }),
+    ).rejects.toThrow("at or above");
 
     expect(() =>
       canaryHardCeilingUsd({
@@ -743,7 +754,7 @@ function variables(): Map<string, string> {
     ["INDEX_BUCKET", "alice/xtap-pool-bucket"],
     ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
     ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
-    ["ENRICH_MAX_CONCURRENT_CALLS", "1"],
+    ["ENRICH_MAX_CONCURRENT_CALLS", "32"],
     ["ENRICH_MAX_ELAPSED_MS", "2400000"],
     ["ENRICH_MAX_ERROR_RATE", "0.25"],
     ["ENRICH_MAX_COST_USD", "2"],

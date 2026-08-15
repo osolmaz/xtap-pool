@@ -42,6 +42,7 @@ describe("setup CLI command parsing", () => {
         "--fix",
         "--canary",
         "--resume-canary-job=job-1",
+        "--approved-cost-ceiling-usd=500",
         "--enable-schedule",
       ]),
     ).toEqual({
@@ -51,6 +52,7 @@ describe("setup CLI command parsing", () => {
       fix: true,
       canary: true,
       resumeCanaryJobId: "job-1",
+      approvedCostCeilingUsd: 500,
       enableSchedule: true,
     });
   });
@@ -67,6 +69,12 @@ describe("setup CLI command parsing", () => {
     expect(() => parseSetupCommand(["doctor", "--resume-canary-job=job-1"])).toThrow(
       "require --canary",
     );
+    expect(() => parseSetupCommand(["doctor", "--approved-cost-ceiling-usd=500"])).toThrow(
+      "require --canary",
+    );
+    expect(() =>
+      parseSetupCommand(["doctor", "--canary", "--approved-cost-ceiling-usd=zero"]),
+    ).toThrow("positive number");
     expect(() => parseSetupCommand(["doctor", "--canary", "--resume-canary-job="])).toThrow(
       "Invalid canary Job ID",
     );

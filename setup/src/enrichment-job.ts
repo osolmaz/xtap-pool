@@ -33,10 +33,10 @@ export const ENRICHMENT_JOB_LABELS = {
 export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> = {
   ENRICH_JOB_SCHEDULE: "17 */6 * * *",
   ENRICH_JOB_TIMEOUT_SECONDS: "2700",
-  ENRICH_MAX_CONCURRENT_CALLS: "1",
+  ENRICH_MAX_CONCURRENT_CALLS: "32",
   ENRICH_MAX_ELAPSED_MS: "2400000",
   ENRICH_MAX_ERROR_RATE: "0.25",
-  ENRICH_MAX_COST_USD: "2",
+  ENRICH_MAX_COST_USD: "10",
   ENRICH_MAX_COST_PER_CALL_USD: "0.25",
   ENRICH_INPUT_TOKEN_USD: "0.0000014",
   ENRICH_OUTPUT_TOKEN_USD: "0.0000044",
@@ -431,6 +431,7 @@ export async function runEnrichmentCanary(
     pollIntervalMs?: number;
     receiptTimeoutMs?: number;
     resumeJobId?: string;
+    approvedCostCeilingUsd?: number;
   } = {},
 ): Promise<EnrichmentCanaryResult> {
   const inspection = await inspectEnrichmentJob(client, desired);
@@ -442,9 +443,15 @@ export async function runEnrichmentCanary(
     throw new Error("The recovery canary requires a suspended schedule.");
   }
   const hardCeilingUsd = canaryHardCeilingUsd(desired);
-  if (hardCeilingUsd >= 5) {
+  const approvedCostCeilingUsd = options.approvedCostCeilingUsd;
+  const approved =
+    approvedCostCeilingUsd !== undefined &&
+    Number.isFinite(approvedCostCeilingUsd) &&
+    approvedCostCeilingUsd > 0 &&
+    approvedCostCeilingUsd >= hardCeilingUsd;
+  if (hardCeilingUsd >= 5 && !approved) {
     throw new Error(
-      `The two-run canary hard ceiling is $${hardCeilingUsd.toFixed(2)}, which requires explicit paid-run approval.`,
+      `The two-run canary hard ceiling is $${hardCeilingUsd.toFixed(2)}. Pass an explicit approved cost ceiling at or above that value.`,
     );
   }
   const first =

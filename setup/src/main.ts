@@ -32,6 +32,9 @@ try {
       ...(command.resumeCanaryJobId === undefined
         ? {}
         : { resumeCanaryJobId: command.resumeCanaryJobId }),
+      ...(command.approvedCostCeilingUsd === undefined
+        ? {}
+        : { approvedCostCeilingUsd: command.approvedCostCeilingUsd }),
       enableSchedule: command.enableSchedule,
     });
     if (report.summary.fail > 0) process.exitCode = 1;
