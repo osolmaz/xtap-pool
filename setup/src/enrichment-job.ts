@@ -108,7 +108,9 @@ export function minimumEnrichmentJobCostUsd(
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32 || perCall <= 0) {
     return undefined;
   }
-  return concurrency * perCall;
+  let minimum = 0;
+  for (let index = 0; index < concurrency; index += 1) minimum += perCall;
+  return minimum;
 }
 
 export function enrichmentJobCapacityError(
@@ -116,7 +118,7 @@ export function enrichmentJobCapacityError(
 ): string | undefined {
   const minimum = minimumEnrichmentJobCostUsd(variables);
   const configured = finiteNumber(variables.get("ENRICH_MAX_COST_USD") ?? "");
-  if (minimum === undefined || configured <= 0 || configured + 1e-12 >= minimum) return undefined;
+  if (minimum === undefined || configured <= 0 || configured >= minimum) return undefined;
   return `ENRICH_MAX_COST_USD must be at least ${String(minimum)} to admit the configured concurrent call wave.`;
 }
 
