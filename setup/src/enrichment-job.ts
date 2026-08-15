@@ -100,6 +100,26 @@ export function enrichmentJobVariableError(key: string, value: string): string |
   return issue?.message ?? "invalid bounded enrichment setting";
 }
 
+export function minimumEnrichmentJobCostUsd(
+  variables: ReadonlyMap<string, string>,
+): number | undefined {
+  const concurrency = finiteNumber(variables.get("ENRICH_MAX_CONCURRENT_CALLS") ?? "");
+  const perCall = finiteNumber(variables.get("ENRICH_MAX_COST_PER_CALL_USD") ?? "");
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32 || perCall <= 0) {
+    return undefined;
+  }
+  return concurrency * perCall;
+}
+
+export function enrichmentJobCapacityError(
+  variables: ReadonlyMap<string, string>,
+): string | undefined {
+  const minimum = minimumEnrichmentJobCostUsd(variables);
+  const configured = finiteNumber(variables.get("ENRICH_MAX_COST_USD") ?? "");
+  if (minimum === undefined || configured <= 0 || configured + 1e-12 >= minimum) return undefined;
+  return `ENRICH_MAX_COST_USD must be at least ${String(minimum)} to admit the configured concurrent call wave.`;
+}
+
 const stringMapSchema = z.record(z.string(), z.string());
 const jobWireShape = {
   spaceId: z.string().nullish(),
@@ -176,6 +196,8 @@ export async function desiredEnrichmentJob(
       Object.keys(jobVariablesSchema.shape).map((key) => [key, variables.get(key)]),
     ),
   );
+  const capacityError = enrichmentJobCapacityError(variables);
+  if (capacityError !== undefined) throw new Error(capacityError);
   const indexBucket = nonempty.parse(variables.get("INDEX_BUCKET"));
   const namespace = spaceRepo.split("/")[0];
   if (namespace === undefined || namespace.length === 0) {
