@@ -16,8 +16,19 @@ import {
 } from "./enrich-worker.js";
 import type { WorkerCeilings } from "./enrich-worker.js";
 
+export function remainingWorkerElapsedMs(
+  configuredMs: number | undefined,
+  commandStartedAtMs: number,
+  nowMs: number,
+): number | undefined {
+  return configuredMs === undefined
+    ? undefined
+    : Math.max(0, configuredMs - Math.max(0, nowMs - commandStartedAtMs));
+}
+
 /** Standalone production worker backed only by raw and index Buckets. */
 export async function runEnrichCommand(env: Record<string, string | undefined>): Promise<void> {
+  const commandStartedAtMs = Date.now();
   const config = loadConfig(env);
   if (!config.enrichEnabled) {
     console.error("[xtap-pool worker] ENRICH_ENABLED must be true to run the worker.");
@@ -75,7 +86,11 @@ export async function runEnrichCommand(env: Record<string, string | undefined>):
         }),
   });
   const ceilings: WorkerCeilings = {
-    maxElapsedMs: config.enrichMaxElapsedMs,
+    maxElapsedMs: remainingWorkerElapsedMs(
+      config.enrichMaxElapsedMs,
+      commandStartedAtMs,
+      Date.now(),
+    ),
     maxErrorRate: config.enrichMaxErrorRate,
     maxCostUsd: config.enrichMaxCostUsd,
     maxCostPerCallUsd: config.enrichMaxCostPerCallUsd,

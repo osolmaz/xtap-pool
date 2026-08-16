@@ -407,25 +407,30 @@ export class BucketLog {
     this.rememberText(path, content);
   }
 
-  // eslint-disable-next-line complexity -- Receipt replay filters nested segment operations and keeps the newest receipt.
   async hydrateMetadata(snapshot: BucketSnapshot): Promise<void> {
-    this.lastReceipt = undefined;
-    for (const file of snapshot.files) {
-      if (!file.key.includes("/receipt/") && !file.key.includes("/mixed/")) continue;
+    this.lastReceipt = await this.latestReceiptInFiles(
+      snapshot.files.filter((file) => file.key.includes("/receipt/")),
+    );
+    if (this.lastReceipt !== undefined) return;
+    // Historical workers could put receipts in mixed segments. Only pay for
+    // that full scan when no current receipt-category segment can restore the
+    // metadata directly.
+    this.lastReceipt = await this.latestReceiptInFiles(
+      snapshot.files.filter((file) => file.key.includes("/mixed/")),
+    );
+  }
+
+  private async latestReceiptInFiles(
+    files: readonly BucketSnapshotFile[],
+  ): Promise<EnrichReceipt | undefined> {
+    let latest: EnrichReceipt | undefined;
+    for (const file of files) {
       const segment = await this.loadSegment(file);
-      for (const operation of segment.operations) {
-        if (operation.mode !== "append" || sourceKind(operation.path) !== "receipt") continue;
-        for (const line of operation.lines) {
-          const receipt = parseEnrichReceipt(JSON.parse(line) as unknown);
-          if (
-            receipt !== undefined &&
-            (this.lastReceipt === undefined || receipt.finished_at > this.lastReceipt.finished_at)
-          ) {
-            this.lastReceipt = receipt;
-          }
-        }
+      for (const receipt of receiptsInSegment(segment)) {
+        if (latest === undefined || receipt.finished_at > latest.finished_at) latest = receipt;
       }
     }
+    return latest;
   }
 
   applySegment(segment: BucketSegment, store: TweetStore, enrich: EnrichStore): SourceCounts {

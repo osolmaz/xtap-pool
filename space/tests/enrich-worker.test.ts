@@ -51,6 +51,12 @@ function seedUnit(id: string, text: string, username = "someone"): string {
   return `${id}:${username}`;
 }
 
+function recordCandidate(name: string): void {
+  const event = enrichStore.candidateEventIfNew(name).event;
+  if (event === undefined) throw new Error(`expected new candidate: ${name}`);
+  enrichStore.applyRegistryEvent(event);
+}
+
 function respondingClient(
   reply: (unitIds: string[], texts: Map<string, string>) => string,
   captured?: LlmMessage[][],
@@ -769,6 +775,129 @@ describe("runEnrichTick", () => {
     expect(receipt).toMatchObject({ units: 0, new_approvals: 1 });
     const receiptShard = log.files.get("enrichment/receipts/2026-07-06.jsonl") ?? "";
     expect(receiptShard).toContain('"new_approvals":1');
+  });
+
+  it("verifies Hub candidates concurrently and commits decisions in name order", async () => {
+    recordCandidate("alpha-model");
+    recordCandidate("beta-model");
+    recordCandidate("gamma-model");
+    const resolveChecks: (() => void)[] = [];
+    const verifyHubLabel = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveChecks.push(() => {
+            resolve(true);
+          });
+        }),
+    );
+
+    const running = runEnrichTick(
+      deps(respondingClient(withEvidence), { maxConcurrentCalls: 3, verifyHubLabel }),
+    );
+    await vi.waitFor(() => {
+      expect(resolveChecks).toHaveLength(3);
+    });
+    for (const resolve of resolveChecks.reverse()) resolve();
+
+    const receipt = await running;
+    expect(receipt.registry_scan).toMatchObject({ scanned: 3, total: 3, complete: true });
+    expect(receipt.new_approvals).toBe(3);
+    const events = (log.files.get("enrichment/registry/2026/07/registry-2026-07-06.jsonl") ?? "")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { name: string });
+    expect(events.map((event) => event.name)).toEqual(["alpha-model", "beta-model", "gamma-model"]);
+  });
+
+  it("saves an incomplete registry cursor and resumes after its last durable candidate", async () => {
+    recordCandidate("alpha-model");
+    recordCandidate("beta-model");
+    recordCandidate("gamma-model");
+    let elapsedMs = 0;
+    const firstChecks: string[] = [];
+    const first = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxConcurrentCalls: 1,
+        now: () => new Date(NOW.getTime() + elapsedMs),
+        ceilings: { maxElapsedMs: 5 },
+        verifyHubLabel: (name) => {
+          firstChecks.push(name);
+          elapsedMs += 10;
+          return Promise.resolve(true);
+        },
+      }),
+    );
+    expect(firstChecks).toEqual(["alpha-model"]);
+    expect(first).toMatchObject({
+      stopped_by: "max_elapsed",
+      new_approvals: 1,
+      registry_scan: { after_name: "alpha-model", scanned: 1, total: 3, complete: false },
+    });
+    expect(enrichStore.registryStatus("alpha-model")).toBe("approved");
+    log.receipt = first;
+
+    const resumedChecks: string[] = [];
+    const resumed = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxConcurrentCalls: 1,
+        verifyHubLabel: (name) => {
+          resumedChecks.push(name);
+          return Promise.resolve(true);
+        },
+      }),
+    );
+    expect(resumedChecks).toEqual(["beta-model", "gamma-model"]);
+    expect(resumed.registry_scan).toEqual({
+      after_name: "gamma-model",
+      scanned: 3,
+      total: 3,
+      complete: true,
+    });
+  });
+
+  it("starts a fresh registry scan after new enrichment work", async () => {
+    recordCandidate("beta-model");
+    log.receipt = {
+      started_at: "2026-07-06T10:00:00.000Z",
+      finished_at: "2026-07-06T11:00:00.000Z",
+      units: 0,
+      calls: 0,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cost_usd: 0,
+      failures: 0,
+      retries: 0,
+      blocked: 0,
+      contract_hash: CONTRACT_HASH,
+      worker_id: "prior-worker",
+      discarded_assignments: 0,
+      new_candidates: 0,
+      new_approvals: 0,
+      new_rejections: 0,
+      registry_scan: { after_name: "zeta-model", scanned: 4, total: 8, complete: false },
+    };
+    seedUnit("100", "new post");
+    const checked: string[] = [];
+    const emptyLabels = respondingClient((unitIds) =>
+      JSON.stringify({
+        units: Object.fromEntries(
+          unitIds.map((unitId) => [unitId, { preset_labels: [], free_labels: [] }]),
+        ),
+      }),
+    );
+
+    const receipt = await runEnrichTick(
+      deps(emptyLabels, {
+        verifyHubLabel: (name) => {
+          checked.push(name);
+          return Promise.resolve(false);
+        },
+      }),
+    );
+
+    expect(receipt.units).toBe(1);
+    expect(checked).toEqual(["beta-model"]);
+    expect(receipt.registry_scan).toMatchObject({ scanned: 1, total: 1, complete: true });
   });
 
   it("meters a constrained registry review and applies its exact verdict", async () => {
