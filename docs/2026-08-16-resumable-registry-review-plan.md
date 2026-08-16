@@ -37,7 +37,7 @@ The change covers receipt metadata, receipt replay, registry settlement, worker 
 
 1. Add optional registry-scan progress to the receipt schema. The progress records the last fully reviewed candidate, the number scanned, the candidate count, and whether the scan completed.
 2. Persist and apply collected registry decisions before any bounded stop. A continuation resumes after the last durable candidate only when the current run processed no new enrichment units.
-3. Restore the latest valid receipt from receipt-category segments. Scan mixed segments only as a legacy fallback when no receipt-category segment contains a current receipt.
+3. Restore the latest valid receipt from receipt-category segments, then inspect only mixed segments that are not older than the selected receipt segment. This preserves newer historical mixed receipts without downloading thousands of older mixed segments.
 4. Run pure Hub verification in bounded parallel. Settle decisions and write registry events in deterministic candidate-name order.
 5. Start the elapsed-time clock before index restoration. Pass only the remaining budget to enrichment processing. This preserves the configured gap between the worker limit and the platform timeout for receipt and index publication.
 6. Keep old receipt rows readable by making the new progress field optional.
@@ -49,7 +49,7 @@ The change covers receipt metadata, receipt replay, registry settlement, worker 
 - Decisions found before a ceiling are durable and replay correctly.
 - A run that processes new units starts a fresh registry scan.
 - A complete registry scan marks the receipt complete.
-- Index restoration reads the latest receipt without scanning all current mixed segments.
+- Index restoration reads the latest receipt without scanning mixed segments older than the selected receipt segment.
 - Restore time reduces the remaining worker processing budget.
 - Existing receipt fixtures and historical rows remain valid.
 - Repository checks, targeted tests, Pi Reviewer, and CI pass.
