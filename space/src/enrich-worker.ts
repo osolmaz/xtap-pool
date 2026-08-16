@@ -1371,6 +1371,8 @@ async function settleRegistryDecisions(
     );
 
     for (const [index, candidate] of wave.entries()) {
+      const candidateStopped = ceilingHit(receipt, deps.ceilings ?? {}, deps.now, startedAt);
+      if (candidateStopped !== undefined) return stop(candidateStopped);
       const { assignments, name, quotes, signals } = candidate;
       let event: FreeLabelEvent | undefined;
       if (candidate.stale) {
