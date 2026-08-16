@@ -234,6 +234,15 @@ export const enrichReceiptSchema = z
     provider_backoffs: z.number().int().nonnegative().optional(),
     reservation_peak_usd: z.number().nonnegative().optional(),
     commit_queue_peak: z.number().int().nonnegative().max(32).optional(),
+    registry_scan: z
+      .object({
+        after_name: z.string().min(1).optional(),
+        scanned: z.number().int().nonnegative(),
+        total: z.number().int().nonnegative(),
+        complete: z.boolean(),
+      })
+      .strict()
+      .optional(),
     stopped_by: z.string().min(1).optional(),
   })
   .strict();

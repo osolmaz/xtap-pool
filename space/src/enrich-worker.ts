@@ -615,7 +615,8 @@ function hasReceiptActivity(receipt: EnrichReceipt): boolean {
     receipt.units > 0 ||
     receipt.new_candidates > 0 ||
     receipt.new_approvals > 0 ||
-    receipt.new_rejections > 0
+    receipt.new_rejections > 0 ||
+    receipt.registry_scan !== undefined
   );
 }
 
@@ -1299,73 +1300,138 @@ async function persistRowsAndEvents(
  * constrained review are injected so this module never reaches for ambient
  * credentials or turns a reviewer into another label generator.
  */
-// eslint-disable-next-line complexity -- Registry settlement applies all promotion, rejection, review, evidence, and ceiling rules together.
+type RegistryCandidate = {
+  name: string;
+  assignments: readonly LabelAssignment[];
+  quotes: readonly FreeLabelEvent["quotes"][number][];
+  signals: ReturnType<EnrichStore["promotionSignals"]>;
+  stale: boolean;
+  appearsInEvidence: boolean;
+};
+
+// eslint-disable-next-line complexity -- Registry settlement applies all promotion, rejection, review, evidence, cursor, concurrency, and ceiling rules together.
 async function settleRegistryDecisions(
   deps: EnrichWorkerDeps,
   receipt: EnrichReceipt,
 ): Promise<string | undefined> {
-  const decisions: FreeLabelEvent[] = [];
-  for (const name of deps.enrichStore.candidateNames()) {
-    const stopped = ceilingHit(
-      receipt,
-      deps.ceilings ?? {},
-      deps.now,
-      receipt.started_at ? Date.parse(receipt.started_at) : deps.now().getTime(),
+  const previous = deps.log.latestReceipt();
+  const canResume =
+    receipt.units === 0 &&
+    receipt.new_candidates === 0 &&
+    previous?.contract_hash === receipt.contract_hash &&
+    previous.registry_scan?.complete === false;
+  const previousScan = canResume ? previous.registry_scan : undefined;
+  const allNames = deps.enrichStore.candidateNames();
+  const resumeAfter = previousScan?.after_name;
+  const names =
+    resumeAfter === undefined ? allNames : allNames.filter((name) => name > resumeAfter);
+  const scannedBase = previousScan?.scanned ?? 0;
+  const total = Math.max(previousScan?.total ?? 0, scannedBase + names.length);
+  let scanned = scannedBase;
+  let afterName = previousScan?.after_name;
+  let decisions: FreeLabelEvent[] = [];
+  const startedAt = Date.parse(receipt.started_at);
+  const concurrency = configuredConcurrency(deps.maxConcurrentCalls);
+  const recordProgress =
+    previousScan !== undefined ||
+    deps.verifyHubLabel !== undefined ||
+    deps.judgeFreeLabel !== undefined;
+
+  const stop = async (reason: string): Promise<string> => {
+    await persistRegistryDecisions(deps, receipt, decisions);
+    decisions = [];
+    if (recordProgress) {
+      receipt.registry_scan = {
+        ...(afterName === undefined ? {} : { after_name: afterName }),
+        scanned,
+        total,
+        complete: false,
+      };
+    }
+    return reason;
+  };
+
+  for (let start = 0; start < names.length; start += concurrency) {
+    const stopped = ceilingHit(receipt, deps.ceilings ?? {}, deps.now, startedAt);
+    if (stopped !== undefined) return stop(stopped);
+    const wave: RegistryCandidate[] = names.slice(start, start + concurrency).map((name) => ({
+      name,
+      assignments: deps.enrichStore.candidateAssignments(name),
+      quotes: deps.enrichStore.candidateDetail(name)?.representative_quotes ?? [],
+      signals: deps.enrichStore.promotionSignals(name),
+      stale: deps.enrichStore.candidateAgeDays(name) >= 30,
+      appearsInEvidence: deps.enrichStore.nameAppearsInEvidence(name),
+    }));
+    const hubVerified = await Promise.all(
+      wave.map((candidate) =>
+        !candidate.stale && !candidate.appearsInEvidence && deps.verifyHubLabel !== undefined
+          ? deps.verifyHubLabel(candidate.name, candidate.assignments)
+          : Promise.resolve(false),
+      ),
     );
-    if (stopped !== undefined) return stopped;
-    const signals = deps.enrichStore.promotionSignals(name);
-    const assignments = deps.enrichStore.candidateAssignments(name);
-    const eventQuotes = deps.enrichStore.candidateDetail(name)?.representative_quotes ?? [];
-    if (deps.enrichStore.candidateAgeDays(name) >= 30) {
-      const event = deps.enrichStore.rejectionEvent(name, "stale-below-threshold", eventQuotes);
-      if (event !== undefined) decisions.push({ ...event, counts: signals });
-      continue;
-    }
-    if (deps.enrichStore.nameAppearsInEvidence(name)) {
-      if (signals.units >= 5 && signals.authors >= 3 && signals.days >= 2) {
-        const event = deps.enrichStore.promotionEvent(
+
+    for (const [index, candidate] of wave.entries()) {
+      const { assignments, name, quotes, signals } = candidate;
+      let event: FreeLabelEvent | undefined;
+      if (candidate.stale) {
+        event = deps.enrichStore.rejectionEvent(name, "stale-below-threshold", quotes);
+      } else if (candidate.appearsInEvidence) {
+        if (signals.units >= 5 && signals.authors >= 3 && signals.days >= 2) {
+          event = deps.enrichStore.promotionEvent(name, "surface-evidence-threshold", quotes);
+        }
+      } else if (hubVerified[index] === true) {
+        event = deps.enrichStore.promotionEvent(name, "verified-hub-reference", quotes);
+      } else if (
+        signals.units >= 15 &&
+        signals.authors >= 8 &&
+        signals.days >= 2 &&
+        deps.judgeFreeLabel !== undefined
+      ) {
+        const costStopped = costCallPreflight(receipt, deps.ceilings ?? {});
+        if (costStopped !== undefined) return stop(costStopped);
+        const reviewed = await deps.judgeFreeLabel(
           name,
-          "surface-evidence-threshold",
-          eventQuotes,
+          assignments.flatMap((assignment) => assignment.evidence).slice(0, 20),
         );
-        if (event !== undefined) decisions.push({ ...event, counts: signals });
+        if (typeof reviewed === "object" && reviewed.stopped_by !== undefined) {
+          return stop(reviewed.stopped_by);
+        }
+        const verdict = recordReviewUsage(receipt, reviewed, deps.ceilings);
+        if (deps.ceilings?.maxCostUsd !== undefined && receipt.cost_usd === undefined) {
+          return stop("cost_unmeasured");
+        }
+        event =
+          verdict === true
+            ? deps.enrichStore.promotionEvent(name, "constrained-review-approved", quotes)
+            : verdict === false
+              ? deps.enrichStore.rejectionEvent(name, "constrained-review-rejected", quotes)
+              : undefined;
       }
-      continue;
-    }
-    if (deps.verifyHubLabel !== undefined && (await deps.verifyHubLabel(name, assignments))) {
-      const event = deps.enrichStore.promotionEvent(name, "verified-hub-reference", eventQuotes);
       if (event !== undefined) decisions.push({ ...event, counts: signals });
-      continue;
+      scanned += 1;
+      afterName = name;
     }
-    if (
-      signals.units >= 15 &&
-      signals.authors >= 8 &&
-      signals.days >= 2 &&
-      deps.judgeFreeLabel !== undefined
-    ) {
-      const costStopped = costCallPreflight(receipt, deps.ceilings ?? {});
-      if (costStopped !== undefined) return costStopped;
-      const reviewed = await deps.judgeFreeLabel(
-        name,
-        assignments.flatMap((assignment) => assignment.evidence).slice(0, 20),
-      );
-      if (typeof reviewed === "object" && reviewed.stopped_by !== undefined) {
-        return reviewed.stopped_by;
-      }
-      const verdict = recordReviewUsage(receipt, reviewed, deps.ceilings);
-      if (deps.ceilings?.maxCostUsd !== undefined && receipt.cost_usd === undefined) {
-        return "cost_unmeasured";
-      }
-      const event =
-        verdict === true
-          ? deps.enrichStore.promotionEvent(name, "constrained-review-approved", eventQuotes)
-          : verdict === false
-            ? deps.enrichStore.rejectionEvent(name, "constrained-review-rejected", eventQuotes)
-            : undefined;
-      if (event !== undefined) decisions.push({ ...event, counts: signals });
-    }
+    await persistRegistryDecisions(deps, receipt, decisions);
+    decisions = [];
   }
-  if (decisions.length === 0) return undefined;
+
+  if (recordProgress && (names.length > 0 || previousScan !== undefined)) {
+    receipt.registry_scan = {
+      ...(afterName === undefined ? {} : { after_name: afterName }),
+      scanned,
+      total,
+      complete: true,
+    };
+  }
+  return undefined;
+}
+
+async function persistRegistryDecisions(
+  deps: EnrichWorkerDeps,
+  receipt: EnrichReceipt,
+  decisions: readonly FreeLabelEvent[],
+): Promise<void> {
+  if (decisions.length === 0) return;
   const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
   await lock(async () => {
     const stamped = stampRegistryEvents(deps, decisions);
@@ -1374,7 +1440,6 @@ async function settleRegistryDecisions(
   });
   receipt.new_approvals += decisions.filter((event) => event.status === "approved").length;
   receipt.new_rejections += decisions.filter((event) => event.status === "rejected").length;
-  return undefined;
 }
 
 function recordReviewUsage(

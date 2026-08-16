@@ -141,6 +141,18 @@ describe("enrichReceiptSchema", () => {
 
   it("accepts only the current durable receipt contract", () => {
     expect(enrichReceiptSchema.safeParse(receipt).success).toBe(true);
+    expect(
+      enrichReceiptSchema.safeParse({
+        ...receipt,
+        registry_scan: { after_name: "vllm", scanned: 12, total: 20, complete: false },
+      }).success,
+    ).toBe(true);
+    expect(
+      enrichReceiptSchema.safeParse({
+        ...receipt,
+        registry_scan: { after_name: "", scanned: 12, total: 20, complete: false },
+      }).success,
+    ).toBe(false);
     expect(enrichReceiptSchema.safeParse({ ...receipt, unexpected: true }).success).toBe(false);
     expect(enrichReceiptSchema.safeParse({ ...receipt, finished_at: "not-a-date" }).success).toBe(
       false,

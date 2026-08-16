@@ -28,6 +28,7 @@ const gzipAsync = promisify(gzip);
 
 class MemoryBucket implements RawBucketClient {
   readonly files = new Map<string, Uint8Array>();
+  readonly downloads: string[] = [];
   failUpload = false;
 
   async list(prefix: string): Promise<readonly BucketObject[]> {
@@ -37,6 +38,7 @@ class MemoryBucket implements RawBucketClient {
   }
 
   async download(key: string): Promise<Uint8Array | undefined> {
+    this.downloads.push(key);
     const content = this.files.get(key);
     return content === undefined ? undefined : new Uint8Array(content);
   }
@@ -362,15 +364,21 @@ describe("BucketLog", () => {
     ).rejects.toThrow("invalid JSON");
   });
 
-  it("replays receipt metadata and applies normalized tweets", async () => {
+  it("replays receipt metadata without scanning mixed segments", async () => {
     const state = log();
     await state.log.commitBatch(
       [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
       [],
     );
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [{ path: "config/pool.json", content: "mixed" }],
+    );
     const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
     await state.log.hydrateMetadata(snapshot);
     expect(state.log.latestReceipt()?.worker_id).toBe("worker-1");
+    expect(state.bucket.downloads.some((key) => key.includes("/mixed/"))).toBe(false);
 
     const tweet = makePooled({ id: "55", contributed_by: "alice" });
     const retained = makePooled({ id: "56", contributed_by: "bob" });
@@ -383,6 +391,21 @@ describe("BucketLog", () => {
       { id: "56", contributed_by: "bob", pooled_at: retained.pooled_at },
     ]);
     expect(readCachedText("/missing", "config/pool.json")).toBeUndefined();
+  });
+
+  it("uses mixed segments as a legacy receipt fallback", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
+      [{ path: "config/pool.json", content: "mixed" }],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+
+    await state.log.hydrateMetadata(snapshot);
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("worker-1");
+    expect(state.bucket.downloads.some((key) => key.includes("/mixed/"))).toBe(true);
   });
 
   it("rejects invalid segment identities and cache escapes", async () => {
