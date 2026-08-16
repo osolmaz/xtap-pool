@@ -1332,7 +1332,7 @@ async function settleRegistryDecisions(
   let decisions: FreeLabelEvent[] = [];
   const startedAt = Date.parse(receipt.started_at);
   const concurrency = configuredConcurrency(deps.maxConcurrentCalls);
-  const recordProgress =
+  const recordCompletedProgress =
     previousScan !== undefined ||
     deps.verifyHubLabel !== undefined ||
     deps.judgeFreeLabel !== undefined;
@@ -1340,14 +1340,12 @@ async function settleRegistryDecisions(
   const stop = async (reason: string): Promise<string> => {
     await persistRegistryDecisions(deps, receipt, decisions);
     decisions = [];
-    if (recordProgress) {
-      receipt.registry_scan = {
-        ...(afterName === undefined ? {} : { after_name: afterName }),
-        scanned,
-        total,
-        complete: false,
-      };
-    }
+    receipt.registry_scan = {
+      ...(afterName === undefined ? {} : { after_name: afterName }),
+      scanned,
+      total,
+      complete: false,
+    };
     return reason;
   };
 
@@ -1417,7 +1415,7 @@ async function settleRegistryDecisions(
     decisions = [];
   }
 
-  if (recordProgress && (names.length > 0 || previousScan !== undefined)) {
+  if (recordCompletedProgress && (names.length > 0 || previousScan !== undefined)) {
     receipt.registry_scan = {
       ...(afterName === undefined ? {} : { after_name: afterName }),
       scanned,
