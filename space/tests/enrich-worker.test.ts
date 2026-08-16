@@ -57,6 +57,41 @@ function recordCandidate(name: string): void {
   enrichStore.applyRegistryEvent(event);
 }
 
+function seedReviewCandidates(
+  names: readonly string[],
+  initialCandidates: readonly string[] = names,
+): void {
+  const tweets = Array.from({ length: 15 }, (_, index) =>
+    makePooled({
+      id: String(200 + index),
+      text: "specific model evidence",
+      author: { id: `author-${String(index % 8)}`, username: `author-${String(index % 8)}` },
+      captured_at: `2026-07-0${String(index < 8 ? 5 : 6)}T12:00:00.000Z`,
+    }),
+  );
+  store.insert(tweets);
+  enrichStore.registerTweets(tweets);
+  for (const tweet of tweets) {
+    const unitId = `${tweet.id}:${tweet.author.username}`;
+    const members = enrichStore.unitSemanticMembers(unitId);
+    enrichStore.applyEnrichment({
+      unit_id: unitId,
+      tweet_ids: [tweet.id],
+      input_hash: computeInputHash(unitId, members),
+      contract_hash: CONTRACT_HASH,
+      preset_labels: [],
+      free_labels: names.map((name) => ({
+        name,
+        evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
+      })),
+      model: "test-model",
+      taxonomy_version: 1,
+      enriched_at: NOW.toISOString(),
+    });
+  }
+  for (const name of initialCandidates) recordCandidate(name);
+}
+
 function respondingClient(
   reply: (unitIds: string[], texts: Map<string, string>) => string,
   captured?: LlmMessage[][],
@@ -819,7 +854,7 @@ describe("runEnrichTick", () => {
       deps(respondingClient(withEvidence), {
         maxConcurrentCalls: 1,
         now: () => new Date(NOW.getTime() + elapsedMs),
-        ceilings: { maxElapsedMs: 5 },
+        ceilings: { maxElapsedMs: 15 },
         verifyHubLabel: (name) => {
           firstChecks.push(name);
           elapsedMs += 10;
@@ -827,7 +862,7 @@ describe("runEnrichTick", () => {
         },
       }),
     );
-    expect(firstChecks).toEqual(["alpha-model"]);
+    expect(firstChecks).toEqual(["alpha-model", "beta-model"]);
     expect(first).toMatchObject({
       stopped_by: "max_elapsed",
       new_approvals: 1,
@@ -901,50 +936,10 @@ describe("runEnrichTick", () => {
   });
 
   it("meters a constrained registry review and applies its exact verdict", async () => {
-    const tweets = Array.from({ length: 15 }, (_, index) =>
-      makePooled({
-        id: String(200 + index),
-        text: "specific model evidence",
-        author: { id: `author-${String(index % 8)}`, username: `author-${String(index % 8)}` },
-        captured_at: `2026-07-0${String(index < 8 ? 5 : 6)}T12:00:00.000Z`,
-      }),
+    seedReviewCandidates(
+      ["opaque-subject", "opaque-subject-rejected", "opaque-subject-unknown-cost"],
+      ["opaque-subject", "opaque-subject-rejected"],
     );
-    store.insert(tweets);
-    enrichStore.registerTweets(tweets);
-    for (const tweet of tweets) {
-      const unitId = `${tweet.id}:${tweet.author.username}`;
-      const members = enrichStore.unitSemanticMembers(unitId);
-      enrichStore.applyEnrichment({
-        unit_id: unitId,
-        tweet_ids: [tweet.id],
-        input_hash: computeInputHash(unitId, members),
-        contract_hash: CONTRACT_HASH,
-        preset_labels: [],
-        free_labels: [
-          {
-            name: "opaque-subject",
-            evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
-          },
-          {
-            name: "opaque-subject-rejected",
-            evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
-          },
-          {
-            name: "opaque-subject-unknown-cost",
-            evidence: [{ tweet_id: tweet.id, quote: "specific model evidence" }],
-          },
-        ],
-        model: "test-model",
-        taxonomy_version: 1,
-        enriched_at: NOW.toISOString(),
-      });
-    }
-    const candidate = enrichStore.candidateEventIfNew("opaque-subject").event;
-    if (candidate === undefined) throw new Error("expected candidate");
-    enrichStore.applyRegistryEvent(candidate);
-    const rejectedCandidate = enrichStore.candidateEventIfNew("opaque-subject-rejected").event;
-    if (rejectedCandidate === undefined) throw new Error("expected rejected candidate");
-    enrichStore.applyRegistryEvent(rejectedCandidate);
     expect(enrichStore.promotionSignals("opaque-subject")).toEqual({
       units: 15,
       authors: 8,
@@ -971,9 +966,7 @@ describe("runEnrichTick", () => {
     expect(enrichStore.registryStatus("opaque-subject")).toBe("approved");
     expect(enrichStore.registryStatus("opaque-subject-rejected")).toBe("rejected");
 
-    const unknownCost = enrichStore.candidateEventIfNew("opaque-subject-unknown-cost").event;
-    if (unknownCost === undefined) throw new Error("expected unknown-cost candidate");
-    enrichStore.applyRegistryEvent(unknownCost);
+    recordCandidate("opaque-subject-unknown-cost");
     const unmeasured = await runEnrichTick(
       deps(respondingClient(withEvidence), {
         judgeFreeLabel: () =>
@@ -986,6 +979,37 @@ describe("runEnrichTick", () => {
       cost_usd: undefined,
       stopped_by: "cost_unmeasured",
     });
+  });
+
+  it("checks elapsed time between serial constrained reviews", async () => {
+    seedReviewCandidates(["alpha-opaque", "beta-opaque"]);
+    let elapsedMs = 0;
+    const reviewed: string[] = [];
+
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxConcurrentCalls: 2,
+        now: () => new Date(NOW.getTime() + elapsedMs),
+        ceilings: { maxElapsedMs: 5 },
+        judgeFreeLabel: (name) => {
+          reviewed.push(name);
+          elapsedMs += 10;
+          return Promise.resolve({
+            verdict: true,
+            usage: { prompt_tokens: 4, completion_tokens: 2, cost_usd: 0.03 },
+          });
+        },
+      }),
+    );
+
+    expect(reviewed).toEqual(["alpha-opaque"]);
+    expect(receipt).toMatchObject({
+      stopped_by: "max_elapsed",
+      new_approvals: 1,
+      registry_scan: { after_name: "alpha-opaque", scanned: 1, total: 2, complete: false },
+    });
+    expect(enrichStore.registryStatus("alpha-opaque")).toBe("approved");
+    expect(enrichStore.registryStatus("beta-opaque")).toBe("candidate");
   });
 
   it("assigns strictly increasing registry revisions to multiple discoveries in one batch", async () => {
