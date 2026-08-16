@@ -364,15 +364,15 @@ describe("BucketLog", () => {
     ).rejects.toThrow("invalid JSON");
   });
 
-  it("replays receipt metadata without scanning mixed segments", async () => {
+  it("replays receipt metadata without scanning older mixed segments", async () => {
     const state = log();
-    await state.log.commitBatch(
-      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
-      [],
-    );
     await state.log.commitBatch(
       [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
       [{ path: "config/pool.json", content: "mixed" }],
+    );
+    await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
+      [],
     );
     const { snapshot } = await state.log.createSnapshot();
     state.bucket.downloads.length = 0;
@@ -391,6 +391,35 @@ describe("BucketLog", () => {
       { id: "56", contributed_by: "bob", pooled_at: retained.pooled_at },
     ]);
     expect(readCachedText("/missing", "config/pool.json")).toBeUndefined();
+  });
+
+  it("selects a newer current receipt from a mixed segment", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [currentReceipt("older-worker", "2026-08-12T12:01:00.000Z")],
+        },
+      ],
+      [],
+    );
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [currentReceipt("newer-worker", "2026-08-12T12:36:00.000Z")],
+        },
+      ],
+      [{ path: "config/pool.json", content: "mixed" }],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+
+    await state.log.hydrateMetadata(snapshot);
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("newer-worker");
+    expect(state.bucket.downloads.some((key) => key.includes("/mixed/"))).toBe(true);
   });
 
   it("uses mixed segments as a legacy receipt fallback", async () => {
@@ -516,10 +545,10 @@ describe("BucketLog", () => {
   });
 });
 
-function currentReceipt(): string {
+function currentReceipt(workerId = "worker-1", finishedAt = "2026-08-12T12:01:00.000Z"): string {
   return JSON.stringify({
     started_at: "2026-08-12T12:00:00.000Z",
-    finished_at: "2026-08-12T12:01:00.000Z",
+    finished_at: finishedAt,
     units: 1,
     calls: 1,
     prompt_tokens: 1,
@@ -529,7 +558,7 @@ function currentReceipt(): string {
     retries: 0,
     blocked: 0,
     contract_hash: "contract",
-    worker_id: "worker-1",
+    worker_id: workerId,
     discarded_assignments: 0,
     new_candidates: 0,
     new_approvals: 0,

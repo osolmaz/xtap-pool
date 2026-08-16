@@ -101,6 +101,8 @@ export type SourceKind = "tweet" | "enrichment" | "attempt" | "registry" | "rece
 export type SourceCounts = Readonly<Record<SourceKind, number>>;
 export type BucketObject = { key: string; oid?: string; size: number };
 
+type ReceiptMetadata = { receipt: EnrichReceipt; segmentCreatedAtMs: number };
+
 export type RawBucketClient = {
   list(prefix: string): Promise<readonly BucketObject[]>;
   download(key: string): Promise<Uint8Array | undefined>;
@@ -408,26 +410,34 @@ export class BucketLog {
   }
 
   async hydrateMetadata(snapshot: BucketSnapshot): Promise<void> {
-    this.lastReceipt = await this.latestReceiptInFiles(
+    let latest = await this.latestReceiptInFiles(
       snapshot.files.filter((file) => file.key.includes("/receipt/")),
     );
-    if (this.lastReceipt !== undefined) return;
-    // Historical workers could put receipts in mixed segments. Only pay for
-    // that full scan when no current receipt-category segment can restore the
-    // metadata directly.
-    this.lastReceipt = await this.latestReceiptInFiles(
-      snapshot.files.filter((file) => file.key.includes("/mixed/")),
+    const mixedFiles = snapshot.files.filter(
+      (file) =>
+        file.key.includes("/mixed/") &&
+        (latest === undefined || segmentCreatedAtMs(file.key) >= latest.segmentCreatedAtMs),
     );
+    const mixedLatest = await this.latestReceiptInFiles(mixedFiles);
+    if (
+      mixedLatest !== undefined &&
+      (latest === undefined || mixedLatest.receipt.finished_at > latest.receipt.finished_at)
+    ) {
+      latest = mixedLatest;
+    }
+    this.lastReceipt = latest?.receipt;
   }
 
   private async latestReceiptInFiles(
     files: readonly BucketSnapshotFile[],
-  ): Promise<EnrichReceipt | undefined> {
-    let latest: EnrichReceipt | undefined;
+  ): Promise<ReceiptMetadata | undefined> {
+    let latest: ReceiptMetadata | undefined;
     for (const file of files) {
       const segment = await this.loadSegment(file);
       for (const receipt of receiptsInSegment(segment)) {
-        if (latest === undefined || receipt.finished_at > latest.finished_at) latest = receipt;
+        if (latest === undefined || receipt.finished_at > latest.receipt.finished_at) {
+          latest = { receipt, segmentCreatedAtMs: segmentCreatedAtMs(file.key) };
+        }
       }
     }
     return latest;
@@ -693,6 +703,13 @@ function assertConfigPath(path: string): void {
 }
 
 // eslint-disable-next-line complexity -- The key parser verifies all independent path and identity components.
+function segmentCreatedAtMs(key: string): number {
+  const match = SEGMENT_KEY.exec(key);
+  const value = match?.[5];
+  if (value === undefined) throw new Error(`invalid Bucket segment key: ${key}`);
+  return Number(value);
+}
+
 function segmentHash(key: string): string {
   const match = SEGMENT_KEY.exec(key);
   if (match === null) throw new Error(`invalid Bucket segment key: ${key}`);
