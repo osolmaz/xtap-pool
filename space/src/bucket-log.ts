@@ -702,7 +702,6 @@ function assertConfigPath(path: string): void {
   if (!CONFIG_PATHS.has(path)) throw new Error(`unsupported Bucket configuration path: ${path}`);
 }
 
-// eslint-disable-next-line complexity -- The key parser verifies all independent path and identity components.
 function segmentCreatedAtMs(key: string): number {
   const match = SEGMENT_KEY.exec(key);
   const value = match?.[5];
@@ -710,6 +709,7 @@ function segmentCreatedAtMs(key: string): number {
   return Number(value);
 }
 
+// eslint-disable-next-line complexity -- The key parser verifies all independent path and identity components.
 function segmentHash(key: string): string {
   const match = SEGMENT_KEY.exec(key);
   if (match === null) throw new Error(`invalid Bucket segment key: ${key}`);
