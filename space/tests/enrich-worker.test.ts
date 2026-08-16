@@ -890,6 +890,31 @@ describe("runEnrichTick", () => {
     });
   });
 
+  it("saves an interrupted local-only scan without optional review callbacks", async () => {
+    recordCandidate("alpha-model");
+    recordCandidate("beta-model");
+    let nowCalls = 0;
+
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        maxConcurrentCalls: 1,
+        now: () => {
+          nowCalls += 1;
+          return new Date(NOW.getTime() + (nowCalls >= 8 ? 10 : 0));
+        },
+        ceilings: { maxElapsedMs: 5 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({
+      stopped_by: "max_elapsed",
+      registry_scan: { after_name: "alpha-model", scanned: 1, total: 2, complete: false },
+    });
+    expect(log.files.get("enrichment/receipts/2026-07-06.jsonl")).toContain(
+      '"after_name":"alpha-model"',
+    );
+  });
+
   it("starts a fresh registry scan after new enrichment work", async () => {
     recordCandidate("beta-model");
     log.receipt = {
