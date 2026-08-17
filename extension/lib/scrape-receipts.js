@@ -83,6 +83,20 @@ export class ScrapeReceiptStore {
         return existing;
       }
       if (isRecoverableStop(existing.stopReason)) {
+        if (activeRuns.some((run) => run.sourceTabId === sourceTabId)) {
+          transaction.abort();
+          throw new ScrapeReceiptError(
+            'source-tab-active',
+            `source tab ${sourceTabId} already belongs to an active scrape run`,
+          );
+        }
+        if (activeRuns.length >= MAX_ACTIVE_RUNS) {
+          transaction.abort();
+          throw new ScrapeReceiptError(
+            'capacity-full',
+            'xTap already has four active scrape runs',
+          );
+        }
         delete existing.finishedAtMs;
         delete existing.stopReason;
         existing.sourceTabId = sourceTabId;
