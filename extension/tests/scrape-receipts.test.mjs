@@ -516,6 +516,7 @@ describe('ScrapeReceiptBridge', () => {
 
     accepted.receive({
       afterCursor: 0,
+      capabilities: ['run-leases'],
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
@@ -527,6 +528,34 @@ describe('ScrapeReceiptBridge', () => {
     assert.equal(accepted.sent.length, 0);
     clearGate();
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
+  });
+
+  it('rejects clients that cannot renew run leases', async () => {
+    const store = { async finishCutover() {} };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({ runtime, store });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+    accepted.receive({
+      afterCursor: 0,
+      listId: LIST_A,
+      protocolVersion: 1,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      startedAtMs: 1_000,
+      type: 'scrape:open',
+    });
+    await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:error'));
+    assert.deepEqual(
+      accepted.sent.find((message) => message.type === 'scrape:error'),
+      {
+        error: 'scrape client must support run leases',
+        errorCode: 'invalid-request',
+        protocolVersion: 1,
+        runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        type: 'scrape:error',
+      },
+    );
   });
 
   it('retries passive capture attachment before accepting or rejecting a run', async () => {
@@ -554,6 +583,7 @@ describe('ScrapeReceiptBridge', () => {
     bridge.accept(accepted.port);
     accepted.receive({
       afterCursor: 0,
+      capabilities: ['run-leases'],
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
@@ -582,6 +612,7 @@ describe('ScrapeReceiptBridge', () => {
     bridge.accept(accepted.port);
     accepted.receive({
       afterCursor: 0,
+      capabilities: ['run-leases'],
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
@@ -650,6 +681,7 @@ describe('ScrapeReceiptBridge', () => {
     bridge.accept(accepted.port);
     accepted.receive({
       afterCursor: 0,
+      capabilities: ['run-leases'],
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
@@ -683,6 +715,7 @@ describe('ScrapeReceiptBridge', () => {
     bridge.accept(accepted.port);
     accepted.receive({
       afterCursor: 0,
+      capabilities: ['run-leases'],
       listId: LIST_A,
       protocolVersion: 1,
       runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
