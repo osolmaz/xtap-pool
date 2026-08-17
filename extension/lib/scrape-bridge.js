@@ -111,6 +111,15 @@ export class ScrapeReceiptBridge {
         throw new Error('unsupported scrape protocol version');
       }
       if (message.type === 'scrape:open') {
+        if (
+          !Array.isArray(message.capabilities) ||
+          !message.capabilities.includes('run-leases')
+        ) {
+          throw new ScrapeReceiptError(
+            'invalid-request',
+            'scrape client must support run leases',
+          );
+        }
         connection.runId = message.runId;
         if (!(await this.ensureCapture(message.sourceTabId))) {
           throw new ScrapeReceiptError(
