@@ -28,6 +28,12 @@ import type { StorageLog } from "./bucket-log.js";
 import type { EnrichTaxonomy } from "./enrich-config.js";
 import type { EnrichStore, QueueItem } from "./enrich-store.js";
 import {
+  DeadlineExceededError,
+  readBoundedResponseText,
+  ResponseBodyTooLargeError,
+  withDeadline,
+} from "./fetch-deadline.js";
+import {
   HARD_REJECTED_NAMES,
   normalizeFreeLabelName,
   validateEvidenceQuotes,
@@ -35,6 +41,7 @@ import {
 } from "./free-label-rules.js";
 
 const ROUTER_URL = "https://router.huggingface.co/v1/chat/completions";
+const DEFAULT_ROUTER_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const PROMPT_TOKEN_OVERHEAD = 256;
 const DEFAULT_UNITS_PER_CALL = 6;
 const MAX_FREE_LABELS_PER_UNIT = 5;
@@ -77,56 +84,50 @@ export function createRouterLlmClient(options: {
   model: string;
   fetchFn?: typeof fetch;
   requestTimeoutMs?: number;
+  maxResponseBytes?: number;
   pricing?: LlmPricing;
 }): LlmClient {
   const fetchFn = options.fetchFn ?? fetch;
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_ROUTER_RESPONSE_MAX_BYTES;
   return async (
     messages: readonly LlmMessage[],
     callOptions?: LlmCallOptions,
   ): Promise<LlmResult> => {
-    const response = await fetchWithTimeout(fetchFn, options, messages, timeoutMs, callOptions);
-    return handleRouterResponse(response, options.pricing);
-  };
-}
-
-async function fetchWithTimeout(
-  fetchFn: typeof fetch,
-  options: { hfToken: string; model: string },
-  messages: readonly LlmMessage[],
-  timeoutMs: number,
-  callOptions?: LlmCallOptions,
-): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
-  try {
-    return await fetchFn(ROUTER_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${options.hfToken}`,
-      },
-      body: JSON.stringify({
-        model: options.model,
-        messages,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        ...(callOptions?.maxCompletionTokens === undefined
-          ? {}
-          : { max_tokens: callOptions.maxCompletionTokens }),
-      }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new RouterError("router request timed out", "timeout");
+    try {
+      return await withDeadline(timeoutMs, async (signal) => {
+        const response = await fetchFn(ROUTER_URL, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${options.hfToken}`,
+          },
+          body: JSON.stringify({
+            model: options.model,
+            messages,
+            temperature: 0,
+            response_format: { type: "json_object" },
+            ...(callOptions?.maxCompletionTokens === undefined
+              ? {}
+              : { max_tokens: callOptions.maxCompletionTokens }),
+          }),
+          signal,
+        });
+        return handleRouterResponse(response, options.pricing, maxResponseBytes);
+      });
+    } catch (error) {
+      if (
+        error instanceof DeadlineExceededError ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        throw new RouterError("router request timed out", "timeout");
+      }
+      if (error instanceof ResponseBodyTooLargeError) {
+        throw new RouterError(error.message, "invalid_output");
+      }
+      throw error;
     }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
+  };
 }
 
 function routerErrorClass(status: number): ErrorClass {
@@ -135,15 +136,29 @@ function routerErrorClass(status: number): ErrorClass {
   return "provider_4xx";
 }
 
-async function handleRouterResponse(response: Response, pricing?: LlmPricing): Promise<LlmResult> {
+async function handleRouterResponse(
+  response: Response,
+  pricing: LlmPricing | undefined,
+  maxResponseBytes: number,
+): Promise<LlmResult> {
+  const text = await readBoundedResponseText(response, maxResponseBytes);
   if (!response.ok) {
-    const detail = (await response.text()).slice(0, 300);
     throw new RouterError(
-      `router request failed (${String(response.status)}): ${detail}`,
+      `router request failed (${String(response.status)}): ${text.slice(0, 300)}`,
       routerErrorClass(response.status),
     );
   }
-  const parsed = routerResponseSchema.parse(await response.json());
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(text);
+  } catch {
+    throw new RouterError("router response was not valid JSON", "invalid_output");
+  }
+  const result = routerResponseSchema.safeParse(candidate);
+  if (!result.success) {
+    throw new RouterError("router response did not match the expected schema", "invalid_output");
+  }
+  const parsed = result.data;
   const cost = routerCost(parsed, pricing);
   return {
     content: parsed.choices[0]?.message.content ?? "",
@@ -190,6 +205,8 @@ export class RouterError extends Error {
 const reviewSchema = z.object({ decision: z.enum(["approve", "reject", "abstain"]) }).strict();
 const HUB_URL = /(?:https?:\/\/)?huggingface\.co\/(?:models\/|datasets\/)?([\w.-]+\/[\w.-]+)/giu;
 const HUB_VERIFY_TIMEOUT_MS = 5_000;
+const HUB_RESPONSE_MAX_BYTES = 256 * 1024;
+const hubResponseSchema = z.looseObject({ id: z.string().optional() });
 
 /**
  * Verify only an exact public Hub repository reference present in grounded
@@ -202,25 +219,28 @@ export function createExactHubVerifier(fetchFn: typeof fetch = fetch): HubVerifi
       .flatMap((evidence) => [...evidence.quote.matchAll(HUB_URL)].map((match) => match[1]))
       .find((candidate): candidate is string => candidate !== undefined);
     if (reference === undefined || normalizeHubReference(reference) !== name) return false;
-    const controller = new AbortController();
-    const timer = setTimeout(() => {
-      controller.abort();
-    }, HUB_VERIFY_TIMEOUT_MS);
     try {
-      for (const type of ["models", "datasets"]) {
-        const response = await fetchFn(`https://huggingface.co/api/${type}/${reference}`, {
-          signal: controller.signal,
-          redirect: "error",
-        });
-        if (!response.ok) continue;
-        const body = (await response.json()) as { id?: unknown };
-        return body.id === reference;
-      }
-      return false;
+      return await withDeadline(HUB_VERIFY_TIMEOUT_MS, async (signal) => {
+        for (const type of ["models", "datasets"]) {
+          const response = await fetchFn(`https://huggingface.co/api/${type}/${reference}`, {
+            signal,
+            redirect: "error",
+          });
+          if (!response.ok) continue;
+          const text = await readBoundedResponseText(response, HUB_RESPONSE_MAX_BYTES);
+          let candidate: unknown;
+          try {
+            candidate = JSON.parse(text);
+          } catch {
+            return false;
+          }
+          const body = hubResponseSchema.safeParse(candidate);
+          return body.success && body.data.id === reference;
+        }
+        return false;
+      });
     } catch {
       return false;
-    } finally {
-      clearTimeout(timer);
     }
   };
 }

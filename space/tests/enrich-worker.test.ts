@@ -180,6 +180,22 @@ function deps(llm: LlmClient, overrides: Partial<EnrichWorkerDeps> = {}): Enrich
   };
 }
 
+function stalledBodyFetch(status = 200): typeof fetch {
+  return (_input, init) => {
+    const signal = init?.signal;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const abort = (): void => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        };
+        if (signal?.aborted === true) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      },
+    });
+    return Promise.resolve(new Response(body, { status }));
+  };
+}
+
 describe("runEnrichTick", () => {
   it("drains the queue and settles the unit as done", async () => {
     const unitId = seedUnit("100", "vllm ships fp8 kernels");
@@ -295,6 +311,36 @@ describe("runEnrichTick", () => {
       failures: 2,
       cost_usd: 0.5,
       stopped_by: "max_cost_usd",
+    });
+  });
+
+  it("settles a stalled router body as a durable timeout failure", async () => {
+    const unitId = seedUnit("100", "stalled response body");
+    const model = createRouterLlmClient({
+      hfToken: "t",
+      model: "m",
+      fetchFn: stalledBodyFetch(),
+      requestTimeoutMs: 20,
+    });
+
+    const receipt = await runEnrichTick(
+      deps(model, {
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        ceilings: { maxCostUsd: 1, maxCostPerCallUsd: 0.25 },
+      }),
+    );
+
+    expect(receipt).toMatchObject({
+      calls: 1,
+      failures: 1,
+      cost_usd: 0.25,
+      reservation_peak_usd: 0.25,
+    });
+    expect(enrichStore.queueEntry(unitId)).toMatchObject({
+      status: "retrying",
+      attempts: 1,
+      lastError: "router request timed out",
     });
   });
 
@@ -1227,6 +1273,35 @@ describe("createRouterLlmClient", () => {
     await expect(
       createRouterLlmClient({ hfToken: "t", model: "m", fetchFn: aborted })([]),
     ).rejects.toMatchObject({ errorClass: "timeout" });
+  });
+
+  it("keeps the deadline active through success and error response bodies", async () => {
+    const success = createRouterLlmClient({
+      hfToken: "t",
+      model: "m",
+      fetchFn: stalledBodyFetch(),
+      requestTimeoutMs: 20,
+    });
+    const failure = createRouterLlmClient({
+      hfToken: "t",
+      model: "m",
+      fetchFn: stalledBodyFetch(500),
+      requestTimeoutMs: 20,
+    });
+
+    await expect(success([])).rejects.toMatchObject({ errorClass: "timeout" });
+    await expect(failure([])).rejects.toMatchObject({ errorClass: "timeout" });
+  });
+
+  it("rejects an oversized response body before parsing", async () => {
+    const client = createRouterLlmClient({
+      hfToken: "t",
+      model: "m",
+      fetchFn: () => Promise.resolve(new Response("123456789")),
+      maxResponseBytes: 8,
+    });
+
+    await expect(client([])).rejects.toMatchObject({ errorClass: "invalid_output" });
   });
 
   it("computes configured token pricing when the router omits a cost", async () => {

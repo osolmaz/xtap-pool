@@ -10,6 +10,8 @@ The enrichment worker must save useful work before a Hugging Face Job reaches it
 
 This plan makes registry review resume from a durable cursor and makes the worker's elapsed-time limit include index restoration. It also removes the full mixed-segment scan from normal index restoration so the steady 45-minute Job can start useful work quickly.
 
+A production recovery later exposed a second timeout gap. The router deadline ended when response headers arrived, before the worker read the response body. Three requests therefore stayed dispatched for more than 62 minutes despite a 90-second timeout. The worker must keep one deadline active through the full response body read and release reservations after a timeout.
+
 ## Requirements
 
 - Keep the current raw Bucket, index Bucket, model, provider, taxonomy, hardware class, and concurrency.
@@ -21,6 +23,9 @@ This plan makes registry review resume from a durable cursor and makes the worke
 - Restore the latest receipt without downloading every mixed segment.
 - Keep old receipts valid.
 - Keep one physical enrichment Job at a time.
+- Apply one router deadline to connection setup, response headers, the response body, and parsing.
+- Bound router response bodies before parsing them.
+- Record a timed-out body read as a normal timeout failure and clear its cost reservation.
 
 ## Scope
 
@@ -41,6 +46,8 @@ The change covers receipt metadata, receipt replay, registry settlement, worker 
 4. Run pure Hub verification in bounded parallel. Settle decisions and write registry events in deterministic candidate-name order.
 5. Start the elapsed-time clock before index restoration. Pass only the remaining budget to enrichment processing. This preserves the configured gap between the worker limit and the platform timeout for receipt and index publication.
 6. Keep old receipt rows readable by making the new progress field optional.
+7. Run each router exchange inside one reusable deadline helper. The helper owns the abort timer until the callback finishes, so callers cannot return a live response body after the deadline ends.
+8. Read success and error response bodies through a byte-limited reader while the deadline remains active. Map a deadline to the existing timeout error class and reject an oversized or malformed response without keeping the worker blocked.
 
 ## Acceptance criteria
 
@@ -55,6 +62,10 @@ The change covers receipt metadata, receipt replay, registry settlement, worker 
 - Repository checks, targeted tests, Pi Reviewer, and CI pass.
 - Catch-up completes within the approved $500 total budget.
 - Two steady canaries prove bounded continuation before schedule activation.
+- A router response that sends headers and then stalls its body fails within the configured deadline.
+- A stalled error body follows the same deadline.
+- An oversized router body fails before unbounded buffering.
+- A timed-out body read writes a durable timeout outcome, clears the cost reservation, and lets the worker finish its receipt.
 
 ## Verification
 
