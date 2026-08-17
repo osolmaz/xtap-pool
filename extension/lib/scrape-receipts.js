@@ -228,7 +228,7 @@ export class ScrapeReceiptStore {
 
     writeMeta(meta, META_SEQUENCE, sequence);
     if (run && emitted.length > 0) {
-      renewLease(run, observedAtMs);
+      run.updatedAtMs = observedAtMs;
       runs.put(run);
     }
     await transactionDone(transaction);

@@ -258,6 +258,17 @@ describe('ScrapeReceiptStore', () => {
       },
       10_000,
     );
+    await store.recordTimeline({
+      endpoint: 'ListLatestTweetsTimeline',
+      observedAtMs: 15_000,
+      requestUrl: listUrl(LIST_A),
+      sourceTabId: TAB_A,
+      tweets: [tweet('lease-does-not-follow-capture')],
+    });
+    assert.equal(
+      (await store.getRun(first.runId)).leaseExpiresAtMs,
+      first.leaseExpiresAtMs,
+    );
     const renewed = await store.renewRun(first.runId, TAB_A, 20_000);
     assert.equal(renewed.leaseExpiresAtMs, 20_000 + SCRAPE_RUN_LEASE_MS);
 
