@@ -296,6 +296,44 @@ describe('ScrapeReceiptStore', () => {
     assert.equal(replacement.state, 'running');
   });
 
+  it('does not attach observations to an expired client lease', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const input = {
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: '12121212-1212-4212-8212-121212121212',
+      startedAtMs: 1_000,
+    };
+    const openedAtMs = 10_000;
+    const run = await store.beginRun(input, openedAtMs);
+    const observedAtMs = openedAtMs + SCRAPE_RUN_LEASE_MS + 1;
+    assert.deepEqual(
+      await store.recordTimeline({
+        endpoint: 'ListLatestTweetsTimeline',
+        observedAtMs,
+        requestUrl: listUrl(LIST_A),
+        sourceTabId: TAB_A,
+        tweets: [tweet('captured-without-client')],
+      }),
+      [],
+    );
+    assert.match((await store.getRun(run.runId)).stopReason, /lease-expired/);
+
+    await store.beginRun(
+      { ...input, sourceTabId: TAB_B },
+      observedAtMs + 1,
+    );
+    const replayed = await store.recordTimeline({
+      endpoint: 'ListLatestTweetsTimeline',
+      observedAtMs: observedAtMs + 2,
+      requestUrl: listUrl(LIST_A),
+      sourceTabId: TAB_B,
+      tweets: [tweet('captured-without-client')],
+    });
+    assert.equal(replayed.length, 1);
+    assert.equal(replayed[0].knownBeforeRun, false);
+  });
+
   it('rebinds an interrupted run to its replacement source tab', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     const input = {
