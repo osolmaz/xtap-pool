@@ -2,7 +2,8 @@ const DATABASE_NAME = 'xtap-scrape-receipts';
 const DATABASE_VERSION = 1;
 const META_CUTOVER = 'cutoverInProgress';
 const META_SEQUENCE = 'captureSequence';
-const MAX_ACTIVE_RUNS = 2;
+const MAX_ACTIVE_RUNS = 4;
+export const SCRAPE_RUN_LEASE_MS = 90_000;
 const TIMELINE_ENDPOINTS = new Set([
   'ListLatestTweetsTimeline',
   'SearchTimeline',
@@ -27,8 +28,9 @@ export class ScrapeReceiptStore {
     this.databasePromise = null;
   }
 
-  async beginRun({ runId, listId, sourceTabId, startedAtMs }) {
+  async beginRun({ runId, listId, sourceTabId, startedAtMs }, openedAtMs = Date.now()) {
     validateRunInput({ runId, listId, sourceTabId, startedAtMs });
+    if (!Number.isFinite(openedAtMs)) throw new Error('invalid open time');
     const database = await this.open();
     const transaction = database.transaction(
       ['listReceipts', 'meta', 'runs'],
@@ -47,6 +49,17 @@ export class ScrapeReceiptStore {
     }
 
     const allRuns = await request(runs.getAll());
+    const activeRuns = [];
+    for (const run of allRuns) {
+      if (run.state !== 'running') continue;
+      if (!hasLiveLease(run, openedAtMs)) {
+        expireRun(run, openedAtMs);
+        runs.put(run);
+        continue;
+      }
+      activeRuns.push(run);
+    }
+
     const existing = allRuns.find((run) => run.runId === runId);
     if (existing) {
       if (existing.listId !== listId || existing.startedAtMs !== startedAtMs) {
@@ -56,18 +69,35 @@ export class ScrapeReceiptStore {
           'run ID already belongs to different parameters',
         );
       }
-      if (existing.sourceTabId !== sourceTabId) {
-        transaction.abort();
-        throw new ScrapeReceiptError(
-          'run-conflict',
-          'run ID already belongs to a different source tab',
-        );
+      if (existing.state === 'running') {
+        if (existing.sourceTabId !== sourceTabId) {
+          transaction.abort();
+          throw new ScrapeReceiptError(
+            'run-conflict',
+            'run ID already belongs to a different source tab',
+          );
+        }
+        renewLease(existing, openedAtMs);
+        runs.put(existing);
+        await transactionDone(transaction);
+        return existing;
       }
-      await transactionDone(transaction);
-      return existing;
+      if (isRecoverableStop(existing.stopReason)) {
+        delete existing.finishedAtMs;
+        delete existing.stopReason;
+        existing.sourceTabId = sourceTabId;
+        existing.state = 'running';
+        renewLease(existing, openedAtMs);
+        runs.put(existing);
+        await transactionDone(transaction);
+        return existing;
+      }
+      transaction.abort();
+      throw new ScrapeReceiptError(
+        'run-terminal',
+        `scrape run already ended as ${existing.state}`,
+      );
     }
-
-    const activeRuns = allRuns.filter((run) => run.state === 'running');
     if (activeRuns.some((run) => run.sourceTabId === sourceTabId)) {
       transaction.abort();
       throw new ScrapeReceiptError(
@@ -79,7 +109,7 @@ export class ScrapeReceiptStore {
       transaction.abort();
       throw new ScrapeReceiptError(
         'capacity-full',
-        'xTap already has two active scrape runs',
+        'xTap already has four active scrape runs',
       );
     }
 
@@ -97,7 +127,8 @@ export class ScrapeReceiptStore {
       sourceTabId,
       startedAtMs,
       state: 'running',
-      updatedAtMs: Date.now(),
+      leaseExpiresAtMs: openedAtMs + SCRAPE_RUN_LEASE_MS,
+      updatedAtMs: openedAtMs,
     };
     runs.put(run);
     await transactionDone(transaction);
@@ -183,11 +214,65 @@ export class ScrapeReceiptStore {
 
     writeMeta(meta, META_SEQUENCE, sequence);
     if (run && emitted.length > 0) {
-      run.updatedAtMs = observedAtMs;
+      renewLease(run, observedAtMs);
       runs.put(run);
     }
     await transactionDone(transaction);
     return emitted;
+  }
+
+  async renewRun(runId, sourceTabId, renewedAtMs) {
+    if (!isRunId(runId)) throw new Error('invalid run ID');
+    if (!isSourceTabId(sourceTabId)) throw new Error('invalid source tab ID');
+    if (!Number.isFinite(renewedAtMs)) throw new Error('invalid renewal time');
+
+    const database = await this.open();
+    const transaction = database.transaction('runs', 'readwrite');
+    const runs = transaction.objectStore('runs');
+    const run = await request(runs.get(runId));
+    if (!run) {
+      transaction.abort();
+      throw new ScrapeReceiptError('unknown-run', 'unknown scrape run');
+    }
+    if (run.state !== 'running') {
+      transaction.abort();
+      throw new ScrapeReceiptError(
+        'run-terminal',
+        `scrape run already ended as ${run.state}`,
+      );
+    }
+    if (run.sourceTabId !== sourceTabId) {
+      transaction.abort();
+      throw new ScrapeReceiptError(
+        'run-conflict',
+        'run ID already belongs to a different source tab',
+      );
+    }
+    renewLease(run, renewedAtMs);
+    runs.put(run);
+    await transactionDone(transaction);
+    return run;
+  }
+
+  async finishRunsForSourceTab(sourceTabId, finishedAtMs) {
+    if (!isSourceTabId(sourceTabId)) throw new Error('invalid source tab ID');
+    if (!Number.isFinite(finishedAtMs)) throw new Error('invalid finish time');
+
+    const database = await this.open();
+    const transaction = database.transaction('runs', 'readwrite');
+    const runs = transaction.objectStore('runs');
+    const activeRuns = (await request(runs.getAll())).filter(
+      (run) => run.state === 'running' && run.sourceTabId === sourceTabId,
+    );
+    for (const run of activeRuns) {
+      run.finishedAtMs = finishedAtMs;
+      run.state = 'aborted';
+      run.stopReason = 'source-tab-closed';
+      run.updatedAtMs = finishedAtMs;
+      runs.put(run);
+    }
+    await transactionDone(transaction);
+    return activeRuns.length;
   }
 
   async readObservations(runId, afterCursor = 0) {
@@ -326,6 +411,26 @@ export function extractListId(endpoint, requestUrl) {
   } catch {
     return undefined;
   }
+}
+
+function renewLease(run, renewedAtMs) {
+  run.leaseExpiresAtMs = renewedAtMs + SCRAPE_RUN_LEASE_MS;
+  run.updatedAtMs = renewedAtMs;
+}
+
+function hasLiveLease(run, atMs) {
+  return Number.isFinite(run.leaseExpiresAtMs) && run.leaseExpiresAtMs > atMs;
+}
+
+function expireRun(run, finishedAtMs) {
+  run.finishedAtMs = finishedAtMs;
+  run.state = 'failed';
+  run.stopReason = 'lease-expired';
+  run.updatedAtMs = finishedAtMs;
+}
+
+function isRecoverableStop(value) {
+  return value === 'lease-expired' || value === 'source-tab-closed';
 }
 
 function createSchema(database) {

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import { indexedDB } from 'fake-indexeddb';
 import {
   extractListId,
+  SCRAPE_RUN_LEASE_MS,
   ScrapeReceiptError,
   ScrapeReceiptStore,
 } from '../lib/scrape-receipts.js';
@@ -168,32 +169,36 @@ describe('ScrapeReceiptStore', () => {
     assert.equal(attempts, 2);
   });
 
-  it('allows two tab-bound runs and rejects a third', async () => {
+  it('allows four tab-bound runs and rejects a fifth', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const openedAtMs = 10_000;
     const firstInput = {
       listId: LIST_A,
       sourceTabId: TAB_A,
       runId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
       startedAtMs: 2_000,
     };
-    const first = await store.beginRun(firstInput);
-    assert.deepEqual(await store.beginRun(firstInput), first);
+    const first = await store.beginRun(firstInput, openedAtMs);
+    assert.deepEqual(await store.beginRun(firstInput, openedAtMs), first);
     await assert.rejects(
-      store.beginRun({ ...firstInput, sourceTabId: TAB_B }),
+      store.beginRun({ ...firstInput, sourceTabId: TAB_B }, openedAtMs),
       /different source tab/,
     );
 
-    const second = await store.beginRun({
-      listId: LIST_A,
-      sourceTabId: TAB_B,
-      runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
-      startedAtMs: 3_000,
-    });
+    const second = await store.beginRun(
+      {
+        listId: LIST_A,
+        sourceTabId: TAB_B,
+        runId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        startedAtMs: 3_000,
+      },
+      openedAtMs,
+    );
     assert.equal(second.state, 'running');
 
     const firstObservations = await store.recordTimeline({
       endpoint: 'ListLatestTweetsTimeline',
-      observedAtMs: 3_500,
+      observedAtMs: 11_000,
       requestUrl: listUrl(LIST_A),
       sourceTabId: TAB_A,
       tweets: [tweet('first-tab')],
@@ -201,24 +206,135 @@ describe('ScrapeReceiptStore', () => {
     assert.deepEqual(firstObservations.map(({ runId }) => runId), [first.runId]);
     assert.equal((await store.getRun(second.runId)).lastCursor, 0);
 
+    for (const [sourceTabId, runId] of [
+      [303, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'],
+      [404, 'abababab-abab-4bab-8bab-abababababab'],
+    ]) {
+      assert.equal(
+        (
+          await store.beginRun(
+            { listId: LIST_B, runId, sourceTabId, startedAtMs: 4_000 },
+            openedAtMs,
+          )
+        ).state,
+        'running',
+      );
+    }
+
     await assert.rejects(
-      store.beginRun({
-        listId: LIST_B,
-        sourceTabId: 303,
-        runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-        startedAtMs: 4_000,
-      }),
-      /two active scrape runs/,
+      store.beginRun(
+        {
+          listId: LIST_B,
+          sourceTabId: 505,
+          runId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+          startedAtMs: 5_000,
+        },
+        openedAtMs,
+      ),
+      /four active scrape runs/,
     );
 
-    await store.finishRun(first.runId, 'completed', 5_000);
-    const third = await store.beginRun({
-      listId: LIST_B,
-      sourceTabId: 303,
-      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
-      startedAtMs: 4_000,
+    await store.finishRun(first.runId, 'completed', 12_000);
+    const fifth = await store.beginRun(
+      {
+        listId: LIST_B,
+        sourceTabId: 505,
+        runId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
+        startedAtMs: 5_000,
+      },
+      12_000,
+    );
+    assert.equal(fifth.state, 'running');
+  });
+
+  it('reclaims expired leases and keeps heartbeating runs active', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const first = await store.beginRun(
+      {
+        listId: LIST_A,
+        sourceTabId: TAB_A,
+        runId: '11111111-1111-4111-8111-111111111111',
+        startedAtMs: 1_000,
+      },
+      10_000,
+    );
+    const renewed = await store.renewRun(first.runId, TAB_A, 20_000);
+    assert.equal(renewed.leaseExpiresAtMs, 20_000 + SCRAPE_RUN_LEASE_MS);
+
+    const second = await store.beginRun(
+      {
+        listId: LIST_B,
+        sourceTabId: TAB_B,
+        runId: '22222222-2222-4222-8222-222222222222',
+        startedAtMs: 2_000,
+      },
+      10_000,
+    );
+    const replacement = await store.beginRun(
+      {
+        listId: LIST_B,
+        sourceTabId: 303,
+        runId: '33333333-3333-4333-8333-333333333333',
+        startedAtMs: 3_000,
+      },
+      10_000 + SCRAPE_RUN_LEASE_MS + 1,
+    );
+
+    assert.equal((await store.getRun(first.runId)).state, 'running');
+    assert.equal((await store.getRun(second.runId)).state, 'failed');
+    assert.equal(replacement.state, 'running');
+  });
+
+  it('rebinds an interrupted run to its replacement source tab', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const input = {
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: '66666666-6666-4666-8666-666666666666',
+      startedAtMs: 1_000,
+    };
+    const first = await store.beginRun(input, 10_000);
+    const afterExpiry = await store.beginRun(
+      { ...input, sourceTabId: TAB_B },
+      10_000 + SCRAPE_RUN_LEASE_MS + 1,
+    );
+    assert.equal(afterExpiry.runId, first.runId);
+    assert.equal(afterExpiry.sourceTabId, TAB_B);
+    assert.equal(afterExpiry.state, 'running');
+
+    await store.finishRunsForSourceTab(TAB_B, 200_000);
+    const afterClose = await store.beginRun(
+      { ...input, sourceTabId: 303 },
+      200_001,
+    );
+    assert.equal(afterClose.sourceTabId, 303);
+    assert.equal(afterClose.state, 'running');
+
+    await store.finishRun(first.runId, 'completed', 300_000);
+    await assert.rejects(
+      store.beginRun({ ...input, sourceTabId: 404 }, 300_001),
+      /already ended as completed/,
+    );
+  });
+
+  it('aborts only runs owned by a closed source tab', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const first = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: '44444444-4444-4444-8444-444444444444',
+      startedAtMs: 1_000,
     });
-    assert.equal(third.state, 'running');
+    const second = await store.beginRun({
+      listId: LIST_B,
+      sourceTabId: TAB_B,
+      runId: '55555555-5555-4555-8555-555555555555',
+      startedAtMs: 2_000,
+    });
+
+    assert.equal(await store.finishRunsForSourceTab(TAB_A, 3_000), 1);
+    assert.equal((await store.getRun(first.runId)).state, 'aborted');
+    assert.equal((await store.getRun(second.runId)).state, 'running');
   });
 
   it('fails active runs for an explicit fresh-state cutover', async () => {
@@ -345,13 +461,54 @@ describe('ScrapeReceiptBridge', () => {
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
   });
 
-  it('rejects a run when passive capture is unavailable for its tab', async () => {
+  it('retries passive capture attachment before accepting or rejecting a run', async () => {
+    let attempts = 0;
+    const store = {
+      async beginRun(input) {
+        return { ...input, state: 'running' };
+      },
+      async finishCutover() {},
+      async readObservations() {
+        return [];
+      },
+    };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({
+      ensureSourceCapture: async () => {
+        attempts += 1;
+        return attempts === 3;
+      },
+      runtime,
+      store,
+      wait: async () => {},
+    });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+    accepted.receive({
+      afterCursor: 0,
+      listId: LIST_A,
+      protocolVersion: 1,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      startedAtMs: 1_000,
+      type: 'scrape:open',
+    });
+    await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:opened'));
+    assert.equal(attempts, 3);
+  });
+
+  it('rejects a run after bounded passive capture retries', async () => {
+    let attempts = 0;
     const store = { async finishCutover() {} };
     const runtime = { onConnectExternal: { addListener() {} } };
     const bridge = new ScrapeReceiptBridge({
-      ensureSourceCapture: async () => false,
+      ensureSourceCapture: async () => {
+        attempts += 1;
+        return false;
+      },
       runtime,
       store,
+      wait: async () => {},
     });
     const accepted = fakePort(SCROLLER_EXTENSION_ID);
     bridge.accept(accepted.port);
@@ -365,6 +522,7 @@ describe('ScrapeReceiptBridge', () => {
       type: 'scrape:open',
     });
     await waitFor(() => accepted.sent.some((message) => message.type === 'scrape:error'));
+    assert.equal(attempts, 5);
     assert.deepEqual(
       accepted.sent.find((message) => message.type === 'scrape:error'),
       {
@@ -375,6 +533,40 @@ describe('ScrapeReceiptBridge', () => {
         type: 'scrape:error',
       },
     );
+  });
+
+  it('renews run leases and closes receipts with their source tab', async () => {
+    const calls = [];
+    const store = {
+      async finishCutover() {},
+      async finishRunsForSourceTab(...args) {
+        calls.push(['close', ...args]);
+        return 1;
+      },
+      async renewRun(...args) {
+        calls.push(['heartbeat', ...args]);
+      },
+    };
+    const runtime = { onConnectExternal: { addListener() {} } };
+    const bridge = new ScrapeReceiptBridge({ runtime, store });
+    const accepted = fakePort(SCROLLER_EXTENSION_ID);
+    bridge.accept(accepted.port);
+    accepted.receive({
+      protocolVersion: 1,
+      renewedAtMs: 5_000,
+      runId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      sourceTabId: TAB_A,
+      type: 'scrape:heartbeat',
+    });
+    await waitFor(() => calls.length === 1);
+    assert.deepEqual(calls[0], [
+      'heartbeat',
+      'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      TAB_A,
+      5_000,
+    ]);
+    assert.equal(await bridge.finishSourceTab(TAB_A, 6_000), 1);
+    assert.deepEqual(calls[1], ['close', TAB_A, 6_000]);
   });
 
   it('returns stable error codes to the scroller', async () => {
@@ -435,6 +627,7 @@ describe('ScrapeReceiptBridge', () => {
     assert.deepEqual(opened.capabilities, [
       'search-timeline-observations',
       'typed-errors',
+      'run-leases',
     ]);
 
     await bridge.recordGraphqlResponse({

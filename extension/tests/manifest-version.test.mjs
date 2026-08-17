@@ -6,7 +6,7 @@ const manifestUrl = new URL('../manifest.json', import.meta.url);
 
 test('upstream sync preserves passive capture permissions', async () => {
   const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
-  assert.equal(manifest.version, '0.24.0');
+  assert.equal(manifest.version, '0.25.0');
   assert.ok(manifest.permissions.includes('debugger'));
   assert.equal(
     manifest.content_scripts.some((entry) =>

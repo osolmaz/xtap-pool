@@ -44,6 +44,11 @@ const scrapeReceiptBridge = new ScrapeReceiptBridge({
   ensureSourceCapture: (tabId) => graphqlCapture.ensureAttached(tabId),
 });
 scrapeReceiptBridge.attach();
+chrome.tabs?.onRemoved?.addListener((tabId) => {
+  void scrapeReceiptBridge.finishSourceTab(tabId).catch((error) => {
+    console.warn(`[xTap] Could not close scrape receipt for tab ${tabId}: ${error}`);
+  });
+});
 graphqlCapture.attach();
 const hasSessionStorage = !!chrome.storage.session;
 const traceStorage = chrome.storage.session || chrome.storage.local;

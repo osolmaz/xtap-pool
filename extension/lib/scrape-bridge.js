@@ -7,18 +7,23 @@ import {
 
 export const SCROLLER_EXTENSION_ID = 'aahdialpkbjlbfjkpamfclbnlbinekal';
 
+const CAPTURE_ATTACH_ATTEMPTS = 5;
+const CAPTURE_ATTACH_RETRY_MS = 200;
+
 export class ScrapeReceiptBridge {
   constructor({
     allowedExtensionId = SCROLLER_EXTENSION_ID,
     ensureSourceCapture,
     runtime = globalThis.chrome?.runtime,
     store = new ScrapeReceiptStore(),
+    wait = defaultWait,
   } = {}) {
     if (!runtime) throw new Error('Chrome runtime is unavailable');
     this.allowedExtensionId = allowedExtensionId;
     this.ensureSourceCapture = ensureSourceCapture;
     this.runtime = runtime;
     this.store = store;
+    this.wait = wait;
     this.connections = new Set();
     this.cutoverClearPromise = null;
   }
@@ -42,6 +47,10 @@ export class ScrapeReceiptBridge {
       if (this.cutoverClearPromise === clearing) this.cutoverClearPromise = null;
       throw error;
     }
+  }
+
+  async finishSourceTab(sourceTabId, finishedAtMs = Date.now()) {
+    return this.store.finishRunsForSourceTab(sourceTabId, finishedAtMs);
   }
 
   async recordGraphqlResponse({ endpoint, requestUrl, sourceTabId, tweets }) {
@@ -103,8 +112,7 @@ export class ScrapeReceiptBridge {
       }
       if (message.type === 'scrape:open') {
         connection.runId = message.runId;
-        if (this.ensureSourceCapture &&
-            !(await this.ensureSourceCapture(message.sourceTabId))) {
+        if (!(await this.ensureCapture(message.sourceTabId))) {
           throw new ScrapeReceiptError(
             'internal-error',
             `xTap passive capture is unavailable for source tab ${message.sourceTabId}`,
@@ -124,6 +132,7 @@ export class ScrapeReceiptBridge {
           capabilities: [
             'search-timeline-observations',
             'typed-errors',
+            'run-leases',
           ],
           observations,
           protocolVersion: SCRAPE_PROTOCOL_VERSION,
@@ -131,6 +140,15 @@ export class ScrapeReceiptBridge {
           runId: run.runId,
           type: 'scrape:opened',
         });
+        return;
+      }
+
+      if (message.type === 'scrape:heartbeat') {
+        await this.store.renewRun(
+          message.runId,
+          message.sourceTabId,
+          message.renewedAtMs,
+        );
         return;
       }
 
@@ -154,6 +172,21 @@ export class ScrapeReceiptBridge {
       post(connection.port, scrapeError(message, error));
     }
   }
+
+  async ensureCapture(sourceTabId) {
+    if (!this.ensureSourceCapture) return true;
+    for (let attempt = 1; attempt <= CAPTURE_ATTACH_ATTEMPTS; attempt += 1) {
+      if (await this.ensureSourceCapture(sourceTabId)) return true;
+      if (attempt < CAPTURE_ATTACH_ATTEMPTS) {
+        await this.wait(CAPTURE_ATTACH_RETRY_MS);
+      }
+    }
+    return false;
+  }
+}
+
+function defaultWait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function normalizeCursor(value) {
