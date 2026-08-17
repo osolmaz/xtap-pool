@@ -317,6 +317,74 @@ describe('ScrapeReceiptStore', () => {
     );
   });
 
+  it('applies capacity and source-tab limits when recovering a run', async () => {
+    const store = new ScrapeReceiptStore(indexedDB, databaseName());
+    const interrupted = await store.beginRun({
+      listId: LIST_A,
+      sourceTabId: TAB_A,
+      runId: '77777777-7777-4777-8777-777777777777',
+      startedAtMs: 1_000,
+    });
+    await store.finishRunsForSourceTab(TAB_A, 2_000);
+
+    const active = [];
+    for (const [sourceTabId, runId] of [
+      [TAB_B, '88888888-8888-4888-8888-888888888888'],
+      [303, '99999999-9999-4999-8999-999999999999'],
+      [404, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'],
+      [505, 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'],
+    ]) {
+      active.push(
+        await store.beginRun({
+          listId: LIST_B,
+          runId,
+          sourceTabId,
+          startedAtMs: 3_000,
+        }),
+      );
+    }
+
+    await assert.rejects(
+      store.beginRun(
+        {
+          listId: LIST_A,
+          sourceTabId: 606,
+          runId: interrupted.runId,
+          startedAtMs: interrupted.startedAtMs,
+        },
+        4_000,
+      ),
+      /four active scrape runs/,
+    );
+    await store.finishRun(active[0].runId, 'completed', 5_000);
+    await assert.rejects(
+      store.beginRun(
+        {
+          listId: LIST_A,
+          sourceTabId: 303,
+          runId: interrupted.runId,
+          startedAtMs: interrupted.startedAtMs,
+        },
+        5_001,
+      ),
+      /source tab 303 already belongs/,
+    );
+    assert.equal(
+      (
+        await store.beginRun(
+          {
+            listId: LIST_A,
+            sourceTabId: 606,
+            runId: interrupted.runId,
+            startedAtMs: interrupted.startedAtMs,
+          },
+          5_002,
+        )
+      ).state,
+      'running',
+    );
+  });
+
   it('aborts only runs owned by a closed source tab', async () => {
     const store = new ScrapeReceiptStore(indexedDB, databaseName());
     const first = await store.beginRun({
