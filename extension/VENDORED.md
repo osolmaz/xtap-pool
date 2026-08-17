@@ -4,6 +4,7 @@ This directory vendors the xTap Chrome extension.
 
 - Upstream: https://github.com/mkubicek/xTap
 - Vendored at commit: `9eba39a3c972649f07df98c3874cac6de38b383f` (`v0.24.0`)
+- Local extension version: `0.25.0`
 - License: MIT (see `LICENSE`, unchanged)
 
 Keep upstream code style (vanilla JS, MV3, no bundler) so future re-syncs
@@ -43,7 +44,8 @@ this directory, excluding the modifications below.
 - `cutover.html` and `cutover.js` — **new**: one-shot fresh-state page with a
   distinct URL so a cached older reload page cannot bypass active-run cleanup.
 - `tests/graphql-capture.test.mjs` — **new**: debugger attachment, response-body
-  capture, operation extraction, and failed-request coverage.
+  capture, operation extraction, and failed-request coverage. Receipt startup
+  retries passive debugger attachment for bounded transient failures.
 - `tests/scrape-receipts.test.mjs` — **new**: receipt persistence, per-list
   coverage, search and live-list normalization, replay, typed errors, active-run,
   and sender-allowlist coverage.
@@ -55,7 +57,8 @@ this directory, excluding the modifications below.
   parser and receipt path before normal capture deduplication. It stages the
   exact request URL and Chrome tab ID so recovery replays tab-bound receipts
   before clearing the write-ahead record. Observations go only to the matching
-  run, and up to two receipt runs may be active.
+  run. Up to four leased receipt runs may be active. Heartbeats, source-tab
+  closure, and lease expiry reclaim runs that no longer have a live client.
 - `lib/tweet-parser.js` — accepts object-shaped Draft.js `entityMap`s in
   addition to X's array-of-pairs shape (+ regression test).
 - `.github/workflows/release.yml` — packages the pool settings, connection,
