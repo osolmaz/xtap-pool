@@ -166,10 +166,15 @@ export class ScrapeReceiptStore {
     const runs = transaction.objectStore('runs');
 
     let sequence = (await readMeta(meta, META_SEQUENCE)) ?? 0;
-    const run = (await request(runs.getAll())).find(
+    let run = (await request(runs.getAll())).find(
       (candidate) =>
         candidate.state === 'running' && candidate.sourceTabId === sourceTabId,
     );
+    if (run && !hasLiveLease(run, observedAtMs)) {
+      expireRun(run, observedAtMs);
+      runs.put(run);
+      run = undefined;
+    }
     const listId = run?.listId ?? extractListId(endpoint, requestUrl);
     if (!isListId(listId)) {
       await transactionDone(transaction);
