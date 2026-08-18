@@ -16,7 +16,12 @@ import {
   RouterError,
   runEnrichTick,
 } from "../src/enrich-worker.js";
-import type { EnrichWorkerDeps, LlmClient, LlmMessage } from "../src/enrich-worker.js";
+import type {
+  EnrichWorkerDeps,
+  EnrichWorkerProgress,
+  LlmClient,
+  LlmMessage,
+} from "../src/enrich-worker.js";
 import { TweetStore } from "../src/store.js";
 import { makePooled } from "./helpers.js";
 import { FakeLog } from "./fake-log.js";
@@ -207,6 +212,31 @@ describe("runEnrichTick", () => {
       contract_hash: CONTRACT_HASH,
     });
     expect(enrichStore.queueEntry(unitId)?.status).toBe("done");
+  });
+
+  it("reports queue, registry, and receipt progress from durable transitions", async () => {
+    seedUnit("100", "vllm ships fp8 kernels");
+    const queue = vi.fn(() => Promise.resolve());
+    const registryScan = vi.fn(() => Promise.resolve());
+    const receiptPublished = vi.fn(() => Promise.resolve());
+    const progress: EnrichWorkerProgress = {
+      queue,
+      registryScan,
+      receiptPublished,
+    };
+
+    await runEnrichTick(deps(respondingClient(withEvidence), { progress }));
+
+    expect(queue).toHaveBeenCalled();
+    expect(queue).toHaveBeenLastCalledWith({
+      pending: 0,
+      running: 0,
+      retrying: 0,
+      blocked: 0,
+      done: 1,
+    });
+    expect(registryScan).toHaveBeenCalled();
+    expect(receiptPublished).toHaveBeenCalledOnce();
   });
 
   it("starts concurrent calls together and commits out-of-order responses in dispatch order", async () => {

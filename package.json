@@ -45,5 +45,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@osolmaz/hf-job-control": "https://github.com/osolmaz/hf-job-control/archive/68faf46e92fee996d99689f15605d1e2615f5eab.tar.gz"
   }
 }
