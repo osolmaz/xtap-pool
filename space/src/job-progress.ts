@@ -39,10 +39,14 @@ type TrackUpdate = {
 export class XTapJobProgress {
   readonly #reporter: ProgressReporter;
   readonly #basePlanId: string;
+  readonly #attemptPlanId: string;
+  #sourcePlanId: string;
 
-  private constructor(reporter: ProgressReporter, basePlanId: string) {
+  private constructor(reporter: ProgressReporter, basePlanId: string, attemptPlanId: string) {
     this.#reporter = reporter;
     this.#basePlanId = basePlanId;
+    this.#attemptPlanId = attemptPlanId;
+    this.#sourcePlanId = basePlanId;
   }
 
   static async create(options: {
@@ -54,7 +58,7 @@ export class XTapJobProgress {
     objectStore?: ProgressObjectStore;
   }): Promise<XTapJobProgress> {
     const attemptId = options.env["JOB_ID"] ?? `local-${process.pid.toString()}`;
-    const runId = options.env["XTAP_PROGRESS_RUN_ID"] ?? `xtap-enrichment-${attemptId}`;
+    const runId = options.env["XTAP_PROGRESS_RUN_ID"] ?? "xtap-enrichment-v1";
     const objectStore =
       options.objectStore ?? createProgressObjectStore(options.bucket, options.accessToken);
     const reporter = await ProgressReporter.create({
@@ -73,10 +77,17 @@ export class XTapJobProgress {
       initialTrack(key, basePlanId),
     );
     if (missing.length > 0) reporter.plan(missing);
-    const progress = new XTapJobProgress(reporter, basePlanId);
+    reporter.setState("running");
+    const progress = new XTapJobProgress(reporter, basePlanId, `attempt-${attemptId}`);
     await progress.update(
       "taxonomy-load",
-      { status: "completed", completed: 1, total: 1, unit: "steps" },
+      {
+        planId: `taxonomy-${progress.#attemptPlanId.slice(-48)}`,
+        status: "completed",
+        completed: 1,
+        total: 1,
+        unit: "steps",
+      },
       true,
     );
     return progress;
@@ -86,7 +97,7 @@ export class XTapJobProgress {
     await this.update(
       "index-restore",
       {
-        planId: `index-restore-${total.toString()}-${this.#basePlanId.slice(-16)}`,
+        planId: `index-restore-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
         status: completed === total ? "completed" : "running",
         completed,
         total,
@@ -102,6 +113,7 @@ export class XTapJobProgress {
     total: number;
   }): Promise<void> {
     const planId = `source-${options.revision.slice(0, 24)}`;
+    this.#sourcePlanId = planId;
     const current = this.#reporter.tracks.find((track) => track.key === "source-replay");
     if (current?.plan_id === planId && current.status === "completed") return;
     await this.update(
@@ -121,6 +133,7 @@ export class XTapJobProgress {
     await this.update(
       "working-copy",
       {
+        planId: `working-copy-${this.#attemptPlanId.slice(-48)}`,
         status: completed ? "completed" : "running",
         completed: completed ? 1 : 0,
         total: 1,
@@ -134,13 +147,13 @@ export class XTapJobProgress {
     const total = depth.pending + depth.running + depth.retrying + depth.blocked + depth.done;
     const queueComplete = depth.pending + depth.running + depth.retrying === 0;
     await this.update("enrichment-queue", {
-      planId: `queue-${total.toString()}-${this.#basePlanId.slice(-16)}`,
+      planId: `queue-${total.toString()}-${this.#sourcePlanId.slice(-24)}`,
       status: queueComplete ? "completed" : "running",
       completed: depth.done + depth.blocked,
       total,
       unit: "records",
     });
-    const queuePlanId = `queue-${total.toString()}-${this.#basePlanId.slice(-16)}`;
+    const queuePlanId = `queue-${total.toString()}-${this.#sourcePlanId.slice(-24)}`;
     await this.update("enrichment-successful", {
       planId: queuePlanId,
       status: queueComplete ? "completed" : "running",
@@ -157,7 +170,7 @@ export class XTapJobProgress {
 
   async registryScan(scanned: number, total: number): Promise<void> {
     await this.update("registry-scan", {
-      planId: `registry-${total.toString()}-${this.#basePlanId.slice(-16)}`,
+      planId: `registry-${total.toString()}-${this.#sourcePlanId.slice(-24)}`,
       status: scanned === total ? "completed" : "running",
       completed: scanned,
       total,
@@ -168,7 +181,13 @@ export class XTapJobProgress {
   async receiptPublished(): Promise<void> {
     await this.update(
       "receipt-publication",
-      { status: "completed", completed: 1, total: 1, unit: "receipts" },
+      {
+        planId: `receipt-${this.#attemptPlanId.slice(-48)}`,
+        status: "completed",
+        completed: 1,
+        total: 1,
+        unit: "receipts",
+      },
       true,
     );
   }
@@ -192,13 +211,19 @@ export class XTapJobProgress {
     }
     await this.update(
       "manifest-publication",
-      { status: "completed", completed: 1, total: 1, unit: "manifests" },
+      {
+        planId: `manifest-${this.#attemptPlanId.slice(-48)}`,
+        status: "completed",
+        completed: 1,
+        total: 1,
+        unit: "manifests",
+      },
       true,
     );
   }
 
   async complete(): Promise<void> {
-    this.#reporter.setState("completed");
+    this.#reporter.setState("waiting");
     await this.#reporter.flush({ force: true });
   }
 
@@ -211,7 +236,7 @@ export class XTapJobProgress {
     await this.update(
       key,
       {
-        planId: `${key}-${total.toString()}-${this.#basePlanId.slice(-16)}`,
+        planId: `${key}-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
         status: completed === total ? "completed" : "running",
         completed,
         total,
@@ -225,6 +250,7 @@ export class XTapJobProgress {
     await this.update(
       key,
       {
+        planId: `${key}-${this.#attemptPlanId.slice(-48)}`,
         status: completed ? "completed" : "running",
         completed: completed ? 1 : 0,
         total: 1,
