@@ -54,13 +54,31 @@ describe("XTapJobProgress", () => {
     await progress.manifestPublished();
     await progress.complete();
 
-    const stored = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-job-1");
-    expect(stored?.snapshot.state).toBe("completed");
-    expect(stored?.snapshot.tracks).toHaveLength(13);
-    expect(stored?.snapshot.tracks.every((track) => track.status === "completed")).toBe(true);
-    expect(stored?.snapshot.tracks.find((track) => track.key === "enrichment-queue")).toMatchObject(
-      { completed: 10, total: 10, unit: "records" },
-    );
+    const stored = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
+    if (stored === null) throw new Error("progress snapshot is missing");
+    expect(stored.snapshot.state).toBe("waiting");
+    expect(stored.snapshot.tracks).toHaveLength(13);
+    expect(stored.snapshot.tracks.every((track) => track.status === "completed")).toBe(true);
+    expect(stored.snapshot.tracks.find((track) => track.key === "enrichment-queue")).toMatchObject({
+      completed: 10,
+      total: 10,
+      unit: "records",
+    });
+
+    const replacement = await XTapJobProgress.create({
+      bucket: objects.bucketId,
+      accessToken: "test",
+      sourceRevision: "a".repeat(40),
+      contractHash: "b".repeat(64),
+      env: { JOB_ID: "job-2" },
+      objectStore: objects,
+    });
+    await replacement.restoreDatabase(0, 100);
+    const resumed = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
+    if (resumed === null) throw new Error("resumed progress snapshot is missing");
+    expect(resumed.snapshot.attempt_id).toBe("job-2");
+    expect(resumed.snapshot.state).toBe("running");
+    expect(resumed.snapshot.sequence).toBeGreaterThan(stored.snapshot.sequence);
   });
 
   it("publishes active, waiting, blocked, and resumed phase transitions", async () => {
