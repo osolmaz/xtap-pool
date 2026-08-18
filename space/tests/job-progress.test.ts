@@ -56,4 +56,38 @@ describe("XTapJobProgress", () => {
       { completed: 10, total: 10, unit: "records" },
     );
   });
+
+  it("publishes active, waiting, blocked, and resumed phase transitions", async () => {
+    const objects = new MemoryObjects();
+    const progress = await XTapJobProgress.create({
+      bucket: objects.bucketId,
+      accessToken: "test",
+      sourceRevision: "a".repeat(40),
+      contractHash: "b".repeat(64),
+      env: { XTAP_PROGRESS_RUN_ID: "shared-run" },
+      objectStore: objects,
+    });
+
+    await progress.restoreDatabase(0, 100);
+    await progress.restoreDatabase(100, 100);
+    await progress.sourceReplay({ revision: "c".repeat(64), completed: 0, total: 2 });
+    await progress.sourceReplay({ revision: "c".repeat(64), completed: 2, total: 2 });
+    await progress.queue({ pending: 1, running: 0, retrying: 0, blocked: 0, done: 0 });
+    await progress.databaseUpload(50, 100);
+    await progress.databaseVerify(50, 100);
+    await progress.blocked();
+    await progress.manifestPublished();
+    await progress.sourceReplay({ revision: "c".repeat(64), completed: 2, total: 2 });
+
+    const stored = await new ObjectProgressStore(objects).loadLatest("shared-run");
+    expect(stored?.snapshot.state).toBe("blocked");
+    expect(stored?.snapshot.tracks.find((track) => track.key === "source-replay")).toMatchObject({
+      status: "completed",
+      completed: 2,
+      total: 2,
+    });
+    expect(stored?.snapshot.tracks.find((track) => track.key === "enrichment-queue")).toMatchObject(
+      { status: "running", completed: 0, total: 1 },
+    );
+  });
 });
