@@ -108,12 +108,12 @@ export class XTapJobProgress {
       "source-replay",
       {
         planId,
-        status: options.completed === options.total ? "completed" : "running",
+        status: options.completed === options.total ? "waiting" : "running",
         completed: options.completed,
         total: options.total,
         unit: "segments",
       },
-      options.completed === options.total,
+      false,
     );
   }
 
@@ -186,6 +186,10 @@ export class XTapJobProgress {
   }
 
   async manifestPublished(): Promise<void> {
+    const replay = this.#reporter.tracks.find((track) => track.key === "source-replay");
+    if (replay !== undefined && replay.status !== "completed") {
+      await this.update("source-replay", { status: "completed" }, true);
+    }
     await this.update(
       "manifest-publication",
       { status: "completed", completed: 1, total: 1, unit: "manifests" },
