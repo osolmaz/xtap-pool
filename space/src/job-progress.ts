@@ -6,7 +6,7 @@ import {
   TransientProgressError,
 } from "@osolmaz/hf-job-control";
 import type { ProgressObjectStore, ProgressStatus, ProgressTrack } from "@osolmaz/hf-job-control";
-import { downloadFile, listFiles, uploadFile } from "@huggingface/hub";
+import { downloadFile, HubApiError, listFiles, uploadFile } from "@huggingface/hub";
 import type { QueueDepth } from "@xtap-pool/shared";
 
 const TRACKS = [
@@ -284,6 +284,10 @@ function labelFor(key: TrackKey): string {
     .join(" ");
 }
 
+export function isMissingProgressPath(error: unknown): boolean {
+  return error instanceof HubApiError && error.statusCode === 404;
+}
+
 export function createProgressObjectStore(
   bucket: string,
   accessToken: string,
@@ -313,6 +317,7 @@ export function createProgressObjectStore(
         }
         return paths.sort();
       } catch (error) {
+        if (isMissingProgressPath(error)) return [];
         throw new TransientProgressError(`progress list failed: ${prefix}`, { cause: error });
       }
     },

@@ -2,9 +2,10 @@ import { Buffer } from "node:buffer";
 
 import { ObjectProgressStore } from "@osolmaz/hf-job-control";
 import type { ProgressObjectStore } from "@osolmaz/hf-job-control";
+import { HubApiError } from "@huggingface/hub";
 import { describe, expect, it } from "vitest";
 
-import { XTapJobProgress } from "../src/job-progress.js";
+import { isMissingProgressPath, XTapJobProgress } from "../src/job-progress.js";
 
 class MemoryObjects implements ProgressObjectStore {
   readonly bucketId = "owner/index";
@@ -25,6 +26,11 @@ class MemoryObjects implements ProgressObjectStore {
 }
 
 describe("XTapJobProgress", () => {
+  it("treats a missing claim prefix as an empty progress history", () => {
+    expect(isMissingProgressPath(new HubApiError("https://example.test", 404))).toBe(true);
+    expect(isMissingProgressPath(new HubApiError("https://example.test", 500))).toBe(false);
+  });
+
   it("publishes exact terminal state for every worker phase", async () => {
     const objects = new MemoryObjects();
     const progress = await XTapJobProgress.create({
