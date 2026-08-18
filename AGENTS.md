@@ -21,4 +21,12 @@ vanilla JS — keep upstream style, record changes in `extension/VENDORED.md`).
   client-supplied attribution fields.
 - Add a regression test for every bug fix.
 - Use Conventional Commits.
+
+## Background enrichment Jobs
+
+- The repository's checked-in scheduled enrichment contract is standing production work. Keep the canonical Hugging Face schedule active and let it run in the background.
+- Launch, resume, or retry Jobs from that unchanged contract without asking for per-run cost approval. Its checked-in schedule and hard limits are the approved bounds.
+- Keep Space-side enrichment disabled and keep only one physical enrichment Job active at a time. Preserve durable checkpoints, receipts, manifests, segments, and referenced indexes across retries.
+- Suspend the schedule only as long as needed to prevent overlap during maintenance, recovery, or the required sequential canary. Restore the validated canonical schedule immediately afterward.
+- Routine operation must not wait for approval. Ask only when safe continuation requires a change to the contract, source, credentials, hardware, schedule, or hard limits, or when a deterministic shared defect makes another retry unsafe.
 - Never inject or execute code in a website's main world, replace or wrap website APIs, or modify page-owned code. Capture website signals through passive browser-level listeners from extension-owned contexts. The current vendored `content-main.js` fetch/XHR interception violates this boundary and must be replaced rather than extended or treated as precedent.
