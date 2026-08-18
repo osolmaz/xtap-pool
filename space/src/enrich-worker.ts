@@ -22,6 +22,7 @@ import type {
   FreeLabelEvent,
   LabelAssignment,
   LabelConfig,
+  QueueDepth,
 } from "@xtap-pool/shared";
 
 import type { StorageLog } from "./bucket-log.js";
@@ -327,6 +328,12 @@ export type FreeLabelJudge = (
   maxTokens?: number,
 ) => Promise<FreeLabelJudgeResult>;
 
+export type EnrichWorkerProgress = {
+  queue(depth: QueueDepth): Promise<void>;
+  registryScan(scanned: number, total: number): Promise<void>;
+  receiptPublished(): Promise<void>;
+};
+
 export type EnrichWorkerDeps = {
   enrichStore: EnrichStore;
   log: StorageLog;
@@ -344,6 +351,7 @@ export type EnrichWorkerDeps = {
   verifyHubLabel?: HubVerifier;
   judgeFreeLabel?: FreeLabelJudge;
   lock?: <T>(fn: () => Promise<T>) => Promise<T>;
+  progress?: EnrichWorkerProgress;
 };
 
 const llmUnitSchema = z
@@ -428,6 +436,7 @@ export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichRecei
   deps.enrichStore.setContractHash(contractHash);
   const receipt = initReceipt(contractHash, workerId, deps.now, maxConcurrentCalls);
   deps.enrichStore.recoverExpiredLeases();
+  await deps.progress?.queue(deps.enrichStore.queueProgress());
   const size = deps.unitsPerCall ?? DEFAULT_UNITS_PER_CALL;
   const claimPageSize = size * maxConcurrentCalls;
   const startedAt = deps.now().getTime();
@@ -470,6 +479,7 @@ export async function runEnrichTick(deps: EnrichWorkerDeps): Promise<EnrichRecei
     if (deps.writeEmptyReceipt === true || hasReceiptActivity(receipt)) {
       const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
       await lock(() => writeReceipt(deps, receipt));
+      await deps.progress?.receiptPublished();
     }
     return receipt;
   } finally {
@@ -1154,6 +1164,7 @@ async function persistAndApply(
     return false;
   }
   receipt.units += rows.length;
+  await deps.progress?.queue(deps.enrichStore.queueProgress());
   return true;
 }
 
@@ -1366,9 +1377,11 @@ async function settleRegistryDecisions(
       total,
       complete: false,
     };
+    await deps.progress?.registryScan(scanned, total);
     return reason;
   };
 
+  await deps.progress?.registryScan(scanned, total);
   for (let start = 0; start < names.length; start += concurrency) {
     const stopped = ceilingHit(receipt, deps.ceilings ?? {}, deps.now, startedAt);
     if (stopped !== undefined) return stop(stopped);
@@ -1433,6 +1446,7 @@ async function settleRegistryDecisions(
     }
     await persistRegistryDecisions(deps, receipt, decisions);
     decisions = [];
+    await deps.progress?.registryScan(scanned, total);
   }
 
   if (recordCompletedProgress && (names.length > 0 || previousScan !== undefined)) {
@@ -1490,6 +1504,7 @@ async function persistAttemptAndApply(deps: EnrichWorkerDeps, event: AttemptEven
     );
     deps.enrichStore.replayAttemptEvent(validated);
   });
+  await deps.progress?.queue(deps.enrichStore.queueProgress());
 }
 
 async function writeReceipt(deps: EnrichWorkerDeps, receipt: EnrichReceipt): Promise<void> {

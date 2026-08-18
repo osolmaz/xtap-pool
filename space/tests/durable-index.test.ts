@@ -13,6 +13,7 @@ import type {
   BucketFile,
   DurableIndexBucketClient,
   DurableIndexOptions,
+  DurableIndexProgress,
 } from "../src/durable-index.js";
 import { makePooled } from "./helpers.js";
 
@@ -45,15 +46,28 @@ class MemoryIndexBucket implements DurableIndexBucketClient {
   files = new Map<string, Buffer>();
   removed: string[] = [];
 
-  async download(path: string, destination: string): Promise<boolean> {
+  async download(
+    path: string,
+    destination: string,
+    progress?: (completed: number, total: number) => Promise<void>,
+  ): Promise<boolean> {
     const content = this.files.get(path);
     if (content === undefined) return false;
+    await progress?.(0, content.byteLength);
     writeFileSync(destination, content);
+    await progress?.(content.byteLength, content.byteLength);
     return true;
   }
 
-  async uploadFile(path: string, source: string): Promise<void> {
-    this.files.set(path, readFileSync(source));
+  async uploadFile(
+    path: string,
+    source: string,
+    progress?: (completed: number, total: number) => Promise<void>,
+  ): Promise<void> {
+    const content = readFileSync(source);
+    await progress?.(0, content.byteLength);
+    this.files.set(path, content);
+    await progress?.(content.byteLength, content.byteLength);
   }
 
   async readText(path: string): Promise<string | undefined> {
@@ -106,6 +120,36 @@ describe("DurableIndex", () => {
     expect(advance.filesChanged).toBe(1);
     expect(advance.counts.tweets).toBe(2);
     restored.close();
+  });
+
+  it("reports restore, replay, build, upload, verify, and manifest progress", async () => {
+    await appendTweet("1");
+    const restoreDatabase = vi.fn(() => Promise.resolve());
+    const sourceReplay = vi.fn(() => Promise.resolve());
+    const databaseBuild = vi.fn(() => Promise.resolve());
+    const databaseUpload = vi.fn(() => Promise.resolve());
+    const databaseVerify = vi.fn(() => Promise.resolve());
+    const manifestPublished = vi.fn(() => Promise.resolve());
+    const progress: DurableIndexProgress = {
+      restoreDatabase,
+      sourceReplay,
+      databaseBuild,
+      databaseUpload,
+      databaseVerify,
+      manifestPublished,
+    };
+    const first = await DurableIndex.bootstrap({ ...options("progress-first"), progress });
+    await first.publish();
+    first.close();
+    const restored = await DurableIndex.restore({ ...options("progress-restored"), progress });
+    restored.close();
+
+    expect(sourceReplay).toHaveBeenCalled();
+    expect(databaseBuild).toHaveBeenLastCalledWith(true);
+    expect(databaseUpload).toHaveBeenCalled();
+    expect(databaseVerify).toHaveBeenCalled();
+    expect(manifestPublished).toHaveBeenCalledOnce();
+    expect(restoreDatabase).toHaveBeenCalled();
   });
 
   it("fails closed when an exact snapshot segment is missing or changed", async () => {

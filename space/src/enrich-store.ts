@@ -1186,6 +1186,10 @@ export class EnrichStore {
     return { units: row.units, authors: row.authors, days: row.days };
   }
 
+  queueProgress(): QueueDepth {
+    return this.queueDepth({});
+  }
+
   labelsSummary(
     taxonomy: readonly LabelConfig[],
     selection: UnitSelection = {},

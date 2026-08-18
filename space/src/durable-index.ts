@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, openAsBlob } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -85,9 +85,20 @@ export type DurableIndexStats = {
 };
 export type BucketFile = { path: string; uploadedAt?: string };
 
+export type ByteProgress = (completed: number, total: number) => Promise<void>;
+
+export type DurableIndexProgress = {
+  restoreDatabase(completed: number, total: number): Promise<void>;
+  sourceReplay(options: { revision: string; completed: number; total: number }): Promise<void>;
+  databaseBuild(completed: boolean): Promise<void>;
+  databaseUpload(completed: number, total: number): Promise<void>;
+  databaseVerify(completed: number, total: number): Promise<void>;
+  manifestPublished(): Promise<void>;
+};
+
 export type DurableIndexBucketClient = {
-  download(path: string, destination: string): Promise<boolean>;
-  uploadFile(path: string, source: string): Promise<void>;
+  download(path: string, destination: string, progress?: ByteProgress): Promise<boolean>;
+  uploadFile(path: string, source: string, progress?: ByteProgress): Promise<void>;
   readText(path: string): Promise<string | undefined>;
   writeText(path: string, content: string): Promise<void>;
   list(prefix: string): Promise<readonly BucketFile[]>;
@@ -104,6 +115,7 @@ export type DurableIndexOptions = {
   contractHash: string;
   bucketClient?: DurableIndexBucketClient;
   predecessorKeys?: readonly string[];
+  progress?: DurableIndexProgress;
 };
 
 type MetadataRow = {
@@ -152,7 +164,13 @@ export class DurableIndex {
     await mkdir(dirname(options.databasePath), { recursive: true });
     const staged = `${options.databasePath}.${randomUUID()}.download`;
     try {
-      if (!(await bucket.download(manifest.database.key, staged))) {
+      if (
+        !(await bucket.download(
+          manifest.database.key,
+          staged,
+          options.progress?.restoreDatabase.bind(options.progress),
+        ))
+      ) {
         throw new Error(`durable index database is missing: ${manifest.database.key}`);
       }
       await assertFileSha256(staged, manifest.database.sha256);
@@ -223,6 +241,12 @@ export class DurableIndex {
     if (deleted.length > 0)
       throw new Error(`raw Bucket source segments were deleted: ${deleted.slice(0, 3).join(", ")}`);
 
+    await this.options.progress?.sourceReplay({
+      revision,
+      completed: 0,
+      total: snapshot.files.length,
+    });
+    let inspected = 0;
     const staged: {
       file: BucketSnapshotFile;
       segment: Awaited<ReturnType<BucketLog["loadSegment"]>>;
@@ -232,9 +256,15 @@ export class DurableIndex {
       if (old !== undefined) {
         assertSameSourceFile(old, file);
         if (verifyKnown) await this.options.log.loadSegment(file);
-        continue;
+      } else {
+        staged.push({ file, segment: await this.options.log.loadSegment(file) });
       }
-      staged.push({ file, segment: await this.options.log.loadSegment(file) });
+      inspected += 1;
+      await this.options.progress?.sourceReplay({
+        revision,
+        completed: inspected,
+        total: snapshot.files.length,
+      });
     }
 
     staged.sort(compareReplayOrder);
@@ -267,6 +297,7 @@ export class DurableIndex {
     return { advance, manifest: await this.publish() };
   }
 
+  // eslint-disable-next-line complexity -- Publication verifies every durable stage before replacing the active pointer.
   async publish(): Promise<DurableIndexManifest> {
     const baselineManifest = await this.bucket.readText(CURRENT_MANIFEST_KEY);
     const metadata = readMetadata(this.store.database);
@@ -286,6 +317,7 @@ export class DurableIndex {
     const publishPath = `${this.options.databasePath}.${randomUUID()}.publish`;
     const verifyPath = `${this.options.databasePath}.${randomUUID()}.verify`;
     try {
+      await this.options.progress?.databaseBuild(false);
       await this.store.database.backup(publishPath);
       const sha = await fileSha256(publishPath);
       const key = `${DATABASE_PREFIX}/${sha}.sqlite`;
@@ -300,8 +332,19 @@ export class DurableIndex {
         counts,
       };
       validateStandaloneDatabase(publishPath, manifest, this.options);
-      await this.bucket.uploadFile(key, publishPath);
-      if (!(await this.bucket.download(key, verifyPath)))
+      await this.options.progress?.databaseBuild(true);
+      await this.bucket.uploadFile(
+        key,
+        publishPath,
+        this.options.progress?.databaseUpload.bind(this.options.progress),
+      );
+      if (
+        !(await this.bucket.download(
+          key,
+          verifyPath,
+          this.options.progress?.databaseVerify.bind(this.options.progress),
+        ))
+      )
         throw new Error(`uploaded durable index database is unavailable: ${key}`);
       await assertFileSha256(verifyPath, sha);
       validateStandaloneDatabase(verifyPath, manifest, this.options);
@@ -318,6 +361,7 @@ export class DurableIndex {
       ) {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
+      await this.options.progress?.manifestPublished();
       this.publishedKeys = [key, ...predecessors];
       await this.pruneDatabases(this.publishedKeys);
       return manifest;
@@ -393,20 +437,40 @@ export function createDurableIndexBucketClient(
 ): DurableIndexBucketClient {
   const repo = { type: "bucket", name: indexBucket } as const;
   return {
-    async download(path, destination): Promise<boolean> {
+    async download(path, destination, progress): Promise<boolean> {
       const blob = await downloadFile({ repo, accessToken, path, xet: false });
       if (blob === null) return false;
+      const downloaded = blob;
       await mkdir(dirname(destination), { recursive: true });
-      await pipeline(Readable.fromWeb(blob.stream()), createWriteStream(destination));
+      await progress?.(0, downloaded.size);
+      let completed = 0;
+      async function* countedChunks(): AsyncGenerator<Buffer> {
+        for await (const chunk of Readable.fromWeb(downloaded.stream())) {
+          const bytes =
+            typeof chunk === "string"
+              ? Buffer.from(chunk)
+              : chunk instanceof Uint8Array
+                ? Buffer.from(chunk)
+                : undefined;
+          if (bytes === undefined) throw new Error("durable index download returned invalid bytes");
+          completed += bytes.byteLength;
+          await progress?.(completed, downloaded.size);
+          yield bytes;
+        }
+      }
+      await pipeline(Readable.from(countedChunks()), createWriteStream(destination));
       return true;
     },
-    async uploadFile(path, source): Promise<void> {
+    async uploadFile(path, source, progress): Promise<void> {
+      const total = (await stat(source)).size;
+      await progress?.(0, total);
       await uploadFile({
         repo,
         accessToken,
         file: { path, content: await openAsBlob(source) },
         commitTitle: `Publish ${path}`,
       });
+      await progress?.(total, total);
     },
     async readText(path): Promise<string | undefined> {
       const blob = await downloadFile({ repo, accessToken, path, xet: false });
