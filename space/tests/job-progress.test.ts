@@ -58,9 +58,19 @@ describe("XTapJobProgress", () => {
     if (stored === null) throw new Error("progress snapshot is missing");
     expect(stored.snapshot.state).toBe("waiting");
     expect(stored.snapshot.tracks).toHaveLength(13);
-    expect(stored.snapshot.tracks.every((track) => track.status === "completed")).toBe(true);
+    expect(
+      stored.snapshot.tracks
+        .filter(
+          (track) =>
+            !["enrichment-queue", "enrichment-successful", "enrichment-blocked"].includes(
+              track.key,
+            ),
+        )
+        .every((track) => track.status === "completed"),
+    ).toBe(true);
     expect(stored.snapshot.tracks.find((track) => track.key === "enrichment-queue")).toMatchObject({
-      completed: 10,
+      status: "waiting",
+      completed: 8,
       total: 10,
       unit: "records",
     });
@@ -74,10 +84,19 @@ describe("XTapJobProgress", () => {
       objectStore: objects,
     });
     await replacement.restoreDatabase(0, 100);
+    await replacement.queue({ pending: 0, running: 1, retrying: 0, blocked: 1, done: 8 });
+    await replacement.queue({ pending: 0, running: 0, retrying: 0, blocked: 0, done: 10 });
     const resumed = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
     if (resumed === null) throw new Error("resumed progress snapshot is missing");
     expect(resumed.snapshot.attempt_id).toBe("job-2");
     expect(resumed.snapshot.state).toBe("running");
+    expect(resumed.snapshot.tracks.find((track) => track.key === "enrichment-queue")).toMatchObject(
+      {
+        status: "completed",
+        completed: 10,
+        total: 10,
+      },
+    );
     expect(resumed.snapshot.sequence).toBeGreaterThan(stored.snapshot.sequence);
   });
 

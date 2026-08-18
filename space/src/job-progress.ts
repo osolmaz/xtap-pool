@@ -144,27 +144,35 @@ export class XTapJobProgress {
   }
 
   async queue(depth: QueueDepth): Promise<void> {
+    const previousStatus = this.#reporter.tracks.find(
+      (track) => track.key === "enrichment-queue",
+    )?.status;
     const total = depth.pending + depth.running + depth.retrying + depth.blocked + depth.done;
-    const queueComplete = depth.pending + depth.running + depth.retrying === 0;
+    const active = depth.pending + depth.running + depth.retrying;
+    const queueComplete = active === 0 && depth.blocked === 0;
+    const queueStatus = queueComplete ? "completed" : active === 0 ? "waiting" : "running";
     await this.update("enrichment-queue", {
       planId: `queue-${total.toString()}-${this.#sourcePlanId.slice(-24)}`,
-      status: queueComplete ? "completed" : "running",
-      completed: depth.done + depth.blocked,
+      status: queueStatus,
+      completed: depth.done,
       total,
       unit: "records",
     });
     const queuePlanId = `queue-${total.toString()}-${this.#sourcePlanId.slice(-24)}`;
     await this.update("enrichment-successful", {
       planId: queuePlanId,
-      status: queueComplete ? "completed" : "running",
+      status: queueStatus,
       completed: depth.done,
       unit: "records",
     });
     await this.update("enrichment-blocked", {
-      planId: queuePlanId,
-      status: queueComplete ? "completed" : "running",
+      planId: `blocked-${depth.blocked.toString()}-${this.#sourcePlanId.slice(-24)}`,
+      status: depth.blocked === 0 ? "completed" : "waiting",
       completed: depth.blocked,
       unit: "records",
+    });
+    await this.#reporter.flush({
+      force: previousStatus !== queueStatus || queueComplete,
     });
   }
 
