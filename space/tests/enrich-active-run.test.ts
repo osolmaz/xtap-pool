@@ -31,6 +31,13 @@ class MemoryObjects implements CheckpointObjectStore {
   }
 }
 
+class CorruptActivationReadObjects extends MemoryObjects {
+  override read(path: string): Promise<Uint8Array | null> {
+    if (path.includes("/activations/")) return Promise.resolve(new Uint8Array());
+    return super.read(path);
+  }
+}
+
 const SHA = "a".repeat(64);
 
 function plan(createdAt: string, baseSha: string) {
@@ -77,6 +84,125 @@ async function putPlan(store: MemoryObjects, value: ReturnType<typeof plan>): Pr
 }
 
 describe("active enrichment run history", () => {
+  it("rejects empty history and missing plans, and keeps activation idempotent", async () => {
+    const store = new MemoryObjects();
+    await expect(resolveActiveEnrichmentRun(store)).rejects.toThrow("history is empty");
+    await expect(
+      activateEnrichmentRun({
+        store,
+        runId: "missing",
+        planSha256: "1".repeat(64),
+        activatedAt: "2026-08-19T12:00:00.000Z",
+      }),
+    ).rejects.toThrow("required enrichment object is missing");
+    const first = plan("2026-08-19T12:00:00.000Z", "f".repeat(64));
+    await putPlan(store, first);
+    const activated = await activateEnrichmentRun({
+      store,
+      runId: first.plan.run_id,
+      planSha256: first.sha256,
+      activatedAt: "2026-08-19T12:00:00.000Z",
+    });
+    await expect(
+      activateEnrichmentRun({
+        store,
+        runId: first.plan.run_id,
+        planSha256: first.sha256,
+        activatedAt: "2026-08-19T13:00:00.000Z",
+        expectedCurrentPlanSha256: first.sha256,
+      }),
+    ).resolves.toEqual(activated);
+    expect([...store.files.keys()].filter((key) => key.includes("/activations/"))).toHaveLength(1);
+  });
+
+  it("rejects activation claims with invalid root and generation identities", async () => {
+    const created = plan("2026-08-19T12:00:00.000Z", "f".repeat(64));
+    const wrongRoot = new MemoryObjects();
+    await putPlan(wrongRoot, created);
+    wrongRoot.files.set(
+      "operations/enrichment/runs/activations/000000000001.json",
+      canonicalPlanBytes({
+        schema_version: 1,
+        generation: 1,
+        run_id: created.plan.run_id,
+        plan_sha256: created.sha256,
+        previous_plan_sha256: "9".repeat(64),
+        activated_at: "2026-08-19T12:00:00.000Z",
+      }),
+    );
+    await expect(resolveActiveEnrichmentRun(wrongRoot)).rejects.toThrow(
+      "must not have a predecessor",
+    );
+
+    const wrongGeneration = new MemoryObjects();
+    await putPlan(wrongGeneration, created);
+    wrongGeneration.files.set(
+      "operations/enrichment/runs/activations/000000000001.json",
+      canonicalPlanBytes({
+        schema_version: 1,
+        generation: 2,
+        run_id: created.plan.run_id,
+        plan_sha256: created.sha256,
+        previous_plan_sha256: null,
+        activated_at: "2026-08-19T12:00:00.000Z",
+      }),
+    );
+    await expect(resolveActiveEnrichmentRun(wrongGeneration)).rejects.toThrow(
+      "generation does not match",
+    );
+
+    const wrongEdge = new MemoryObjects();
+    const successor = plan("2026-08-19T13:00:00.000Z", "1".repeat(64));
+    await putPlan(wrongEdge, created);
+    await putPlan(wrongEdge, successor);
+    await activateEnrichmentRun({
+      store: wrongEdge,
+      runId: created.plan.run_id,
+      planSha256: created.sha256,
+      activatedAt: "2026-08-19T12:00:00.000Z",
+    });
+    wrongEdge.files.set(
+      "operations/enrichment/runs/activations/000000000002.json",
+      canonicalPlanBytes({
+        schema_version: 1,
+        generation: 2,
+        run_id: successor.plan.run_id,
+        plan_sha256: successor.sha256,
+        previous_plan_sha256: "8".repeat(64),
+        activated_at: "2026-08-19T13:00:00.000Z",
+      }),
+    );
+    await expect(resolveActiveEnrichmentRun(wrongEdge)).rejects.toThrow("predecessor mismatch");
+  });
+
+  it("rejects mismatched plan paths and activation read-back", async () => {
+    const created = plan("2026-08-19T12:00:00.000Z", "f".repeat(64));
+    const alias = new MemoryObjects();
+    await alias.writeImmutable(
+      "operations/enrichment/runs/alias/plan.json",
+      canonicalPlanBytes(created.plan),
+    );
+    await expect(
+      activateEnrichmentRun({
+        store: alias,
+        runId: "alias",
+        planSha256: created.sha256,
+        activatedAt: "2026-08-19T12:00:00.000Z",
+      }),
+    ).rejects.toThrow("plan ID mismatch");
+
+    const corrupt = new CorruptActivationReadObjects();
+    await putPlan(corrupt, created);
+    await expect(
+      activateEnrichmentRun({
+        store: corrupt,
+        runId: created.plan.run_id,
+        planSha256: created.sha256,
+        activatedAt: "2026-08-19T12:00:00.000Z",
+      }),
+    ).rejects.toThrow("read-back mismatch");
+  });
+
   it("resolves immutable activation claims instead of trusting the mutable pointer", async () => {
     const store = new MemoryObjects();
     const first = plan("2026-08-19T12:00:00.000Z", "f".repeat(64));
