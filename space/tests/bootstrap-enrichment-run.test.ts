@@ -54,12 +54,20 @@ describe("enrichment production bootstrap", () => {
       registryBaselineScanned: 7,
     });
     expect(result).toMatchObject({
-      queueTotal: 3,
+      queueTotal: 4,
       queueBaselineDone: 2,
       registryTotal: 8,
-      retainedQueueUnits: 1,
-      retainedTweets: 2,
+      retainedQueueUnits: 2,
+      retainedTweets: 3,
+      queueRetrying: [],
     });
+    expect(result.queueBlocked).toHaveLength(1);
+    expect(result.queueBlocked[0]).toMatchObject({
+      ordinal: 2,
+      attempts: 1,
+      reason: "blocked",
+    });
+    expect(result.queueBlocked[0]?.evidence_sha256).toMatch(/^[0-9a-f]{64}$/u);
     const work = new Database(join(directory, "work.sqlite"), { readonly: true });
     expect(
       work.prepare("SELECT ordinal, unit_id FROM worker_queue_plan ORDER BY ordinal").all(),
@@ -67,6 +75,7 @@ describe("enrichment production bootstrap", () => {
       { ordinal: 0, unit_id: "u1" },
       { ordinal: 1, unit_id: "u2" },
       { ordinal: 2, unit_id: "u3" },
+      { ordinal: 3, unit_id: "u4" },
     ]);
     expect(work.prepare("SELECT ordinal, name FROM worker_registry_plan").all()).toEqual([
       { ordinal: 7, name: "candidate" },
@@ -165,7 +174,7 @@ async function makeFixture(): Promise<string> {
   const insertQueue = db.prepare(
     `INSERT INTO enrich_queue VALUES (?, ?, 0, NULL, NULL, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
   );
-  for (const [index, status] of ["done", "pending", "done"].entries()) {
+  for (const [index, status] of ["done", "pending", "blocked", "done"].entries()) {
     const id = `t${String(index + 1)}`;
     const unit = `u${String(index + 1)}`;
     const time = `2026-08-19T12:00:0${String(index)}.000Z`;
@@ -180,7 +189,7 @@ async function makeFixture(): Promise<string> {
   db.prepare("INSERT INTO label_assignments VALUES ('u1', 'candidate', 'free')").run();
   db.prepare("INSERT INTO label_evidence VALUES ('u1', 'candidate', 'free', 't1', 'quote')").run();
   db.prepare("INSERT INTO registry_revision VALUES (1, 10)").run();
-  db.prepare(`INSERT INTO source_segments VALUES ('segment', ?, NULL, 1, ?, 3, 0, 0, 0, 0)`).run(
+  db.prepare(`INSERT INTO source_segments VALUES ('segment', ?, NULL, 1, ?, 4, 0, 0, 0, 0)`).run(
     "f".repeat(64),
     "f".repeat(64),
   );
