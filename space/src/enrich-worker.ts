@@ -1150,20 +1150,14 @@ async function persistAndApply(
     at: nowIso,
     first_queued_at: item.firstQueuedAt,
   }));
+  let segmentKey: string | undefined;
   try {
     const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
-    let segmentKey: string | undefined;
     await lock(async () => {
       const stampedRegistryEvents = stampRegistryEvents(deps, registryEvents);
       segmentKey = await persistRowsAndEvents(deps, rows, events, stampedRegistryEvents);
       for (const event of stampedRegistryEvents) deps.enrichStore.applyRegistryEvent(event);
       for (const row of rows) deps.enrichStore.applyEnrichment(row);
-    });
-    if (segmentKey === undefined) throw new Error("durable queue segment key is missing");
-    await deps.durableOutput?.({
-      kind: "queue",
-      segmentKey,
-      successfulUnitIds: successful.map((item) => item.unitId),
     });
   } catch (error) {
     const errorText = errorMessage(error);
@@ -1187,6 +1181,12 @@ async function persistAndApply(
     receipt.retries += batch.length;
     return false;
   }
+  if (segmentKey === undefined) throw new Error("durable queue segment key is missing");
+  await deps.durableOutput?.({
+    kind: "queue",
+    segmentKey,
+    successfulUnitIds: successful.map((item) => item.unitId),
+  });
   receipt.units += rows.length;
   await deps.progress?.queue(deps.enrichStore.queueProgress());
   return true;
@@ -1477,7 +1477,21 @@ async function settleRegistryDecisions(
               ? deps.enrichStore.rejectionEvent(name, "constrained-review-rejected", quotes)
               : undefined;
       }
-      if (event !== undefined) decisions.push({ ...event, counts: signals });
+      decisions.push(
+        event === undefined
+          ? {
+              name,
+              status: "candidate",
+              at: deps.now().toISOString(),
+              contract_hash: receipt.contract_hash,
+              registry_revision: 1,
+              reason: "reviewed-no-transition",
+              quotes: [...quotes],
+              counts: signals,
+              actor: "worker",
+            }
+          : { ...event, counts: signals },
+      );
       scanned += 1;
       afterName = name;
     }

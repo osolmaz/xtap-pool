@@ -44,7 +44,9 @@ The implementation must:
 - Store completion with compact bitmaps instead of full completed queue rows.
 - Preserve retry and blocked details only for unresolved work.
 - Save a registry cursor that queue work cannot reset.
+- Persist one ordered registry event for every scanned candidate, including candidates that stay unchanged, so the cursor can always advance across exact names and ordinals.
 - Publish and verify immutable result batches before checkpoint progress moves.
+- Treat a checkpoint failure after a durable success as an orphan-output recovery case, not as a failed provider result.
 - Use immutable sequence claims as the authoritative checkpoint history.
 - Use a contiguous immutable activation-claim chain as the authoritative active-run history.
 - Treat the mutable active-run pointer as a startup shortcut only.
@@ -457,6 +459,6 @@ The work is complete when:
 - Interrupted final publication resumes from its last claimed state and reuses
   uploaded or verified immutable artifacts.
 - Resumed and uninterrupted runs produce the same logical database and manifest.
-- Invalid or conflicting state fails before new provider calls or pointer writes.
+- Invalid, duplicate, overlapping, or conflicting ordinal state fails before new provider calls or pointer writes.
 - Existing production objects remain unchanged during implementation and import.
 - Production uses one active non-concurrent schedule and no legacy runtime path.

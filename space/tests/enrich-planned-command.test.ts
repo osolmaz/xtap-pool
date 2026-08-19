@@ -10,7 +10,11 @@ import {
   parseSourceSegments,
   runIsComplete,
 } from "../src/enrich-planned-command.js";
-import { createEmptyEnrichmentState, recordQueueAttempt } from "../src/enrich-state.js";
+import {
+  createEmptyEnrichmentState,
+  recordQueueAttempt,
+  validateEnrichmentState,
+} from "../src/enrich-state.js";
 
 const SHA = "a".repeat(64);
 const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111-8111-111111111111-${"b".repeat(64)}.json.gz`;
@@ -40,7 +44,7 @@ function attempt(outcome: AttemptEvent["outcome"]): AttemptEvent {
   };
 }
 
-function decision(status: "approved" | "rejected"): FreeLabelEvent {
+function decision(status: "candidate" | "approved" | "rejected"): FreeLabelEvent {
   return {
     name: "candidate",
     status,
@@ -124,7 +128,7 @@ describe("planned enrichment recovery", () => {
       {
         kind: "registry",
         segmentKey: SEGMENT,
-        decisions: [decision("approved"), decision("rejected")],
+        decisions: [decision("approved"), decision("candidate")],
       },
       ordinals,
       "3".repeat(64),
@@ -141,10 +145,43 @@ describe("planned enrichment recovery", () => {
     expect(checkpoint.registry).toMatchObject({
       next_ordinal: 2,
       approved: 1,
-      rejected: 1,
+      rejected: 0,
     });
     expect(checkpoint.outputs.receipt.sequence).toBe(1);
     expect(runIsComplete(checkpoint)).toBe(true);
+  });
+
+  it("rejects duplicate and overlapping unresolved queue ordinals", () => {
+    const base = state();
+    const retry = {
+      ordinal: 1,
+      attempts: 1,
+      error_class: "timeout",
+      next_retry_at: null,
+    };
+    expect(() =>
+      validateEnrichmentState({
+        ...base,
+        queue: { ...base.queue, retrying: [retry, retry] },
+      }),
+    ).toThrow("retry ordinals must be unique");
+    expect(() =>
+      validateEnrichmentState({
+        ...base,
+        queue: {
+          ...base.queue,
+          retrying: [retry],
+          blocked: [
+            {
+              ordinal: 1,
+              attempts: 5,
+              reason: "invalid_output",
+              evidence_sha256: SHA,
+            },
+          ],
+        },
+      }),
+    ).toThrow("unique and disjoint");
   });
 
   it("reconstructs retry and registry outputs from orphan raw segments", () => {

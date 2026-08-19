@@ -165,17 +165,26 @@ export function validateEnrichmentState(value: {
   if (completed !== metadata.queue.done) {
     throw new Error("queue completion bitmap count mismatch");
   }
+  const unresolvedOrdinals = new Set<number>();
   for (const retry of metadata.queue.retrying) {
     requireOrdinal(retry.ordinal, metadata.queue.total, "retry ordinal");
     if (isCompleted(bitmap, retry.ordinal)) {
       throw new Error("completed queue ordinal cannot remain retrying");
     }
+    if (unresolvedOrdinals.has(retry.ordinal)) {
+      throw new Error("retry ordinals must be unique");
+    }
+    unresolvedOrdinals.add(retry.ordinal);
   }
   for (const blocked of metadata.queue.blocked) {
     requireOrdinal(blocked.ordinal, metadata.queue.total, "blocked ordinal");
     if (isCompleted(bitmap, blocked.ordinal)) {
       throw new Error("completed queue ordinal cannot remain blocked");
     }
+    if (unresolvedOrdinals.has(blocked.ordinal)) {
+      throw new Error("blocked ordinals must be unique and disjoint from retries");
+    }
+    unresolvedOrdinals.add(blocked.ordinal);
   }
   if (metadata.registry.next_ordinal > metadata.registry.total) {
     throw new Error("registry cursor exceeds total");
@@ -245,7 +254,7 @@ export function recordQueueAttempt(
 
 export function advanceRegistryCursor(
   state: EnrichmentCheckpointState,
-  decisions: readonly ("approved" | "rejected")[],
+  decisions: readonly ("candidate" | "approved" | "rejected")[],
 ): EnrichmentCheckpointState {
   const next = state.registry.next_ordinal + decisions.length;
   if (next > state.registry.total) throw new Error("registry decisions exceed frozen plan");
