@@ -45,6 +45,7 @@ The implementation must:
 - Preserve retry and blocked details only for unresolved work.
 - Save a registry cursor that queue work cannot reset.
 - Persist one ordered registry event for every scanned candidate, including candidates that stay unchanged, so the cursor can always advance across exact names and ordinals.
+- Validate every orphan row and attempt against the frozen unit input hash, taxonomy version, and enrichment contract before recovery advances progress.
 - Publish and verify immutable result batches before checkpoint progress moves.
 - Treat a checkpoint failure after a durable success as an orphan-output recovery case, not as a failed provider result.
 - Use immutable sequence claims as the authoritative checkpoint history.

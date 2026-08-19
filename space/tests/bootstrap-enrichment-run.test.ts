@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -71,10 +71,17 @@ describe("enrichment production bootstrap", () => {
     expect(work.prepare("SELECT ordinal, name FROM worker_registry_plan").all()).toEqual([
       { ordinal: 7, name: "candidate" },
     ]);
-    expect(work.prepare("SELECT COUNT(*) AS count FROM worker_unit_payloads").get()).toEqual({
-      count: 3,
-    });
+    expect(
+      work
+        .prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'worker_unit_payloads'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
     work.close();
+    expect((await stat(join(directory, "work.sqlite"))).size).toBeLessThan(
+      (await stat(join(directory, "source.sqlite"))).size,
+    );
   });
 
   it("writes only isolated immutable bootstrap objects", async () => {
@@ -162,7 +169,7 @@ async function makeFixture(): Promise<string> {
     const id = `t${String(index + 1)}`;
     const unit = `u${String(index + 1)}`;
     const time = `2026-08-19T12:00:0${String(index)}.000Z`;
-    insertTweet.run(id, time, time, time, id, JSON.stringify({ id }));
+    insertTweet.run(id, time, time, time, id, JSON.stringify({ id, padding: "x".repeat(100_000) }));
     insertMember.run(id, unit, time);
     insertQueue.run(unit, status, String(index).repeat(64), "c".repeat(64), time, time, time);
   }

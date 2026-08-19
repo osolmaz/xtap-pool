@@ -8,6 +8,7 @@ import {
   applyDurableOutput,
   outputsFromSegment,
   parseSourceSegments,
+  registryOutputOrdinals,
   runIsComplete,
 } from "../src/enrich-planned-command.js";
 import {
@@ -98,6 +99,20 @@ describe("planned enrichment recovery", () => {
       { unit_id: "u3", status: "blocked", attempts: 5 },
     ]);
     db.close();
+  });
+
+  it("maps registry results through a nonzero frozen baseline", () => {
+    expect(
+      registryOutputOrdinals(
+        [decision("candidate"), { ...decision("approved"), name: "second" }],
+        ["candidate", "second"],
+        7,
+        7,
+      ),
+    ).toEqual([7, 8]);
+    expect(() => registryOutputOrdinals([decision("candidate")], ["other"], 7, 7)).toThrow(
+      "frozen ordinal",
+    );
   });
 
   it("updates queue, attempt, registry, and receipt frontiers", () => {
@@ -248,13 +263,29 @@ describe("planned enrichment recovery", () => {
         },
       ],
     };
-    expect(outputsFromSegment(segment, ["candidate"], 0)).toEqual([
+    const identities = new Map([
+      ["u1", { inputHash: "input", taxonomyVersion: 1, contractHash: SHA }],
+      ["u2", { inputHash: "input", taxonomyVersion: 1, contractHash: SHA }],
+    ]);
+    expect(outputsFromSegment(segment, ["candidate"], 0, identities, SHA)).toEqual([
       { kind: "queue", successfulUnitIds: ["u1"] },
       { kind: "attempt", event: attempt("transient_failure") },
       { kind: "registry", decisions: [decision("approved")] },
       { kind: "receipt" },
     ]);
-    expect(() => outputsFromSegment(segment, ["candidate"], 2)).toThrow("cursor is outside");
+    expect(() => outputsFromSegment(segment, ["candidate"], 2, identities, SHA)).toThrow(
+      "cursor is outside",
+    );
+    const conflicting = structuredClone(segment);
+    const enrichment = conflicting.operations[0];
+    if (enrichment === undefined) throw new Error("enrichment operation is missing");
+    enrichment.lines[0] = (enrichment.lines[0] ?? "").replace(
+      '"input_hash":"input"',
+      '"input_hash":"different"',
+    );
+    expect(() => outputsFromSegment(conflicting, ["candidate"], 0, identities, SHA)).toThrow(
+      "frozen queue identity",
+    );
   });
 
   it("validates ordered source-segment metadata", () => {

@@ -51,20 +51,6 @@ export async function compactEnrichmentWorkDatabase(options: {
           name TEXT NOT NULL UNIQUE,
           evidence_hash TEXT NOT NULL
         );
-        DROP TABLE IF EXISTS worker_unit_payloads;
-        CREATE TABLE worker_unit_payloads (
-          unit_id TEXT PRIMARY KEY,
-          payload_json TEXT NOT NULL
-        );
-        INSERT INTO worker_unit_payloads (unit_id, payload_json)
-        SELECT unit_id, json_group_array(json)
-        FROM (
-          SELECT um.unit_id AS unit_id, tw.json AS json
-          FROM unit_members um
-          JOIN tweets tw ON tw.id = um.tweet_id
-          ORDER BY um.unit_id, um.captured_at, um.tweet_id
-        )
-        GROUP BY unit_id;
       `);
       const queueRows = db
         .prepare(
