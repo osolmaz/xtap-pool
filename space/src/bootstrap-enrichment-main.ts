@@ -61,12 +61,14 @@ async function main(): Promise<void> {
     },
   );
   try {
-    const advance = await index.advanceToLatest();
-    const sourceSegmentCount = (
+    const baseDatabaseBytes = (await stat(sourceDatabasePath)).size;
+    const baseSourceSegmentCount = (
       index.store.database.prepare("SELECT COUNT(*) AS count FROM source_segments").get() as {
         count: number;
       }
     ).count;
+    const baseRegistryRevision = index.enrichStore.registryRevision();
+    const advance = await index.advanceToLatest();
     const registryBaselineScanned = log.latestReceipt()?.registry_scan?.scanned ?? 0;
     const checkpointStore = createEnrichmentCheckpointStore({
       bucket: config.indexBucket,
@@ -97,10 +99,10 @@ async function main(): Promise<void> {
         base_index: {
           key: manifest.database.key,
           sha256: manifest.database.sha256,
-          bytes: (await stat(sourceDatabasePath)).size,
-          source_segment_count: sourceSegmentCount,
+          bytes: baseDatabaseBytes,
+          source_segment_count: baseSourceSegmentCount,
           receipt_count: manifest.counts.receipts,
-          registry_revision: index.enrichStore.registryRevision(),
+          registry_revision: baseRegistryRevision,
         },
       },
     });

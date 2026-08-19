@@ -503,7 +503,8 @@ describe("runEnrichTick", () => {
     log.commits.length = 0;
     const idle = await runEnrichTick(deps(fenced));
     expect(idle).toMatchObject({ units: 0, calls: 0, failures: 0 });
-    expect(log.commits).toHaveLength(0);
+    expect(log.commits).toHaveLength(1);
+    expect(log.commits[0]?.title).toBe("enrich: 0 units");
   });
 
   it("persists an explicit idle receipt for a scheduled Job canary", async () => {
@@ -858,6 +859,45 @@ describe("runEnrichTick", () => {
     expect(events).toContain("verified-hub-reference");
   });
 
+  it("persists every planned registry scan even when the candidate stays unchanged", async () => {
+    recordCandidate("below-threshold-model");
+    const outputs: Parameters<NonNullable<EnrichWorkerDeps["durableOutput"]>>[0][] = [];
+    const receipt = await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        verifyHubLabel: () => Promise.resolve(false),
+        registryPlan: {
+          names: ["below-threshold-model"],
+          baselineOrdinal: 0,
+          nextOrdinal: 0,
+          total: 1,
+        },
+        durableOutput: (output) => {
+          outputs.push(output);
+          return Promise.resolve();
+        },
+      }),
+    );
+    expect(receipt.registry_scan).toEqual({
+      after_name: "below-threshold-model",
+      scanned: 1,
+      total: 1,
+      complete: true,
+    });
+    expect(outputs).toEqual([
+      expect.objectContaining({
+        kind: "registry",
+        decisions: [
+          expect.objectContaining({
+            name: "below-threshold-model",
+            status: "candidate",
+            reason: "reviewed-no-transition",
+          }),
+        ],
+      }),
+      expect.objectContaining({ kind: "receipt" }),
+    ]);
+  });
+
   it("persists a receipt for a registry-only decision", async () => {
     seedUnit("100", "the new release runs quickly on our local hardware");
     const response = respondingClient((unitIds) =>
@@ -886,6 +926,25 @@ describe("runEnrichTick", () => {
     expect(receipt).toMatchObject({ units: 0, new_approvals: 1 });
     const receiptShard = log.files.get("enrichment/receipts/2026-07-06.jsonl") ?? "";
     expect(receiptShard).toContain('"new_approvals":1');
+  });
+
+  it("does not turn a checkpoint failure after durable success into a failed attempt", async () => {
+    seedUnit("100", "local model evidence");
+    const response = respondingClient(withEvidence);
+    await expect(
+      runEnrichTick(
+        deps(response, {
+          durableOutput: (output) =>
+            output.kind === "queue"
+              ? Promise.reject(new Error("checkpoint unavailable"))
+              : Promise.resolve(),
+        }),
+      ),
+    ).rejects.toThrow("checkpoint unavailable");
+    const attempts = log.files.get("enrichment/attempts/2026/07/attempts-2026-07-06.jsonl");
+    expect(attempts).toContain('"outcome":"success"');
+    expect(attempts).not.toContain("commit_failed");
+    expect(log.commits.some((commit) => commit.title.startsWith("enrich: 1 units"))).toBe(true);
   });
 
   it("verifies Hub candidates concurrently and commits decisions in name order", async () => {
@@ -1147,7 +1206,7 @@ describe("runEnrichTick", () => {
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line) as { registry_revision: number });
-    expect(events.map((event) => event.registry_revision)).toEqual([2, 3]);
+    expect(events.map((event) => event.registry_revision)).toEqual([2, 3, 4, 5]);
   });
 });
 

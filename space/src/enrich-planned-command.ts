@@ -186,7 +186,7 @@ export async function runPlannedEnrichmentCommand(
         phase,
         sequence: frontier.sequence + 1,
         previous_result_sha256: frontier.chain_sha256,
-        ordinals: outputOrdinals(output, ordinals),
+        ordinals: outputOrdinals(output, ordinals, registryNames, state.registry.next_ordinal),
         raw_segment_key: output.segmentKey,
         raw_segment_sha256: rawSegmentSha256(output.segmentKey),
         created_at: rawSegmentCreatedAt(output.segmentKey),
@@ -664,12 +664,7 @@ export function applyDurableOutput(
   if (output.kind === "registry") {
     next = advanceRegistryCursor(
       next,
-      output.decisions.map((decision) => {
-        if (decision.status !== "approved" && decision.status !== "rejected") {
-          throw new Error("frozen registry decision must be approved or rejected");
-        }
-        return decision.status;
-      }),
+      output.decisions.map((decision) => decision.status),
     );
     return advanceOutputFrontier(next, "registry", resultSha256);
   }
@@ -743,12 +738,7 @@ export function outputsFromSegment(
         if (event.outcome !== "success") attempts.push(event);
       } else if (operation.path.startsWith("enrichment/registry/")) {
         const event = freeLabelEventSchema.parse(candidate);
-        if (
-          remainingNames.has(event.name) &&
-          (event.status === "approved" || event.status === "rejected")
-        ) {
-          decisions.push(event);
-        }
+        if (remainingNames.has(event.name)) decisions.push(event);
       } else if (operation.path.startsWith("enrichment/receipts/")) {
         hasReceipt ||= parseEnrichReceipt(candidate) !== undefined;
       } else if (operation.path.startsWith("enrichment/")) {
@@ -823,9 +813,20 @@ async function readRunOutputKeys(
 function outputOrdinals(
   output: DurableWorkerOutput,
   ordinals: ReadonlyMap<string, number>,
+  registryNames: readonly string[],
+  registryNextOrdinal: number,
 ): number[] {
   if (output.kind === "queue") return requireOrdinals(output.successfulUnitIds, ordinals);
   if (output.kind === "attempt") return [requireOrdinal(output.event.unit_id, ordinals)];
+  if (output.kind === "registry") {
+    return output.decisions.map((decision, offset) => {
+      const ordinal = registryNextOrdinal + offset;
+      if (registryNames[ordinal] !== decision.name) {
+        throw new Error("registry result does not match the frozen ordinal");
+      }
+      return ordinal;
+    });
+  }
   return [];
 }
 
