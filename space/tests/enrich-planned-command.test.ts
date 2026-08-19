@@ -133,10 +133,20 @@ describe("planned enrichment recovery", () => {
       {
         kind: "attempt",
         segmentKey: SEGMENT,
-        event: { ...attempt("blocked"), unit_id: "u3" },
+        event: { ...attempt("transient_failure"), unit_id: "u3" },
       },
       ordinals,
       "2".repeat(64),
+    );
+    checkpoint = applyDurableOutput(
+      checkpoint,
+      {
+        kind: "attempt",
+        segmentKey: SEGMENT,
+        event: { ...attempt("blocked"), unit_id: "u3" },
+      },
+      ordinals,
+      "5".repeat(64),
     );
     checkpoint = applyDurableOutput(
       checkpoint,
@@ -288,6 +298,136 @@ describe("planned enrichment recovery", () => {
     );
   });
 
+  it("rejects or ignores orphan records outside the frozen identity", () => {
+    const identities = new Map([
+      ["u2", { inputHash: "input", taxonomyVersion: 1, contractHash: SHA }],
+    ]);
+    expect(
+      outputsFromSegment(
+        orphanSegment("enrichment/attempts/2026/08/attempts-2026-08-19.jsonl", {
+          ...attempt("transient_failure"),
+          unit_id: "outside",
+        }),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(
+      outputsFromSegment(
+        orphanSegment("enrichment/attempts/2026/08/attempts-2026-08-19.jsonl", attempt("success")),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(() =>
+      outputsFromSegment(
+        orphanSegment("enrichment/attempts/2026/08/attempts-2026-08-19.jsonl", {
+          ...attempt("transient_failure"),
+          contract_hash: "different",
+        }),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toThrow("frozen queue identity");
+    expect(
+      outputsFromSegment(
+        orphanSegment(
+          "enrichment/registry/2026/08/registry-2026-08-19.jsonl",
+          decision("candidate"),
+        ),
+        ["other"],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(() =>
+      outputsFromSegment(
+        orphanSegment("enrichment/registry/2026/08/registry-2026-08-19.jsonl", {
+          ...decision("candidate"),
+          contract_hash: "different",
+        }),
+        ["candidate"],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toThrow("frozen contract");
+    expect(
+      outputsFromSegment(
+        {
+          schema_version: 1,
+          transaction_id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-19T12:00:00.000Z",
+          operations: [{ mode: "write", path: "config/taxonomy.json", content: "{}" }],
+        },
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(
+      outputsFromSegment(
+        orphanSegment("enrichment/2026/08/enrichment-2026-08-19.jsonl", {}),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(
+      outputsFromSegment(
+        orphanSegment("enrichment/2026/08/enrichment-2026-08-19.jsonl", {
+          unit_id: "outside",
+          tweet_ids: ["t1"],
+          input_hash: "input",
+          contract_hash: SHA,
+          preset_labels: [],
+          free_labels: [],
+          model: "model",
+          taxonomy_version: 1,
+          enriched_at: "2026-08-19T12:00:00.000Z",
+        }),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+    expect(
+      outputsFromSegment(
+        orphanSegment("enrichment/receipts/2026-08-19.jsonl", {
+          started_at: "2026-08-19T12:00:00.000Z",
+          finished_at: "2026-08-19T12:01:00.000Z",
+          units: 0,
+          calls: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          failures: 0,
+          retries: 0,
+          blocked: 0,
+          contract_hash: "different",
+          worker_id: "worker",
+          discarded_assignments: 0,
+          new_candidates: 0,
+          new_approvals: 0,
+          new_rejections: 0,
+        }),
+        [],
+        0,
+        identities,
+        SHA,
+      ),
+    ).toEqual([]);
+  });
+
   it("validates ordered source-segment metadata", () => {
     const source = [
       {
@@ -312,6 +452,25 @@ describe("planned enrichment recovery", () => {
         content_sha256: "b".repeat(64),
       },
     ]);
+    expect(
+      parseSourceSegments(Buffer.from(`${JSON.stringify([{ ...source[0], listed_oid: null }])}\n`)),
+    ).toEqual([
+      {
+        key: SEGMENT,
+        oid: SHA,
+        size: 10,
+        content_sha256: "b".repeat(64),
+      },
+    ]);
     expect(() => parseSourceSegments(Buffer.from("{}"))).toThrow();
   });
 });
+
+function orphanSegment(path: string, value: unknown) {
+  return {
+    schema_version: 1 as const,
+    transaction_id: "11111111-1111-4111-8111-111111111111",
+    created_at: "2026-08-19T12:00:00.000Z",
+    operations: [{ mode: "append" as const, path, lines: [JSON.stringify(value)] }],
+  };
+}
