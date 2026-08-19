@@ -334,6 +334,16 @@ export type EnrichWorkerProgress = {
   receiptPublished(): Promise<void>;
 };
 
+export type DurableWorkerOutput =
+  | {
+      kind: "queue";
+      segmentKey: string;
+      successfulUnitIds: readonly string[];
+    }
+  | { kind: "attempt"; segmentKey: string; event: AttemptEvent }
+  | { kind: "registry"; segmentKey: string; decisions: readonly FreeLabelEvent[] }
+  | { kind: "receipt"; segmentKey: string };
+
 export type EnrichWorkerDeps = {
   enrichStore: EnrichStore;
   log: StorageLog;
@@ -352,6 +362,13 @@ export type EnrichWorkerDeps = {
   judgeFreeLabel?: FreeLabelJudge;
   lock?: <T>(fn: () => Promise<T>) => Promise<T>;
   progress?: EnrichWorkerProgress;
+  durableOutput?: (output: DurableWorkerOutput) => Promise<void>;
+  registryPlan?: {
+    names: readonly string[];
+    baselineOrdinal: number;
+    nextOrdinal: number;
+    total: number;
+  };
 };
 
 const llmUnitSchema = z
@@ -1135,11 +1152,18 @@ async function persistAndApply(
   }));
   try {
     const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+    let segmentKey: string | undefined;
     await lock(async () => {
       const stampedRegistryEvents = stampRegistryEvents(deps, registryEvents);
-      await persistRowsAndEvents(deps, rows, events, stampedRegistryEvents);
+      segmentKey = await persistRowsAndEvents(deps, rows, events, stampedRegistryEvents);
       for (const event of stampedRegistryEvents) deps.enrichStore.applyRegistryEvent(event);
       for (const row of rows) deps.enrichStore.applyEnrichment(row);
+    });
+    if (segmentKey === undefined) throw new Error("durable queue segment key is missing");
+    await deps.durableOutput?.({
+      kind: "queue",
+      segmentKey,
+      successfulUnitIds: successful.map((item) => item.unitId),
     });
   } catch (error) {
     const errorText = errorMessage(error);
@@ -1299,7 +1323,7 @@ async function persistRowsAndEvents(
   rows: readonly EnrichmentRow[],
   events: readonly AttemptEvent[],
   registryEvents: readonly FreeLabelEvent[],
-): Promise<void> {
+): Promise<string> {
   const byPath = new Map<string, string[]>();
   for (const row of rows) {
     const path = enrichmentPathFor(row.enriched_at);
@@ -1319,7 +1343,7 @@ async function persistRowsAndEvents(
     if (bucket === undefined) byPath.set(path, [JSON.stringify(event)]);
     else bucket.push(JSON.stringify(event));
   }
-  await deps.log.commitBatch(
+  return deps.log.commitBatch(
     [...byPath.entries()].map(([path, lines]) => ({ path, lines })),
     [],
     `enrich: ${String(rows.length)} units`,
@@ -1347,17 +1371,30 @@ async function settleRegistryDecisions(
 ): Promise<string | undefined> {
   const previous = deps.log.latestReceipt();
   const canResume =
+    deps.registryPlan === undefined &&
     receipt.units === 0 &&
     receipt.new_candidates === 0 &&
     previous?.contract_hash === receipt.contract_hash &&
     previous.registry_scan?.complete === false;
   const previousScan = canResume ? previous.registry_scan : undefined;
-  const allNames = deps.enrichStore.candidateNames();
+  const allNames = deps.registryPlan?.names ?? deps.enrichStore.candidateNames();
   const resumeAfter = previousScan?.after_name;
+  const plannedOffset =
+    deps.registryPlan === undefined
+      ? 0
+      : deps.registryPlan.nextOrdinal - deps.registryPlan.baselineOrdinal;
+  if (plannedOffset < 0 || plannedOffset > allNames.length) {
+    throw new Error("registry checkpoint cursor is outside the frozen plan");
+  }
   const names =
-    resumeAfter === undefined ? allNames : allNames.filter((name) => name > resumeAfter);
-  const scannedBase = previousScan?.scanned ?? 0;
-  const total = Math.max(previousScan?.total ?? 0, scannedBase + names.length);
+    deps.registryPlan === undefined
+      ? resumeAfter === undefined
+        ? allNames
+        : allNames.filter((name) => name > resumeAfter)
+      : allNames.slice(plannedOffset);
+  const scannedBase = deps.registryPlan?.nextOrdinal ?? previousScan?.scanned ?? 0;
+  const total =
+    deps.registryPlan?.total ?? Math.max(previousScan?.total ?? 0, scannedBase + names.length);
   let scanned = scannedBase;
   let afterName = previousScan?.after_name;
   let decisions: FreeLabelEvent[] = [];
@@ -1467,11 +1504,15 @@ async function persistRegistryDecisions(
 ): Promise<void> {
   if (decisions.length === 0) return;
   const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+  let stamped: FreeLabelEvent[] = [];
+  let segmentKey: string | undefined;
   await lock(async () => {
-    const stamped = stampRegistryEvents(deps, decisions);
-    await persistRowsAndEvents(deps, [], [], stamped);
+    stamped = stampRegistryEvents(deps, decisions);
+    segmentKey = await persistRowsAndEvents(deps, [], [], stamped);
     for (const event of stamped) deps.enrichStore.applyRegistryEvent(event);
   });
+  if (segmentKey === undefined) throw new Error("durable registry segment key is missing");
+  await deps.durableOutput?.({ kind: "registry", segmentKey, decisions: stamped });
   receipt.new_approvals += decisions.filter((event) => event.status === "approved").length;
   receipt.new_rejections += decisions.filter((event) => event.status === "rejected").length;
 }
@@ -1496,23 +1537,27 @@ function recordReviewUsage(
 async function persistAttemptAndApply(deps: EnrichWorkerDeps, event: AttemptEvent): Promise<void> {
   const validated = attemptEventSchema.parse(event);
   const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
+  let segmentKey: string | undefined;
   await lock(async () => {
-    await deps.log.commitBatch(
+    segmentKey = await deps.log.commitBatch(
       [{ path: attemptEventPathFor(validated.at), lines: [JSON.stringify(validated)] }],
       [],
       `enrich: attempt ${validated.unit_id.slice(0, 40)}`,
     );
     deps.enrichStore.replayAttemptEvent(validated);
   });
+  if (segmentKey === undefined) throw new Error("durable attempt segment key is missing");
+  await deps.durableOutput?.({ kind: "attempt", segmentKey, event: validated });
   await deps.progress?.queue(deps.enrichStore.queueProgress());
 }
 
 async function writeReceipt(deps: EnrichWorkerDeps, receipt: EnrichReceipt): Promise<void> {
-  await deps.log.commitBatch(
+  const segmentKey = await deps.log.commitBatch(
     [{ path: receiptPathFor(receipt.finished_at), lines: [JSON.stringify(receipt)] }],
     [],
     `enrich: receipt ${receipt.finished_at.slice(0, 10)}`,
   );
+  await deps.durableOutput?.({ kind: "receipt", segmentKey });
 }
 
 function errorMessage(error: unknown): string {

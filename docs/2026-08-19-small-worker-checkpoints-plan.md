@@ -86,6 +86,12 @@ and registry work is complete.
 Create one canonical run plan:
 
 ```ts
+export type ObjectReference = {
+  key: string;
+  sha256: string;
+  bytes: number;
+};
+
 export type EnrichmentRunPlan = {
   schema_version: 1;
   run_id: string;
@@ -93,8 +99,7 @@ export type EnrichmentRunPlan = {
   source: {
     bucket: string;
     snapshot_revision: string;
-    ordered_segments_key: string;
-    ordered_segments_sha256: string;
+    ordered_segments: ObjectReference;
   };
   contract: {
     worker_revision: string;
@@ -111,21 +116,18 @@ export type EnrichmentRunPlan = {
     receipt_count: number;
     registry_revision: number;
   };
-  queue: {
-    plan_key: string;
-    sha256: string;
-    total: number;
-  };
-  registry: {
-    plan_key: string;
-    sha256: string;
-    total: number;
+  work: ObjectReference & {
+    queue_total: number;
+    queue_baseline_done: number;
+    registry_total: number;
+    registry_baseline_scanned: number;
   };
 };
 ```
 
-Canonical JSON bytes determine the plan SHA-256. The run ID derives from that
-hash and remains stable across attempts.
+Canonical JSON bytes without `run_id` determine the plan SHA-256. The run ID is
+`xtap-` plus the first 32 hexadecimal characters of that hash. Stored plan bytes
+include the derived run ID and remain stable across attempts.
 
 New raw segments and candidates wait for the next logical run. They cannot
 change the total or reset progress in an active run.
@@ -135,14 +137,17 @@ change the total or reset progress in an active run.
 Store the fixed work order in `work-plan.sqlite`:
 
 ```sql
-CREATE TABLE queue_plan (
+CREATE TABLE worker_queue_plan (
   ordinal INTEGER PRIMARY KEY,
   unit_id TEXT NOT NULL UNIQUE,
   input_hash TEXT NOT NULL,
-  taxonomy_version INTEGER NOT NULL
+  taxonomy_version INTEGER NOT NULL,
+  initial_status TEXT NOT NULL,
+  attempts INTEGER NOT NULL,
+  next_retry_at TEXT
 );
 
-CREATE TABLE registry_plan (
+CREATE TABLE worker_registry_plan (
   ordinal INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   evidence_hash TEXT NOT NULL
@@ -157,14 +162,22 @@ CREATE TABLE plan_metadata (
 );
 ```
 
-Rows use deterministic ordinal order. The plan is immutable and downloaded once
-per physical attempt.
+Rows use deterministic ordinal order. The database retains only tweets needed
+by unresolved queue work and evidence needed by remaining registry candidates.
+Historical completed rows are represented by the baseline count and bitmap, so
+the worker database stays small. The plan is immutable and downloaded once per
+physical attempt.
 
 ## Compact worker state
 
 The checkpoint payload contains compact application state:
 
 ```ts
+export type OutputFrontier = {
+  sequence: number;
+  chain_sha256: string | null;
+};
+
 export type EnrichmentCheckpointState = {
   schema_version: 1;
   run_id: string;
@@ -183,18 +196,17 @@ export type EnrichmentCheckpointState = {
     rejected: number;
   };
   outputs: {
-    attempt_sequence: number;
-    attempt_chain_sha256: string;
-    registry_sequence: number;
-    registry_chain_sha256: string;
-    receipt_sequence: number;
-    receipt_chain_sha256: string;
+    enrichment: OutputFrontier;
+    attempt: OutputFrontier;
+    registry: OutputFrontier;
+    receipt: OutputFrontier;
   };
   publication: {
     state: "pending" | "building" | "uploaded" | "verified" | "published";
     database_key: string | null;
     database_sha256: string | null;
     database_bytes: number | null;
+    manifest: DurableIndexManifest | null;
   };
 };
 ```
@@ -234,9 +246,11 @@ For each batch, the worker:
 9. Updates and reads back the pointer hint.
 10. Publishes progress from that checkpoint sequence.
 
-A process that stops before the result upload may repeat that batch. When the
-result exists, recovery verifies and applies it instead of calling the provider
-again.
+A process that stops before the raw result upload may repeat that batch. On
+startup, recovery compares verified raw segments after the frozen source
+snapshot with deterministic result manifests. If a raw segment exists without a
+claimed result, recovery creates the same result manifest, applies it, and
+commits a checkpoint before any provider call.
 
 ## Queue semantics
 
@@ -254,7 +268,7 @@ completed result.
 
 ## Registry semantics
 
-Registry candidates have a fixed order in `registry_plan`. The checkpoint
+Registry candidates have a fixed order in `worker_registry_plan`. The checkpoint
 stores `next_ordinal` and decision counters. Every decision is uploaded and
 verified before the cursor advances.
 
@@ -269,26 +283,26 @@ Normal worker attempts do not call `DurableIndex.restore()`.
 After queue and registry completion, the publication attempt:
 
 1. Commits publication state `building`.
-2. Downloads the base public database named by the plan.
+2. Downloads the exact base public database named by the frozen plan.
 3. Verifies byte count, SHA-256, metadata, and `PRAGMA quick_check`.
-4. Copies it to a publication path.
-5. Applies the logical run's verified attempt and registry chains plus receipts.
-6. Verifies queue totals, registry revision, source frontier, and physical row
+4. Applies only the verified raw output segments named by this run's result
+   manifests.
+5. Verifies queue totals, registry revision, source frontier, and physical row
    counts.
-7. Runs `PRAGMA quick_check`, closes the database, and commits state `built`
-   with its exact local digest.
-8. Uploads it under `index/databases/<sha256>.sqlite` and commits state
-   `uploaded` with the immutable key and digest plus its byte count.
-9. Downloads it and verifies the bytes and digest. It then verifies metadata and
+6. Runs `PRAGMA quick_check` and uploads the database under
+   `index/databases/<sha256>.sqlite`.
+7. Commits state `uploaded` with the immutable key, digest, byte count, and
+   complete manifest.
+8. Downloads it and verifies the bytes and digest. It then verifies metadata and
    counts, checks integrity, and commits state `verified`.
-10. Confirms that `index/current.json` still has the frozen predecessor bytes.
-11. Publishes an immutable publication claim for the verified database.
-12. Replaces the public pointer, reads it back, and commits state `published`.
-13. Publishes the final receipt from the claimed `published` checkpoint.
+9. Confirms that `index/current.json` still has the frozen predecessor bytes.
+10. Replaces the public pointer, reads it back, and commits state `published`.
+11. Publishes the final receipt from the claimed `published` checkpoint.
 
-Each state change has its own checkpoint claim. A replacement can reuse a built,
-uploaded, or verified database and continue at the next step. It does not
-rebuild the database.
+Each state change has its own checkpoint claim. A replacement reuses an uploaded
+or verified database and continues at the next step. If the public pointer was
+written before the `published` checkpoint, recovery recognizes the same
+manifest and commits that state without another pointer write.
 
 ## Storage layout
 
@@ -342,7 +356,9 @@ space/src/enrich-run-plan.ts
 space/src/enrich-checkpoint.ts
 space/src/enrich-state.ts
 space/src/enrich-batch.ts
+space/src/enrich-planned-command.ts
 space/src/bootstrap-enrichment-run.ts
+space/src/bootstrap-enrichment-main.ts
 ```
 
 Change:
@@ -371,7 +387,6 @@ Stop the worker at each boundary:
 - After claim publication and before pointer-hint publication.
 - After pointer-hint publication and before progress publication.
 - During public database build.
-- After the `built` checkpoint.
 - During public database upload.
 - After the `uploaded` checkpoint and before verification.
 - After the `verified` checkpoint and before `index/current.json` replacement.
@@ -416,7 +431,8 @@ publication recovery, and resumed-versus-uninterrupted equivalence.
 9. Suspend the old schedule and verify no enrichment Job is active.
 10. Repeat the import from the final production generation.
 11. Deploy the tested Space revision with Space enrichment disabled.
-12. Replace the old Job schedule with one suspended exact new schedule.
+12. Replace the old Job schedule with one suspended exact new schedule that
+    pins `ENRICH_RUN_ID` and `ENRICH_PLAN_SHA256`.
 13. Run the required sequential canary and verify resume plus publication.
 14. Activate the canonical schedule, remove the old runtime path, and keep the
     bootstrap importer outside normal runtime execution.
@@ -433,7 +449,7 @@ The work is complete when:
 - Progress stays monotonic across physical attempts.
 - Registry work never resets because queue work or new source data appeared.
 - Interrupted final publication resumes from its last claimed state and reuses
-  built, uploaded, or verified immutable artifacts.
+  uploaded or verified immutable artifacts.
 - Resumed and uninterrupted runs produce the same logical database and manifest.
 - Invalid or conflicting state fails before new provider calls or pointer writes.
 - Existing production objects remain unchanged during implementation and import.

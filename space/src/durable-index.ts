@@ -116,6 +116,12 @@ export type DurableIndexOptions = {
   bucketClient?: DurableIndexBucketClient;
   predecessorKeys?: readonly string[];
   progress?: DurableIndexProgress;
+  expectedCurrentDatabaseSha256?: string;
+  publicationBoundary?: (
+    state: "uploaded" | "verified" | "published",
+    manifest: DurableIndexManifest,
+    databaseBytes: number,
+  ) => Promise<void>;
 };
 
 type MetadataRow = {
@@ -161,28 +167,109 @@ export class DurableIndex {
     if (rawManifest === undefined)
       throw new Error("durable index manifest is missing; run index bootstrap");
     const manifest = parseManifest(rawManifest, options);
+    return DurableIndex.restoreReference(options, {
+      key: manifest.database.key,
+      sha256: manifest.database.sha256,
+      sourceRevision: manifest.source.revision,
+      predecessorKeys: manifest.database.predecessors,
+    });
+  }
+
+  static async restoreReference(
+    options: DurableIndexOptions,
+    reference: {
+      key: string;
+      sha256: string;
+      sourceRevision: string;
+      predecessorKeys?: readonly string[];
+    },
+  ): Promise<DurableIndex> {
+    const bucket =
+      options.bucketClient ??
+      createDurableIndexBucketClient(options.indexBucket, options.accessToken);
     await mkdir(dirname(options.databasePath), { recursive: true });
     const staged = `${options.databasePath}.${randomUUID()}.download`;
     try {
       if (
         !(await bucket.download(
-          manifest.database.key,
+          reference.key,
           staged,
           options.progress?.restoreDatabase.bind(options.progress),
         ))
       ) {
-        throw new Error(`durable index database is missing: ${manifest.database.key}`);
+        throw new Error(`durable index database is missing: ${reference.key}`);
       }
-      await assertFileSha256(staged, manifest.database.sha256);
-      validateStandaloneDatabase(staged, manifest, options);
+      await assertFileSha256(staged, reference.sha256);
+      validateReferencedDatabase(staged, options, reference.sourceRevision);
       await removeDatabaseFiles(options.databasePath);
       await rename(staged, options.databasePath);
     } finally {
       await rm(staged, { force: true });
     }
-    const snapshot = await options.log.loadSnapshot(manifest.source.revision);
+    const snapshot = await options.log.loadSnapshot(reference.sourceRevision);
     await options.log.hydrateMetadata(snapshot);
-    return open(options, bucket, [manifest.database.key, ...manifest.database.predecessors]);
+    return open(options, bucket, [reference.key, ...(reference.predecessorKeys ?? [])]);
+  }
+
+  // eslint-disable-next-line complexity -- Resume verifies each publication boundary before the public pointer changes.
+  static async completeVerifiedPublication(options: {
+    indexBucket: string;
+    accessToken: string;
+    databasePath: string;
+    rawBucket: string;
+    contractHash: string;
+    expectedCurrentDatabaseSha256: string;
+    manifest: DurableIndexManifest;
+    alreadyVerified: boolean;
+    databaseBytes: number;
+    bucketClient?: DurableIndexBucketClient;
+    publicationBoundary?: DurableIndexOptions["publicationBoundary"];
+  }): Promise<void> {
+    const bucket =
+      options.bucketClient ??
+      createDurableIndexBucketClient(options.indexBucket, options.accessToken);
+    const verifyPath = `${options.databasePath}.${randomUUID()}.verify`;
+    try {
+      if (!options.alreadyVerified) {
+        if (!(await bucket.download(options.manifest.database.key, verifyPath))) {
+          throw new Error(
+            `uploaded durable index database is unavailable: ${options.manifest.database.key}`,
+          );
+        }
+        await assertFileSha256(verifyPath, options.manifest.database.sha256);
+        if ((await stat(verifyPath)).size !== options.databaseBytes) {
+          throw new Error("uploaded durable index database byte count mismatch");
+        }
+        validateStandaloneDatabase(verifyPath, options.manifest, options);
+        await options.publicationBoundary?.(
+          "verified",
+          options.manifest,
+          (await stat(verifyPath)).size,
+        );
+      }
+      const currentRaw = await bucket.readText(CURRENT_MANIFEST_KEY);
+      if (currentRaw === undefined) throw new Error("durable index manifest is missing");
+      const current = parseManifest(currentRaw, options);
+      if (JSON.stringify(current) === JSON.stringify(options.manifest)) {
+        await options.publicationBoundary?.("published", options.manifest, options.databaseBytes);
+        return;
+      }
+      if (current.database.sha256 !== options.expectedCurrentDatabaseSha256) {
+        throw new Error("durable index predecessor changed before publication");
+      }
+      const encoded = `${JSON.stringify(options.manifest, null, 2)}\n`;
+      await bucket.writeText(CURRENT_MANIFEST_KEY, encoded);
+      const stored = await bucket.readText(CURRENT_MANIFEST_KEY);
+      if (
+        stored === undefined ||
+        JSON.stringify(parseManifest(stored, options)) !== JSON.stringify(options.manifest)
+      ) {
+        throw new Error("durable index manifest read-back did not match the published generation");
+      }
+      await options.publicationBoundary?.("published", options.manifest, options.databaseBytes);
+    } finally {
+      await rm(verifyPath, { force: true });
+    }
   }
 
   static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
@@ -300,6 +387,13 @@ export class DurableIndex {
   // eslint-disable-next-line complexity -- Publication verifies every durable stage before replacing the active pointer.
   async publish(): Promise<DurableIndexManifest> {
     const baselineManifest = await this.bucket.readText(CURRENT_MANIFEST_KEY);
+    if (this.options.expectedCurrentDatabaseSha256 !== undefined) {
+      if (baselineManifest === undefined) throw new Error("durable index manifest is missing");
+      const baseline = parseManifest(baselineManifest, this.options);
+      if (baseline.database.sha256 !== this.options.expectedCurrentDatabaseSha256) {
+        throw new Error("durable index predecessor changed before publication");
+      }
+    }
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new Error("durable index metadata is missing");
     assertDatabaseIntegrity(this.store.database);
@@ -332,12 +426,14 @@ export class DurableIndex {
         counts,
       };
       validateStandaloneDatabase(publishPath, manifest, this.options);
+      const databaseBytes = (await stat(publishPath)).size;
       await this.options.progress?.databaseBuild(true);
       await this.bucket.uploadFile(
         key,
         publishPath,
         this.options.progress?.databaseUpload.bind(this.options.progress),
       );
+      await this.options.publicationBoundary?.("uploaded", manifest, databaseBytes);
       if (
         !(await this.bucket.download(
           key,
@@ -348,6 +444,7 @@ export class DurableIndex {
         throw new Error(`uploaded durable index database is unavailable: ${key}`);
       await assertFileSha256(verifyPath, sha);
       validateStandaloneDatabase(verifyPath, manifest, this.options);
+      await this.options.publicationBoundary?.("verified", manifest, databaseBytes);
       const beforeSwap = await this.bucket.readText(CURRENT_MANIFEST_KEY);
       if (beforeSwap !== baselineManifest) {
         throw new Error("durable index manifest changed during publication");
@@ -361,6 +458,7 @@ export class DurableIndex {
       ) {
         throw new Error("durable index manifest read-back did not match the published generation");
       }
+      await this.options.publicationBoundary?.("published", manifest, databaseBytes);
       await this.options.progress?.manifestPublished();
       this.publishedKeys = [key, ...predecessors];
       await this.pruneDatabases(this.publishedKeys);
@@ -401,6 +499,45 @@ export class DurableIndex {
 
   retainedDatabaseKeys(): readonly string[] {
     return [...this.publishedKeys];
+  }
+
+  async applyOutputSegments(keys: readonly string[]): Promise<IndexAdvance> {
+    const existing = sourceRows(this.store.database);
+    const staged: Awaited<ReturnType<BucketLog["loadSegmentByKey"]>>[] = [];
+    for (const key of [...new Set(keys)].sort()) {
+      if (existing.has(key)) continue;
+      staged.push(await this.options.log.loadSegmentByKey(key));
+    }
+    staged.sort(compareReplayOrder);
+    let rowsApplied = 0;
+    const apply = this.store.database.transaction(() => {
+      for (const item of staged) {
+        const counts = this.options.log.applySegment(item.segment, this.store, this.enrichStore);
+        rowsApplied += totalSourceRows(counts);
+        insertSourceRow(this.store.database, item.file, counts);
+      }
+    });
+    apply();
+    const snapshot = await this.options.log.storeSnapshot({
+      schema_version: 1,
+      bucket: this.options.rawBucket,
+      files: [...sourceRows(this.store.database).values()]
+        .map(snapshotFileFromRow)
+        .sort((left, right) => left.key.localeCompare(right.key)),
+    });
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new Error("durable index metadata is missing");
+    writeMetadata(this.store.database, {
+      ...metadata,
+      raw_snapshot_revision: snapshot.revision,
+    });
+    assertDatabaseIntegrity(this.store.database);
+    return {
+      revision: snapshot.revision,
+      filesChanged: staged.length,
+      rowsApplied,
+      counts: databaseCounts(this.store.database),
+    };
   }
 
   async createWorkingCopy(path: string): Promise<void> {
@@ -671,6 +808,29 @@ function databaseCounts(db: Database.Database): DurableIndexCounts {
     registry_events: source("registry_rows"),
     receipts: source("receipt_rows"),
   };
+}
+
+function validateReferencedDatabase(
+  path: string,
+  options: Pick<DurableIndexOptions, "rawBucket" | "contractHash">,
+  sourceRevision: string,
+): void {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    db.pragma("query_only = ON");
+    assertDatabaseIntegrity(db);
+    const metadata = readMetadata(db);
+    if (
+      metadata?.schema_version !== 1 ||
+      metadata.raw_bucket !== options.rawBucket ||
+      metadata.raw_snapshot_revision !== sourceRevision ||
+      metadata.contract_hash !== options.contractHash
+    ) {
+      throw new Error("durable index database provenance mismatch");
+    }
+  } finally {
+    db.close();
+  }
 }
 
 function validateStandaloneDatabase(
