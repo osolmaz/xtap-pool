@@ -30,8 +30,6 @@ export const ENRICHMENT_JOB_LABELS = {
   component: "enrichment",
 } as const;
 
-export const ENRICHMENT_JOB_RUN_VARIABLES = ["ENRICH_RUN_ID", "ENRICH_PLAN_SHA256"] as const;
-
 export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> = {
   ENRICH_JOB_SCHEDULE: "17 */6 * * *",
   ENRICH_JOB_TIMEOUT_SECONDS: "2700",
@@ -75,8 +73,6 @@ const jobVariablesSchema = z
   .object({
     ENRICH_JOB_SCHEDULE: cronSchedule,
     ENRICH_JOB_TIMEOUT_SECONDS: positiveInteger,
-    ENRICH_RUN_ID: nonempty,
-    ENRICH_PLAN_SHA256: z.string().regex(/^[0-9a-f]{64}$/u),
     ENRICH_MAX_CONCURRENT_CALLS: z
       .string()
       .regex(/^(?:[1-9]|[12][0-9]|3[0-2])$/u, "must be an integer from 1 through 32"),
@@ -94,16 +90,9 @@ const jobVariablesSchema = z
   .strict();
 
 export function enrichmentJobVariableError(key: string, value: string): string | undefined {
-  if (
-    !Object.hasOwn(ENRICHMENT_JOB_DEFAULT_VARIABLES, key) &&
-    !ENRICHMENT_JOB_RUN_VARIABLES.some((name) => name === key)
-  ) {
-    return undefined;
-  }
+  if (!Object.hasOwn(ENRICHMENT_JOB_DEFAULT_VARIABLES, key)) return undefined;
   const parsed = jobVariablesSchema.safeParse({
     ...ENRICHMENT_JOB_DEFAULT_VARIABLES,
-    ENRICH_RUN_ID: "validation-run",
-    ENRICH_PLAN_SHA256: "0".repeat(64),
     [key]: value,
   });
   if (parsed.success) return undefined;
@@ -221,8 +210,6 @@ export async function desiredEnrichmentJob(
     RAW_BUCKET: rawBucket,
     INDEX_BUCKET: indexBucket,
     ENRICH_ENABLED: "true",
-    ENRICH_RUN_ID: configured.ENRICH_RUN_ID,
-    ENRICH_PLAN_SHA256: configured.ENRICH_PLAN_SHA256,
     ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
     ENRICH_MAX_ELAPSED_MS: configured.ENRICH_MAX_ELAPSED_MS,
     ENRICH_MAX_ERROR_RATE: configured.ENRICH_MAX_ERROR_RATE,
@@ -256,8 +243,6 @@ export async function desiredEnrichmentJob(
       name: "xtap-pool-enrichment",
       space_repo: jobSpaceRepoLabel(spaceRepo),
       source_revision: deployment.source_revision,
-      run_id: configured.ENRICH_RUN_ID,
-      plan_sha256: configured.ENRICH_PLAN_SHA256,
       secret_names: JOB_SECRET_NAMES_LABEL,
     },
   };

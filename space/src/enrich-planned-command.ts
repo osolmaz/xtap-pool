@@ -13,17 +13,21 @@ import {
 } from "@xtap-pool/shared";
 import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
 
+import { activateEnrichmentRun, resolveActiveEnrichmentRun } from "./enrich-active-run.js";
+import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import type { BucketSegment, BucketSnapshotFile } from "./bucket-log.js";
 import { loadConfig } from "./config.js";
 import { DurableIndex } from "./durable-index.js";
+import type { DurableIndexManifest } from "./durable-index.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
 import {
   createEnrichmentCheckpointStore,
   EnrichmentCheckpointAdapter,
 } from "./enrich-checkpoint.js";
 import { enrichmentBatchResultSchema, publishEnrichmentBatchResult } from "./enrich-batch.js";
-import { parseEnrichmentRunPlan } from "./enrich-run-plan.js";
+import { canonicalPlanBytes, parseEnrichmentRunPlan } from "./enrich-run-plan.js";
+import type { EnrichmentRunPlan } from "./enrich-run-plan.js";
 import type { EnrichmentCheckpointState, OutputKind } from "./enrich-state.js";
 import {
   advanceOutputFrontier,
@@ -52,6 +56,16 @@ import { TweetStore } from "./store.js";
 const RUN_PREFIX = "operations/enrichment/runs";
 const SEGMENT_SHA256 = /-([0-9a-f]{64})\.json\.gz$/u;
 const SEGMENT_TIME = /\/(\d{13})-[0-9a-f-]{36}-[0-9a-f]{64}\.json\.gz$/u;
+const successorReferenceSchema = z
+  .object({
+    schema_version: z.literal(1),
+    predecessor_run_id: z.string().min(1),
+    predecessor_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    run_id: z.string().min(1),
+    plan_sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    created_at: z.iso.datetime({ offset: true }),
+  })
+  .strict();
 const sourceSegmentSchema = z
   .object({
     key: z.string().min(1),
@@ -73,8 +87,6 @@ export async function runPlannedEnrichmentCommand(
 ): Promise<void> {
   const commandStartedAtMs = Date.now();
   const config = loadConfig(env);
-  const runId = requireEnvironment(env, "ENRICH_RUN_ID");
-  const planSha256 = requireSha256(requireEnvironment(env, "ENRICH_PLAN_SHA256"));
   if (!config.enrichEnabled || config.inferenceToken === undefined) {
     throw new Error("planned enrichment requires ENRICH_ENABLED and INFERENCE_TOKEN");
   }
@@ -82,6 +94,9 @@ export async function runPlannedEnrichmentCommand(
     bucket: config.indexBucket,
     accessToken: config.hfToken,
   });
+  const activeRun = await resolveActiveEnrichmentRun(checkpointStore);
+  const runId = activeRun.run_id;
+  const planSha256 = activeRun.plan_sha256;
   const planPath = `${RUN_PREFIX}/${runId}/plan.json`;
   const planBytes = await requiredObject(checkpointStore, planPath);
   const parsedPlan: unknown = JSON.parse(Buffer.from(planBytes).toString("utf8"));
@@ -235,10 +250,11 @@ export async function runPlannedEnrichmentCommand(
       if (manifest === null || databaseBytes === null) {
         throw new Error("resumable publication reference is incomplete");
       }
+      const resumePath = join(config.dataDir, "planned", `${runId}-resume.sqlite`);
       await DurableIndex.completeVerifiedPublication({
         indexBucket: config.indexBucket,
         accessToken: config.hfToken,
-        databasePath: join(config.dataDir, "planned", `${runId}-resume.sqlite`),
+        databasePath: resumePath,
         rawBucket: config.rawBucket,
         contractHash,
         expectedCurrentDatabaseSha256: plan.base_index.sha256,
@@ -247,13 +263,36 @@ export async function runPlannedEnrichmentCommand(
         databaseBytes,
         publicationBoundary: commitPublicationBoundary,
       });
+      await ensureSuccessorRun({
+        config,
+        log,
+        checkpointStore,
+        plan,
+        attemptId,
+        manifest,
+        databaseBytes,
+        databasePath: resumePath,
+      });
       await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
       return;
     }
     if (state.publication.state === "published") {
-      const databaseSha256 = state.publication.database_sha256;
-      if (databaseSha256 === null) throw new Error("published database SHA-256 is missing");
-      await finishPlannedRun(coordinator, adapter, state, progress, databaseSha256);
+      const manifest = state.publication.manifest;
+      const databaseBytes = state.publication.database_bytes;
+      if (manifest === null || databaseBytes === null) {
+        throw new Error("published database reference is incomplete");
+      }
+      await ensureSuccessorRun({
+        config,
+        log,
+        checkpointStore,
+        plan,
+        attemptId,
+        manifest,
+        databaseBytes,
+        databasePath: join(config.dataDir, "planned", `${runId}-published.sqlite`),
+      });
+      await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
       return;
     }
 
@@ -339,12 +378,13 @@ export async function runPlannedEnrichmentCommand(
           ...(await readRunOutputKeys(checkpointStore, runId, state)),
         ]),
       ].sort();
+      const publicationPath = join(config.dataDir, "planned", `${runId}-publication.sqlite`);
       const publication = await DurableIndex.restoreReference(
         {
           rawBucket: config.rawBucket,
           indexBucket: config.indexBucket,
           accessToken: config.hfToken,
-          databasePath: join(config.dataDir, "planned", `${runId}-publication.sqlite`),
+          databasePath: publicationPath,
           log,
           taxonomyVersion: config.taxonomyVersion,
           contractHash,
@@ -362,6 +402,19 @@ export async function runPlannedEnrichmentCommand(
       try {
         await publication.applyOutputSegments(outputKeys);
         const manifest = await publication.publish();
+        const databaseBytes = state.publication.database_bytes;
+        if (databaseBytes === null) throw new Error("published database byte count is missing");
+        await ensureSuccessorRun({
+          config,
+          log,
+          checkpointStore,
+          plan,
+          attemptId,
+          manifest,
+          databaseBytes,
+          databasePath: publicationPath,
+          publication,
+        });
         await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
       } finally {
         publication.close();
@@ -373,6 +426,134 @@ export async function runPlannedEnrichmentCommand(
   } finally {
     tweetStore.close();
   }
+}
+
+async function ensureSuccessorRun(options: {
+  config: ReturnType<typeof loadConfig>;
+  log: BucketLog;
+  checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
+  plan: EnrichmentRunPlan;
+  attemptId: string;
+  manifest: DurableIndexManifest;
+  databaseBytes: number;
+  databasePath: string;
+  publication?: DurableIndex;
+}): Promise<void> {
+  const predecessorPlanSha256 = parseEnrichmentRunPlan(options.plan).sha256;
+  const referenceKey = `${RUN_PREFIX}/${options.plan.run_id}/successor.json`;
+  const existing = await options.checkpointStore.read(referenceKey);
+  if (existing !== null) {
+    const reference = successorReferenceSchema.parse(
+      JSON.parse(Buffer.from(existing).toString("utf8")),
+    );
+    if (
+      reference.predecessor_run_id !== options.plan.run_id ||
+      reference.predecessor_plan_sha256 !== predecessorPlanSha256
+    ) {
+      throw new Error("enrichment successor reference predecessor mismatch");
+    }
+    await activateEnrichmentRun({
+      store: options.checkpointStore,
+      runId: reference.run_id,
+      planSha256: reference.plan_sha256,
+      activatedAt: reference.created_at,
+      expectedCurrentPlanSha256: predecessorPlanSha256,
+    });
+    return;
+  }
+
+  let publication = options.publication;
+  let closePublication = false;
+  let successorSourcePath: string | null = null;
+  if (publication === undefined) {
+    publication = await DurableIndex.restoreReference(
+      {
+        rawBucket: options.config.rawBucket,
+        indexBucket: options.config.indexBucket,
+        accessToken: options.config.hfToken,
+        databasePath: options.databasePath,
+        log: options.log,
+        taxonomyVersion: options.config.taxonomyVersion,
+        contractHash: options.plan.contract.contract_sha256,
+        expectedCurrentDatabaseSha256: options.manifest.database.sha256,
+      },
+      {
+        key: options.manifest.database.key,
+        sha256: options.manifest.database.sha256,
+        sourceRevision: options.manifest.source.revision,
+        predecessorKeys: options.manifest.database.predecessors,
+      },
+    );
+    closePublication = true;
+  }
+  try {
+    const sourceSegmentCount = countRows(publication.store.database, "source_segments");
+    const registryRevision = publication.enrichStore.registryRevision();
+    const advance = await publication.advanceToLatest();
+    const createdAt = new Date().toISOString();
+    successorSourcePath = join(
+      options.config.dataDir,
+      "planned",
+      `${options.plan.run_id}-successor-source.sqlite`,
+    );
+    await rm(successorSourcePath, { force: true });
+    await publication.store.database.backup(successorSourcePath);
+    const successor = await bootstrapEnrichmentRun({
+      sourceDatabasePath: successorSourcePath,
+      compactDatabasePath: join(
+        options.config.dataDir,
+        "planned",
+        `${options.plan.run_id}-successor.sqlite`,
+      ),
+      registryBaselineScanned: 0,
+      store: options.checkpointStore,
+      attemptId: options.attemptId,
+      planInput: {
+        schema_version: 1,
+        created_at: createdAt,
+        source: {
+          bucket: options.config.rawBucket,
+          snapshot_revision: advance.revision,
+          ordered_segments: { key: "replaced", sha256: "0".repeat(64), bytes: 1 },
+        },
+        contract: options.plan.contract,
+        base_index: {
+          key: options.manifest.database.key,
+          sha256: options.manifest.database.sha256,
+          bytes: options.databaseBytes,
+          source_segment_count: sourceSegmentCount,
+          receipt_count: options.manifest.counts.receipts,
+          registry_revision: registryRevision,
+        },
+      },
+    });
+    const reference = successorReferenceSchema.parse({
+      schema_version: 1,
+      predecessor_run_id: options.plan.run_id,
+      predecessor_plan_sha256: predecessorPlanSha256,
+      run_id: successor.runId,
+      plan_sha256: successor.planSha256,
+      created_at: createdAt,
+    });
+    await options.checkpointStore.writeImmutable(referenceKey, canonicalPlanBytes(reference));
+    await activateEnrichmentRun({
+      store: options.checkpointStore,
+      runId: successor.runId,
+      planSha256: successor.planSha256,
+      activatedAt: createdAt,
+      expectedCurrentPlanSha256: predecessorPlanSha256,
+    });
+  } finally {
+    if (successorSourcePath !== null) await rm(successorSourcePath, { force: true });
+    if (closePublication) publication.close();
+  }
+}
+
+function countRows(database: Database.Database, table: string): number {
+  const row = database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as {
+    count: number;
+  };
+  return row.count;
 }
 
 async function finishPlannedRun(
@@ -709,10 +890,5 @@ function requireEnvironment(
 ): string {
   const value = env[name];
   if (value === undefined || value.length === 0) throw new Error(`${name} is required`);
-  return value;
-}
-
-function requireSha256(value: string): string {
-  if (!/^[0-9a-f]{64}$/u.test(value)) throw new Error("SHA-256 must be lowercase hexadecimal");
   return value;
 }
