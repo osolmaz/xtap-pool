@@ -164,6 +164,7 @@ export async function runPlannedEnrichmentCommand(
   let state = adapter.state;
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
   const ordinals = readQueueOrdinals(tweetStore.database);
+  const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
   const registryNames = readRegistryNames(tweetStore.database);
   const progress = await XTapJobProgress.create({
     bucket: config.indexBucket,
@@ -186,7 +187,13 @@ export async function runPlannedEnrichmentCommand(
         phase,
         sequence: frontier.sequence + 1,
         previous_result_sha256: frontier.chain_sha256,
-        ordinals: outputOrdinals(output, ordinals, registryNames, state.registry.next_ordinal),
+        ordinals: outputOrdinals(
+          output,
+          ordinals,
+          registryNames,
+          state.registry.next_ordinal,
+          plan.work.registry_baseline_scanned,
+        ),
         raw_segment_key: output.segmentKey,
         raw_segment_sha256: rawSegmentSha256(output.segmentKey),
         created_at: rawSegmentCreatedAt(output.segmentKey),
@@ -215,6 +222,8 @@ export async function runPlannedEnrichmentCommand(
     commitOutput,
     registryNames,
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
+    queueIdentities,
+    contractHash,
   });
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
 
@@ -618,6 +627,31 @@ function readQueueOrdinals(db: Database.Database): ReadonlyMap<string, number> {
   return new Map(rows.map((row) => [row.unit_id, row.ordinal]));
 }
 
+type FrozenQueueIdentity = {
+  inputHash: string;
+  taxonomyVersion: number;
+  contractHash: string;
+};
+
+function readQueueIdentities(
+  db: Database.Database,
+  contractHash: string,
+): ReadonlyMap<string, FrozenQueueIdentity> {
+  const rows = db
+    .prepare("SELECT unit_id, input_hash, taxonomy_version FROM worker_queue_plan")
+    .all() as { unit_id: string; input_hash: string; taxonomy_version: number }[];
+  return new Map(
+    rows.map((row) => [
+      row.unit_id,
+      {
+        inputHash: row.input_hash,
+        taxonomyVersion: row.taxonomy_version,
+        contractHash,
+      },
+    ]),
+  );
+}
+
 function readRegistryNames(db: Database.Database): readonly string[] {
   const rows = db.prepare("SELECT name FROM worker_registry_plan ORDER BY ordinal").all() as {
     name: string;
@@ -680,6 +714,8 @@ async function reconcileOrphanOutputs(options: {
   commitOutput: (output: DurableWorkerOutput) => Promise<void>;
   registryNames: readonly string[];
   registryBaselineOrdinal: number;
+  queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>;
+  contractHash: string;
 }): Promise<void> {
   const processed = new Set(
     await readRunOutputKeys(options.checkpointStore, options.runId, options.state()),
@@ -695,6 +731,8 @@ async function reconcileOrphanOutputs(options: {
       segment,
       options.registryNames,
       options.state().registry.next_ordinal - options.registryBaselineOrdinal,
+      options.queueIdentities,
+      options.contractHash,
     );
     for (const output of outputs) {
       await options.commitOutput(withSegmentKey(output, file.key));
@@ -720,6 +758,8 @@ export function outputsFromSegment(
   segment: BucketSegment,
   registryNames: readonly string[],
   registryNextOrdinal: number,
+  queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>,
+  contractHash: string,
 ): RecoveredOutput[] {
   const successful = new Set<string>();
   const attempts: AttemptEvent[] = [];
@@ -735,15 +775,37 @@ export function outputsFromSegment(
       const candidate: unknown = JSON.parse(line);
       if (operation.path.startsWith("enrichment/attempts/")) {
         const event = attemptEventSchema.parse(candidate);
+        const identity = queueIdentities.get(event.unit_id);
+        if (identity === undefined) continue;
+        if (
+          event.input_hash !== identity.inputHash ||
+          event.contract_hash !== identity.contractHash
+        ) {
+          throw new Error("orphan attempt does not match the frozen queue identity");
+        }
         if (event.outcome !== "success") attempts.push(event);
       } else if (operation.path.startsWith("enrichment/registry/")) {
         const event = freeLabelEventSchema.parse(candidate);
+        if (event.contract_hash !== contractHash) {
+          throw new Error("orphan registry event does not match the frozen contract");
+        }
         if (remainingNames.has(event.name)) decisions.push(event);
       } else if (operation.path.startsWith("enrichment/receipts/")) {
-        hasReceipt ||= parseEnrichReceipt(candidate) !== undefined;
+        const receipt = parseEnrichReceipt(candidate);
+        if (receipt?.contract_hash === contractHash) hasReceipt = true;
       } else if (operation.path.startsWith("enrichment/")) {
         const row = parseEnrichmentRow(candidate);
-        if (row !== undefined) successful.add(row.unit_id);
+        if (row === undefined) continue;
+        const identity = queueIdentities.get(row.unit_id);
+        if (identity === undefined) continue;
+        if (
+          row.input_hash !== identity.inputHash ||
+          row.contract_hash !== identity.contractHash ||
+          row.taxonomy_version !== identity.taxonomyVersion
+        ) {
+          throw new Error("orphan enrichment does not match the frozen queue identity");
+        }
+        successful.add(row.unit_id);
       }
     }
   }
@@ -815,19 +877,34 @@ function outputOrdinals(
   ordinals: ReadonlyMap<string, number>,
   registryNames: readonly string[],
   registryNextOrdinal: number,
+  registryBaselineOrdinal: number,
 ): number[] {
   if (output.kind === "queue") return requireOrdinals(output.successfulUnitIds, ordinals);
   if (output.kind === "attempt") return [requireOrdinal(output.event.unit_id, ordinals)];
   if (output.kind === "registry") {
-    return output.decisions.map((decision, offset) => {
-      const ordinal = registryNextOrdinal + offset;
-      if (registryNames[ordinal] !== decision.name) {
-        throw new Error("registry result does not match the frozen ordinal");
-      }
-      return ordinal;
-    });
+    return registryOutputOrdinals(
+      output.decisions,
+      registryNames,
+      registryNextOrdinal,
+      registryBaselineOrdinal,
+    );
   }
   return [];
+}
+
+export function registryOutputOrdinals(
+  decisions: readonly FreeLabelEvent[],
+  registryNames: readonly string[],
+  registryNextOrdinal: number,
+  registryBaselineOrdinal: number,
+): number[] {
+  return decisions.map((decision, offset) => {
+    const ordinal = registryNextOrdinal + offset;
+    if (registryNames[ordinal - registryBaselineOrdinal] !== decision.name) {
+      throw new Error("registry result does not match the frozen ordinal");
+    }
+    return ordinal;
+  });
 }
 
 function requireOrdinals(
