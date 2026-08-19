@@ -88,7 +88,7 @@ export type AdminFreeLabels = {
 
 /**
  * Enrichment API shapes (labels/free labels/graph). Local contract types for
- * the endpoints described in docs/labels-and-free-labels-implementation-plan.md.
+ * the endpoints described in docs/2026-07-28-labels-and-free-labels-implementation-plan.md.
  */
 export type LabelStat = {
   name: string;

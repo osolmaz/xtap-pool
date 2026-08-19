@@ -1,3 +1,9 @@
+---
+title: "Unit consumer API"
+author: "Onur Solmaz <2453968+osolmaz@users.noreply.github.com>"
+date: "2026-07-27"
+---
+
 # Unit consumer API
 
 xtap-pool is the semantic source of truth for downstream applications. Consumers read enriched conversation-author units instead of scanning the private dataset or rebuilding labels, threads, free-label vocabulary, and graph edges.

@@ -1,3 +1,9 @@
+---
+title: "Labels and Free Labels Implementation Plan"
+author: "Onur Solmaz <2453968+osolmaz@users.noreply.github.com>"
+date: "2026-07-28"
+---
+
 # Labels and Free Labels Implementation Plan
 
 ## Status
