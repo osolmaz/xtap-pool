@@ -7,7 +7,12 @@ import { CheckpointCoordinator } from "@osolmaz/hf-job-control";
 import { EnrichmentCheckpointAdapter } from "./enrich-checkpoint.js";
 import type { EnrichmentRunPlanInput } from "./enrich-run-plan.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "./enrich-run-plan.js";
-import { createEmptyEnrichmentState, markQueueCompleted } from "./enrich-state.js";
+import {
+  createEmptyEnrichmentState,
+  markQueueCompleted,
+  recordQueueAttempt,
+} from "./enrich-state.js";
+import type { BlockedRecord, RetryRecord } from "./enrich-state.js";
 import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
 
 const PLAN_PREFIX = "operations/enrichment/runs";
@@ -16,6 +21,8 @@ export type CompactWorkResult = {
   queueTotal: number;
   queueBaselineDone: number;
   queueDoneOrdinals: readonly number[];
+  queueRetrying: readonly RetryRecord[];
+  queueBlocked: readonly BlockedRecord[];
   registryTotal: number;
   retainedQueueUnits: number;
   retainedTweets: number;
@@ -54,7 +61,8 @@ export async function compactEnrichmentWorkDatabase(options: {
       `);
       const queueRows = db
         .prepare(
-          `SELECT unit_id, input_hash, taxonomy_version, status, attempts, next_retry_at
+          `SELECT unit_id, input_hash, taxonomy_version, status, attempts,
+                  last_error_class, next_retry_at
            FROM enrich_queue ORDER BY unit_id`,
         )
         .all() as {
@@ -63,6 +71,7 @@ export async function compactEnrichmentWorkDatabase(options: {
         taxonomy_version: number;
         status: string;
         attempts: number;
+        last_error_class: string | null;
         next_retry_at: string | null;
       }[];
       const insertQueue = db.prepare(
@@ -137,6 +146,36 @@ export async function compactEnrichmentWorkDatabase(options: {
         queueBaselineDone,
         queueDoneOrdinals: queueRows.flatMap((row, ordinal) =>
           row.status === "done" ? [ordinal] : [],
+        ),
+        queueRetrying: queueRows.flatMap((row, ordinal) =>
+          row.status === "retrying"
+            ? [
+                {
+                  ordinal,
+                  attempts: row.attempts,
+                  error_class: row.last_error_class ?? "retrying",
+                  next_retry_at: row.next_retry_at,
+                },
+              ]
+            : [],
+        ),
+        queueBlocked: queueRows.flatMap((row, ordinal) =>
+          row.status === "blocked"
+            ? [
+                {
+                  ordinal,
+                  attempts: Math.max(1, row.attempts),
+                  reason: row.last_error_class ?? "blocked",
+                  evidence_sha256: sha256Canonical({
+                    unit_id: row.unit_id,
+                    input_hash: row.input_hash,
+                    attempts: row.attempts,
+                    error_class: row.last_error_class,
+                    status: row.status,
+                  }),
+                },
+              ]
+            : [],
         ),
         registryTotal: options.registryBaselineScanned + candidates.length,
         retainedQueueUnits: queueRows.length - queueBaselineDone,
@@ -218,6 +257,12 @@ export async function bootstrapEnrichmentRun(options: {
     registryBaselineScanned: options.registryBaselineScanned,
   });
   initial = markQueueCompleted(initial, compact.queueDoneOrdinals);
+  for (const retrying of compact.queueRetrying) {
+    initial = recordQueueAttempt(initial, { status: "retrying", value: retrying });
+  }
+  for (const blocked of compact.queueBlocked) {
+    initial = recordQueueAttempt(initial, { status: "blocked", value: blocked });
+  }
   const adapter = new EnrichmentCheckpointAdapter({ ...initial, sequence: 1 });
   const coordinator = CheckpointCoordinator.create({
     runId: created.plan.run_id,
