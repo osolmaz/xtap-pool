@@ -11,7 +11,7 @@ describe("space staging helpers", () => {
   it("excludes local-only roots from the Space upload", () => {
     expect(shouldUploadPath("package.json")).toBe(true);
     expect(shouldUploadPath("space/src/server.ts")).toBe(true);
-    expect(shouldUploadPath("docs/implementation-plan.md")).toBe(false);
+    expect(shouldUploadPath("docs/2026-07-06-implementation-plan.md")).toBe(false);
     expect(shouldUploadPath("extension/manifest.json")).toBe(false);
     expect(shouldUploadPath("setup/package.json")).toBe(true);
     expect(shouldUploadPath("setup/src/main.ts")).toBe(false);

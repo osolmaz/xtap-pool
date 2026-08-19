@@ -1,3 +1,9 @@
+---
+title: "xtap-pool — Implementation Plan"
+author: "Bob <dutifulbob@gmail.com>"
+date: "2026-07-06"
+---
+
 # xtap-pool — Implementation Plan
 
 ## Problem
