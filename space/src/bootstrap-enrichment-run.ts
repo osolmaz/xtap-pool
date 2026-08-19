@@ -74,6 +74,14 @@ export async function compactEnrichmentWorkDatabase(options: {
         last_error_class: string | null;
         next_retry_at: string | null;
       }[];
+      for (const row of queueRows) {
+        if (!["done", "pending", "retrying", "blocked"].includes(row.status)) {
+          throw new Error(`unsupported imported queue status: ${row.status}`);
+        }
+        if (row.status === "blocked" && row.attempts < 1) {
+          throw new Error("imported blocked queue row must have a positive attempt count");
+        }
+      }
       const insertQueue = db.prepare(
         `INSERT INTO worker_queue_plan
          (ordinal, unit_id, input_hash, taxonomy_version, initial_status, attempts, next_retry_at)
@@ -164,7 +172,7 @@ export async function compactEnrichmentWorkDatabase(options: {
             ? [
                 {
                   ordinal,
-                  attempts: Math.max(1, row.attempts),
+                  attempts: row.attempts,
                   reason: row.last_error_class ?? "blocked",
                   evidence_sha256: sha256Canonical({
                     unit_id: row.unit_id,
