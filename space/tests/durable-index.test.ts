@@ -152,6 +152,32 @@ describe("DurableIndex", () => {
     expect(restoreDatabase).toHaveBeenCalled();
   });
 
+  it("finishes an already published verified database idempotently", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("published-resume"));
+    const manifest = await index.publish();
+    index.close();
+    const database = bucket.files.get(manifest.database.key);
+    expect(database).toBeDefined();
+    const boundary = vi.fn(() => Promise.resolve());
+
+    await DurableIndex.completeVerifiedPublication({
+      indexBucket: INDEX,
+      accessToken: "token",
+      databasePath: temporary("published-resume-verify"),
+      rawBucket: RAW,
+      contractHash: CONTRACT,
+      expectedCurrentDatabaseSha256: "0".repeat(64),
+      manifest,
+      alreadyVerified: true,
+      databaseBytes: database?.byteLength ?? 0,
+      bucketClient: bucket,
+      publicationBoundary: boundary,
+    });
+
+    expect(boundary).toHaveBeenCalledWith("published", manifest, database?.byteLength);
+  });
+
   it("fails closed when an exact snapshot segment is missing or changed", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("mutation"));

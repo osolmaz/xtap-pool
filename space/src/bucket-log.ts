@@ -352,6 +352,17 @@ export class BucketLog {
     return snapshot;
   }
 
+  async loadSegmentByKey(
+    key: string,
+  ): Promise<{ file: BucketSnapshotFile; segment: BucketSegment }> {
+    const matches = (await this.client.list(key)).filter((object) => object.key === key);
+    if (matches.length !== 1) throw new Error(`Bucket segment key is not unique: ${key}`);
+    const object = matches[0];
+    if (object === undefined) throw new Error(`Bucket segment is missing: ${key}`);
+    const file = await this.verifyListedObject(object);
+    return { file, segment: await this.loadSegment(file) };
+  }
+
   // eslint-disable-next-line complexity -- Segment loading verifies every persisted identity and encoding boundary.
   async loadSegment(file: BucketSnapshotFile): Promise<BucketSegment> {
     if (segmentHash(file.key) !== file.content_sha256) {

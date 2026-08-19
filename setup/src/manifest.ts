@@ -1,6 +1,9 @@
 import { existingSpaceConfig } from "./config.js";
 import type { SetupConfig } from "./config.js";
-import { ENRICHMENT_JOB_DEFAULT_VARIABLES } from "./enrichment-job.js";
+import {
+  ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  ENRICHMENT_JOB_RUN_VARIABLES,
+} from "./enrichment-job.js";
 
 export type PoolManifest = SetupConfig & {
   requiredVariables: readonly string[];
@@ -29,6 +32,7 @@ export function manifestFromSpace(
       "POOL_ADMINS",
       "ENRICH_ENABLED",
       ...Object.keys(ENRICHMENT_JOB_DEFAULT_VARIABLES),
+      ...ENRICHMENT_JOB_RUN_VARIABLES,
     ],
     requiredSecrets: ["HF_TOKEN", "POOL_SIGNING_SECRET", "SESSION_SECRET"],
     credentialRoles: { storage: "HF_TOKEN", inference: "INFERENCE_TOKEN" },

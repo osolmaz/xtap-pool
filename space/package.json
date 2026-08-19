@@ -9,6 +9,7 @@
     "start": "node dist/src/server.js",
     "enrich": "node dist/src/enrich-command-main.js",
     "enrich:job": "node dist/src/enrich-job-main.js",
+    "enrich:bootstrap-run": "node dist/src/bootstrap-enrichment-main.js",
     "index:bootstrap": "node dist/src/index-command-main.js",
     "storage:initialize": "node dist/src/storage-initialize-main.js",
     "storage:import": "node dist/src/storage-import-main.js",
