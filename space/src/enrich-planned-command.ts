@@ -18,7 +18,7 @@ import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import type { BucketSegment, BucketSnapshotFile } from "./bucket-log.js";
 import { loadConfig } from "./config.js";
-import { DurableIndex } from "./durable-index.js";
+import { durableIndexManifestSchema, DurableIndex } from "./durable-index.js";
 import type { DurableIndexManifest } from "./durable-index.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
 import {
@@ -162,6 +162,15 @@ export async function runPlannedEnrichmentCommand(
   const restored = await coordinator.restoreLatest(adapter);
   if (restored === null) throw new Error("planned enrichment has no bootstrap checkpoint");
   let state = adapter.state;
+  if (state.publication.state === "pending" || state.publication.state === "building") {
+    const currentIndexBytes = await requiredObject(checkpointStore, "index/current.json");
+    const currentIndex = durableIndexManifestSchema.parse(
+      JSON.parse(Buffer.from(currentIndexBytes).toString("utf8")),
+    );
+    if (currentIndex.database.sha256 !== plan.base_index.sha256) {
+      throw new Error("active enrichment plan base index is no longer current");
+    }
+  }
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
   const ordinals = readQueueOrdinals(tweetStore.database);
   const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);

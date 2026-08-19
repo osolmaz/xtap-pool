@@ -116,6 +116,37 @@ describe("enrichment production bootstrap", () => {
         registryBaselineScanned: 7,
       }),
     ).rejects.toThrow("positive attempt count");
+    const missingClass = new Database(sourcePath);
+    missingClass
+      .prepare(
+        "UPDATE enrich_queue SET attempts = 5, last_error_class = NULL WHERE status = 'blocked'",
+      )
+      .run();
+    missingClass.close();
+    await expect(
+      compactEnrichmentWorkDatabase({
+        sourcePath,
+        destinationPath: join(directory, "missing-blocked-class.sqlite"),
+        registryBaselineScanned: 7,
+      }),
+    ).rejects.toThrow("must have an error class");
+    const missingRetryClass = new Database(sourcePath);
+    missingRetryClass
+      .prepare(
+        "UPDATE enrich_queue SET last_error_class = 'invalid_output' WHERE status = 'blocked'",
+      )
+      .run();
+    missingRetryClass
+      .prepare("UPDATE enrich_queue SET last_error_class = NULL WHERE status = 'retrying'")
+      .run();
+    missingRetryClass.close();
+    await expect(
+      compactEnrichmentWorkDatabase({
+        sourcePath,
+        destinationPath: join(directory, "missing-retry-class.sqlite"),
+        registryBaselineScanned: 7,
+      }),
+    ).rejects.toThrow("must have an error class");
   });
 
   it("writes only isolated immutable bootstrap objects", async () => {

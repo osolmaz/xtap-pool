@@ -40,6 +40,7 @@ export async function compactEnrichmentWorkDatabase(options: {
   try {
     db.pragma("journal_mode = DELETE");
     db.pragma("foreign_keys = OFF");
+    // eslint-disable-next-line complexity -- Compaction validates and maps every imported queue lifecycle state.
     const compact = db.transaction(() => {
       db.exec(`
         DROP TABLE IF EXISTS worker_queue_plan;
@@ -80,6 +81,12 @@ export async function compactEnrichmentWorkDatabase(options: {
         }
         if (row.status === "blocked" && row.attempts < 1) {
           throw new Error("imported blocked queue row must have a positive attempt count");
+        }
+        if (
+          (row.status === "retrying" || row.status === "blocked") &&
+          row.last_error_class === null
+        ) {
+          throw new Error("imported unresolved queue row must have an error class");
         }
       }
       const insertQueue = db.prepare(
@@ -161,7 +168,7 @@ export async function compactEnrichmentWorkDatabase(options: {
                 {
                   ordinal,
                   attempts: row.attempts,
-                  error_class: row.last_error_class ?? "retrying",
+                  error_class: requireImportedErrorClass(row),
                   next_retry_at: row.next_retry_at,
                 },
               ]
@@ -173,7 +180,7 @@ export async function compactEnrichmentWorkDatabase(options: {
                 {
                   ordinal,
                   attempts: row.attempts,
-                  reason: row.last_error_class ?? "blocked",
+                  reason: requireImportedErrorClass(row),
                   evidence_sha256: sha256Canonical({
                     unit_id: row.unit_id,
                     input_hash: row.input_hash,
@@ -291,6 +298,13 @@ export async function bootstrapEnrichmentRun(options: {
     adapter,
   );
   return { runId: created.plan.run_id, planSha256: created.sha256 };
+}
+
+function requireImportedErrorClass(row: { last_error_class: string | null }): string {
+  if (row.last_error_class === null) {
+    throw new Error("imported unresolved queue row must have an error class");
+  }
+  return row.last_error_class;
 }
 
 function countTable(db: Database.Database, table: string): number {
