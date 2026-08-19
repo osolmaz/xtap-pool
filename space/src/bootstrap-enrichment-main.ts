@@ -6,6 +6,7 @@ import {
   createDurableIndexBucketClient,
   DurableIndex,
 } from "./durable-index.js";
+import { activateEnrichmentRun } from "./enrich-active-run.js";
 import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import { loadConfig } from "./config.js";
@@ -67,14 +68,15 @@ async function main(): Promise<void> {
       }
     ).count;
     const registryBaselineScanned = log.latestReceipt()?.registry_scan?.scanned ?? 0;
+    const checkpointStore = createEnrichmentCheckpointStore({
+      bucket: config.indexBucket,
+      accessToken: config.hfToken,
+    });
     const result = await bootstrapEnrichmentRun({
       sourceDatabasePath,
       compactDatabasePath: join(dataDir, "work-plan.sqlite"),
       registryBaselineScanned,
-      store: createEnrichmentCheckpointStore({
-        bucket: config.indexBucket,
-        accessToken: config.hfToken,
-      }),
+      store: checkpointStore,
       attemptId,
       ...(process.env["JOB_ID"] === undefined ? {} : { jobId: process.env["JOB_ID"] }),
       planInput: {
@@ -101,6 +103,12 @@ async function main(): Promise<void> {
           registry_revision: index.enrichStore.registryRevision(),
         },
       },
+    });
+    await activateEnrichmentRun({
+      store: checkpointStore,
+      runId: result.runId,
+      planSha256: result.planSha256,
+      activatedAt: new Date().toISOString(),
     });
     const after = await bucket.readText(CURRENT_MANIFEST_KEY);
     if (after !== before) throw new Error("durable index changed during bootstrap import");

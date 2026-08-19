@@ -46,7 +46,10 @@ The implementation must:
 - Save a registry cursor that queue work cannot reset.
 - Publish and verify immutable result batches before checkpoint progress moves.
 - Use immutable sequence claims as the authoritative checkpoint history.
-- Treat the mutable run pointer as a startup shortcut only.
+- Use a contiguous immutable activation-claim chain as the authoritative active-run history.
+- Treat the mutable active-run pointer as a startup shortcut only.
+- Resolve the active run from that claim chain so the recurring schedule never pins one completed run forever.
+- Prepare the next compact work database from the already open final publication database, advance that local copy to the latest raw snapshot, and activate the successor only after its plan and bootstrap checkpoint verify.
 - Repeat no more than one in-flight concurrency batch after interruption.
 - Keep progress monotonic across attempts in one logical run.
 - Build and fully verify the public SQLite index only after work completes.
@@ -432,8 +435,10 @@ publication recovery, and resumed-versus-uninterrupted equivalence.
 10. Repeat the import from the final production generation.
 11. Deploy the tested Space revision with Space enrichment disabled.
 12. Replace the old Job schedule with one suspended exact new schedule that
-    pins `ENRICH_RUN_ID` and `ENRICH_PLAN_SHA256`.
-13. Run the required sequential canary and verify resume plus publication.
+    resolves the active run from immutable activation claims and has no per-run
+    environment values.
+13. Run the required sequential canary and verify resume, successor activation,
+    and publication.
 14. Activate the canonical schedule, remove the old runtime path, and keep the
     bootstrap importer outside normal runtime execution.
 
@@ -448,6 +453,7 @@ The work is complete when:
 - At most one in-flight concurrency batch repeats after interruption.
 - Progress stays monotonic across physical attempts.
 - Registry work never resets because queue work or new source data appeared.
+- A completed run activates exactly one verified successor, and the next scheduled Job uses it without schedule replacement.
 - Interrupted final publication resumes from its last claimed state and reuses
   uploaded or verified immutable artifacts.
 - Resumed and uninterrupted runs produce the same logical database and manifest.
