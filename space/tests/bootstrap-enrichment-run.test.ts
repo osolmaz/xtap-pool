@@ -4,12 +4,14 @@ import { join } from "node:path";
 
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
+import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-job-control";
 
 import {
   bootstrapEnrichmentRun,
   compactEnrichmentWorkDatabase,
 } from "../src/bootstrap-enrichment-run.js";
+import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
+import { createEmptyEnrichmentState } from "../src/enrich-state.js";
 
 const directories: string[] = [];
 const CREATED_AT = "2026-08-19T12:00:00.000Z";
@@ -54,18 +56,25 @@ describe("enrichment production bootstrap", () => {
       registryBaselineScanned: 7,
     });
     expect(result).toMatchObject({
-      queueTotal: 4,
+      queueTotal: 5,
       queueBaselineDone: 2,
       registryTotal: 8,
-      retainedQueueUnits: 2,
-      retainedTweets: 3,
-      queueRetrying: [],
+      retainedQueueUnits: 3,
+      retainedTweets: 4,
+      queueRetrying: [
+        {
+          ordinal: 3,
+          attempts: 2,
+          error_class: "timeout",
+          next_retry_at: "2026-08-19T13:00:00.000Z",
+        },
+      ],
     });
     expect(result.queueBlocked).toHaveLength(1);
     expect(result.queueBlocked[0]).toMatchObject({
       ordinal: 2,
-      attempts: 1,
-      reason: "blocked",
+      attempts: 5,
+      reason: "invalid_output",
     });
     expect(result.queueBlocked[0]?.evidence_sha256).toMatch(/^[0-9a-f]{64}$/u);
     const work = new Database(join(directory, "work.sqlite"), { readonly: true });
@@ -76,6 +85,7 @@ describe("enrichment production bootstrap", () => {
       { ordinal: 1, unit_id: "u2" },
       { ordinal: 2, unit_id: "u3" },
       { ordinal: 3, unit_id: "u4" },
+      { ordinal: 4, unit_id: "u5" },
     ]);
     expect(work.prepare("SELECT ordinal, name FROM worker_registry_plan").all()).toEqual([
       { ordinal: 7, name: "candidate" },
@@ -91,6 +101,21 @@ describe("enrichment production bootstrap", () => {
     expect((await stat(join(directory, "work.sqlite"))).size).toBeLessThan(
       (await stat(join(directory, "source.sqlite"))).size,
     );
+  });
+
+  it("rejects malformed blocked source state instead of inventing attempts", async () => {
+    const directory = await makeFixture();
+    const sourcePath = join(directory, "source.sqlite");
+    const source = new Database(sourcePath);
+    source.prepare("UPDATE enrich_queue SET attempts = 0 WHERE status = 'blocked'").run();
+    source.close();
+    await expect(
+      compactEnrichmentWorkDatabase({
+        sourcePath,
+        destinationPath: join(directory, "invalid-work.sqlite"),
+        registryBaselineScanned: 7,
+      }),
+    ).rejects.toThrow("positive attempt count");
   });
 
   it("writes only isolated immutable bootstrap objects", async () => {
@@ -134,6 +159,42 @@ describe("enrichment production bootstrap", () => {
     expect([...store.files.keys()].some((key) => key.endsWith("/plan.json"))).toBe(true);
     expect([...store.files.keys()].some((key) => key.includes("/claims/"))).toBe(true);
     expect([...store.files.keys()].some((key) => key === "index/current.json")).toBe(false);
+    const adapter = new EnrichmentCheckpointAdapter(
+      createEmptyEnrichmentState({
+        runId: bootstrapped.runId,
+        planSha256: bootstrapped.planSha256,
+        queueTotal: 5,
+        queueBaselineDone: 0,
+        registryTotal: 8,
+        registryBaselineScanned: 7,
+      }),
+    );
+    const coordinator = CheckpointCoordinator.create({
+      runId: bootstrapped.runId,
+      attemptId: "attempt-2",
+      planSha256: bootstrapped.planSha256,
+      store,
+      prefix: "test-import",
+    });
+    await expect(coordinator.restoreLatest(adapter)).resolves.not.toBeNull();
+    expect(adapter.state.queue).toMatchObject({
+      total: 5,
+      done: 2,
+      retrying: [
+        {
+          ordinal: 3,
+          attempts: 2,
+          error_class: "timeout",
+          next_retry_at: "2026-08-19T13:00:00.000Z",
+        },
+      ],
+    });
+    expect(adapter.state.queue.blocked).toHaveLength(1);
+    expect(adapter.state.queue.blocked[0]).toMatchObject({
+      ordinal: 2,
+      attempts: 5,
+      reason: "invalid_output",
+    });
   });
 });
 
@@ -172,15 +233,30 @@ async function makeFixture(): Promise<string> {
   );
   const insertMember = db.prepare("INSERT INTO unit_members VALUES (?, ?, ?)");
   const insertQueue = db.prepare(
-    `INSERT INTO enrich_queue VALUES (?, ?, 0, NULL, NULL, 1, ?, ?, ?, ?, NULL, NULL, NULL, ?)`,
+    `INSERT INTO enrich_queue VALUES (?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
   );
-  for (const [index, status] of ["done", "pending", "blocked", "done"].entries()) {
+  for (const [index, status] of ["done", "pending", "blocked", "retrying", "done"].entries()) {
     const id = `t${String(index + 1)}`;
     const unit = `u${String(index + 1)}`;
     const time = `2026-08-19T12:00:0${String(index)}.000Z`;
     insertTweet.run(id, time, time, time, id, JSON.stringify({ id, padding: "x".repeat(100_000) }));
     insertMember.run(id, unit, time);
-    insertQueue.run(unit, status, String(index).repeat(64), "c".repeat(64), time, time, time);
+    const attempts = status === "blocked" ? 5 : status === "retrying" ? 2 : 0;
+    const errorClass =
+      status === "blocked" ? "invalid_output" : status === "retrying" ? "timeout" : null;
+    const nextRetry = status === "retrying" ? "2026-08-19T13:00:00.000Z" : null;
+    insertQueue.run(
+      unit,
+      status,
+      attempts,
+      errorClass,
+      String(index).repeat(64),
+      "c".repeat(64),
+      time,
+      time,
+      nextRetry,
+      time,
+    );
   }
   db.prepare("INSERT INTO free_label_registry VALUES ('candidate', 'candidate', ?, ?, NULL)").run(
     CREATED_AT,
@@ -189,7 +265,7 @@ async function makeFixture(): Promise<string> {
   db.prepare("INSERT INTO label_assignments VALUES ('u1', 'candidate', 'free')").run();
   db.prepare("INSERT INTO label_evidence VALUES ('u1', 'candidate', 'free', 't1', 'quote')").run();
   db.prepare("INSERT INTO registry_revision VALUES (1, 10)").run();
-  db.prepare(`INSERT INTO source_segments VALUES ('segment', ?, NULL, 1, ?, 4, 0, 0, 0, 0)`).run(
+  db.prepare(`INSERT INTO source_segments VALUES ('segment', ?, NULL, 1, ?, 5, 0, 0, 0, 0)`).run(
     "f".repeat(64),
     "f".repeat(64),
   );

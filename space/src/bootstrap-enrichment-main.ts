@@ -106,14 +106,14 @@ async function main(): Promise<void> {
         },
       },
     });
+    const after = await bucket.readText(CURRENT_MANIFEST_KEY);
+    if (after !== before) throw new Error("durable index changed during bootstrap import");
     await activateEnrichmentRun({
       store: checkpointStore,
       runId: result.runId,
       planSha256: result.planSha256,
       activatedAt: new Date().toISOString(),
     });
-    const after = await bucket.readText(CURRENT_MANIFEST_KEY);
-    if (after !== before) throw new Error("durable index changed during bootstrap import");
     console.log(JSON.stringify(result));
   } finally {
     index.close();

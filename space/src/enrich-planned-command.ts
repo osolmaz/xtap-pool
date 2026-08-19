@@ -174,44 +174,49 @@ export async function runPlannedEnrichmentCommand(
     env: { ...env, XTAP_PROGRESS_RUN_ID: runId },
   });
 
-  const commitOutput = async (output: DurableWorkerOutput): Promise<void> => {
-    const phase = output.kind === "queue" ? "queue" : output.kind;
-    const frontierKind: OutputKind = output.kind === "queue" ? "enrichment" : output.kind;
-    const frontier = state.outputs[frontierKind];
-    const result = await publishEnrichmentBatchResult({
-      store: checkpointStore,
-      prefix: RUN_PREFIX,
-      value: {
-        schema_version: 1,
-        run_id: runId,
-        phase,
-        sequence: frontier.sequence + 1,
-        previous_result_sha256: frontier.chain_sha256,
-        ordinals: outputOrdinals(
-          output,
-          ordinals,
-          registryNames,
-          state.registry.next_ordinal,
-          plan.work.registry_baseline_scanned,
-        ),
-        raw_segment_key: output.segmentKey,
-        raw_segment_sha256: rawSegmentSha256(output.segmentKey),
-        created_at: rawSegmentCreatedAt(output.segmentKey),
-      },
-    });
-    state = applyDurableOutput(state, output, ordinals, result.sha256);
+  const commitOutputs = async (outputs: readonly DurableWorkerOutput[]): Promise<void> => {
+    const resultSha256: string[] = [];
+    for (const output of outputs) {
+      const phase = output.kind === "queue" ? "queue" : output.kind;
+      const frontierKind: OutputKind = output.kind === "queue" ? "enrichment" : output.kind;
+      const frontier = state.outputs[frontierKind];
+      const result = await publishEnrichmentBatchResult({
+        store: checkpointStore,
+        prefix: RUN_PREFIX,
+        value: {
+          schema_version: 1,
+          run_id: runId,
+          phase,
+          sequence: frontier.sequence + 1,
+          previous_result_sha256: frontier.chain_sha256,
+          ordinals: outputOrdinals(
+            output,
+            ordinals,
+            registryNames,
+            state.registry.next_ordinal,
+            plan.work.registry_baseline_scanned,
+          ),
+          raw_segment_key: output.segmentKey,
+          raw_segment_sha256: rawSegmentSha256(output.segmentKey),
+          created_at: rawSegmentCreatedAt(output.segmentKey),
+        },
+      });
+      state = applyDurableOutput(state, output, ordinals, result.sha256);
+      resultSha256.push(result.sha256);
+    }
     state = withCheckpointSequence(state, state.sequence + 1);
     adapter.replace(state);
     await coordinator.commit(
       {
-        name: `${output.kind}-segment`,
+        name: outputs.length === 1 ? `${outputs[0]?.kind ?? "output"}-segment` : "orphan-segment",
         sequence: state.sequence,
         reached_at: new Date().toISOString(),
-        metadata: { result_sha256: result.sha256 },
+        metadata: { result_count: outputs.length, result_sha256: resultSha256.join(",") },
       },
       adapter,
     );
   };
+  const commitOutput = (output: DurableWorkerOutput): Promise<void> => commitOutputs([output]);
 
   await reconcileOrphanOutputs({
     log,
@@ -219,7 +224,7 @@ export async function runPlannedEnrichmentCommand(
     checkpointStore,
     runId,
     state: () => state,
-    commitOutput,
+    commitOutputs,
     registryNames,
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
     queueIdentities,
@@ -711,7 +716,7 @@ async function reconcileOrphanOutputs(options: {
   checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
   runId: string;
   state: () => EnrichmentCheckpointState;
-  commitOutput: (output: DurableWorkerOutput) => Promise<void>;
+  commitOutputs: (outputs: readonly DurableWorkerOutput[]) => Promise<void>;
   registryNames: readonly string[];
   registryBaselineOrdinal: number;
   queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>;
@@ -734,8 +739,8 @@ async function reconcileOrphanOutputs(options: {
       options.queueIdentities,
       options.contractHash,
     );
-    for (const output of outputs) {
-      await options.commitOutput(withSegmentKey(output, file.key));
+    if (outputs.length > 0) {
+      await options.commitOutputs(outputs.map((output) => withSegmentKey(output, file.key)));
     }
   }
 }
