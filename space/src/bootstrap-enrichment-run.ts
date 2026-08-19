@@ -7,7 +7,7 @@ import { CheckpointCoordinator } from "@osolmaz/hf-job-control";
 import { EnrichmentCheckpointAdapter } from "./enrich-checkpoint.js";
 import type { EnrichmentRunPlanInput } from "./enrich-run-plan.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "./enrich-run-plan.js";
-import { createEmptyEnrichmentState } from "./enrich-state.js";
+import { createEmptyEnrichmentState, markQueueCompleted } from "./enrich-state.js";
 import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
 
 const PLAN_PREFIX = "operations/enrichment/runs";
@@ -15,6 +15,7 @@ const PLAN_PREFIX = "operations/enrichment/runs";
 export type CompactWorkResult = {
   queueTotal: number;
   queueBaselineDone: number;
+  queueDoneOrdinals: readonly number[];
   registryTotal: number;
   retainedQueueUnits: number;
   retainedTweets: number;
@@ -148,6 +149,9 @@ export async function compactEnrichmentWorkDatabase(options: {
       return {
         queueTotal: queueRows.length,
         queueBaselineDone,
+        queueDoneOrdinals: queueRows.flatMap((row, ordinal) =>
+          row.status === "done" ? [ordinal] : [],
+        ),
         registryTotal: options.registryBaselineScanned + candidates.length,
         retainedQueueUnits: queueRows.length - queueBaselineDone,
         retainedTweets: countTable(db, "tweets"),
@@ -219,14 +223,15 @@ export async function bootstrapEnrichmentRun(options: {
   const planBytes = canonicalPlanBytes(created.plan);
   const planKey = `${prefix}/${created.plan.run_id}/plan.json`;
   await options.store.writeImmutable(planKey, planBytes);
-  const initial = createEmptyEnrichmentState({
+  let initial = createEmptyEnrichmentState({
     runId: created.plan.run_id,
     planSha256: created.sha256,
     queueTotal: compact.queueTotal,
-    queueBaselineDone: compact.queueBaselineDone,
+    queueBaselineDone: 0,
     registryTotal: compact.registryTotal,
     registryBaselineScanned: options.registryBaselineScanned,
   });
+  initial = markQueueCompleted(initial, compact.queueDoneOrdinals);
   const adapter = new EnrichmentCheckpointAdapter({ ...initial, sequence: 1 });
   const coordinator = CheckpointCoordinator.create({
     runId: created.plan.run_id,

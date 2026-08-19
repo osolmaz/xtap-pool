@@ -60,6 +60,7 @@ async function main(): Promise<void> {
     },
   );
   try {
+    const advance = await index.advanceToLatest();
     const sourceSegmentCount = (
       index.store.database.prepare("SELECT COUNT(*) AS count FROM source_segments").get() as {
         count: number;
@@ -81,7 +82,7 @@ async function main(): Promise<void> {
         created_at: new Date().toISOString(),
         source: {
           bucket: config.rawBucket,
-          snapshot_revision: manifest.source.revision,
+          snapshot_revision: advance.revision,
           ordered_segments: { key: "replaced", sha256: "0".repeat(64), bytes: 1 },
         },
         contract: {

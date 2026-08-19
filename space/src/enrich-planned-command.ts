@@ -87,6 +87,9 @@ export async function runPlannedEnrichmentCommand(
   const parsedPlan: unknown = JSON.parse(Buffer.from(planBytes).toString("utf8"));
   const { plan } = parseEnrichmentRunPlan(parsedPlan, planSha256);
   if (plan.run_id !== runId) throw new Error("active enrichment run ID mismatch");
+  if (plan.contract.worker_revision !== requireEnvironment(env, "XTAP_SOURCE_REVISION")) {
+    throw new Error("planned enrichment worker revision does not match running code");
+  }
   const workBytes = await requiredObject(checkpointStore, plan.work.key);
   verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
   const sourceSegmentsBytes = await requiredObject(
@@ -330,7 +333,12 @@ export async function runPlannedEnrichmentCommand(
         },
         adapter,
       );
-      const outputKeys = await readRunOutputKeys(checkpointStore, runId, state);
+      const outputKeys = [
+        ...new Set([
+          ...sourceSegments.map((file) => file.key),
+          ...(await readRunOutputKeys(checkpointStore, runId, state)),
+        ]),
+      ].sort();
       const publication = await DurableIndex.restoreReference(
         {
           rawBucket: config.rawBucket,
@@ -590,6 +598,7 @@ export function parseSourceSegments(bytes: Uint8Array): BucketSnapshotFile[] {
   }));
 }
 
+// eslint-disable-next-line complexity -- Publication verifies every claimed result chain before applying raw segments.
 async function readRunOutputKeys(
   store: ReturnType<typeof createEnrichmentCheckpointStore>,
   runId: string,
@@ -598,6 +607,7 @@ async function readRunOutputKeys(
   const prefix = `${RUN_PREFIX}/${runId}/batches/`;
   const keys = await store.list(prefix);
   const raw = new Set<string>();
+  const chains = new Map<OutputKind, { sequence: number; sha256: string | null }>();
   for (const key of keys) {
     if (!key.endsWith("/result.json")) continue;
     const bytes = await requiredObject(store, key);
@@ -606,7 +616,25 @@ async function readRunOutputKeys(
     if (result.run_id !== runId) throw new Error("batch result run ID mismatch");
     const frontierKind: OutputKind = result.phase === "queue" ? "enrichment" : result.phase;
     if (result.sequence > state.outputs[frontierKind].sequence) continue;
+    const previous = chains.get(frontierKind) ?? { sequence: 0, sha256: null };
+    if (
+      result.sequence !== previous.sequence + 1 ||
+      result.previous_result_sha256 !== previous.sha256
+    ) {
+      throw new Error(`broken ${frontierKind} result chain`);
+    }
+    chains.set(frontierKind, {
+      sequence: result.sequence,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
     raw.add(result.raw_segment_key);
+  }
+  for (const kind of ["enrichment", "attempt", "registry", "receipt"] as const) {
+    const actual = chains.get(kind) ?? { sequence: 0, sha256: null };
+    const expected = state.outputs[kind];
+    if (actual.sequence !== expected.sequence || actual.sha256 !== expected.chain_sha256) {
+      throw new Error(`missing ${kind} result manifest`);
+    }
   }
   return [...raw].sort();
 }
