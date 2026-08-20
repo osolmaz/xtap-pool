@@ -103,6 +103,39 @@ describe("enrichment production bootstrap", () => {
     );
   });
 
+  it("imports only the unscanned registry suffix plus candidates created after the cursor", async () => {
+    const directory = await makeFixture();
+    const source = new Database(join(directory, "source.sqlite"));
+    const insert = source.prepare(
+      "INSERT INTO free_label_registry VALUES (?, 'candidate', ?, ?, NULL)",
+    );
+    insert.run("alpha-old", "2026-08-19T11:00:00.000Z", "2026-08-19T11:00:00.000Z");
+    insert.run("beta-new", "2026-08-19T12:30:00.000Z", "2026-08-19T12:30:00.000Z");
+    insert.run("zeta-old", "2026-08-19T11:00:00.000Z", "2026-08-19T11:00:00.000Z");
+    source.close();
+
+    const result = await compactEnrichmentWorkDatabase({
+      sourcePath: join(directory, "source.sqlite"),
+      destinationPath: join(directory, "cursor-work.sqlite"),
+      registryBaselineScanned: 7,
+      registryCursor: {
+        afterName: "middle",
+        scanned: 7,
+        observedAt: "2026-08-19T12:00:00.000Z",
+      },
+    });
+
+    expect(result.registryTotal).toBe(9);
+    const work = new Database(join(directory, "cursor-work.sqlite"), { readonly: true });
+    expect(
+      work.prepare("SELECT ordinal, name FROM worker_registry_plan ORDER BY ordinal").all(),
+    ).toEqual([
+      { ordinal: 7, name: "beta-new" },
+      { ordinal: 8, name: "zeta-old" },
+    ]);
+    work.close();
+  });
+
   it("rejects malformed blocked source state instead of inventing attempts", async () => {
     const directory = await makeFixture();
     const sourcePath = join(directory, "source.sqlite");
@@ -179,6 +212,7 @@ describe("enrichment production bootstrap", () => {
           key: "index/databases/base.sqlite",
           sha256: "e".repeat(64),
           bytes: 100,
+          source_revision: "a".repeat(64),
           source_segment_count: 1,
           receipt_count: 1,
           registry_revision: 10,

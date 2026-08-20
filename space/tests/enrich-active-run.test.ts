@@ -60,6 +60,7 @@ function plan(createdAt: string, baseSha: string) {
       key: `index/databases/${baseSha}.sqlite`,
       sha256: baseSha,
       bytes: 1,
+      source_revision: "b".repeat(64),
       source_segment_count: 1,
       receipt_count: 1,
       registry_revision: 1,

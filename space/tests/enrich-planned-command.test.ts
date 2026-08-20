@@ -133,7 +133,7 @@ describe("planned enrichment recovery", () => {
       {
         kind: "attempt",
         segmentKey: SEGMENT,
-        event: { ...attempt("transient_failure"), unit_id: "u3" },
+        events: [{ ...attempt("transient_failure"), unit_id: "u3" }],
       },
       ordinals,
       "2".repeat(64),
@@ -143,7 +143,7 @@ describe("planned enrichment recovery", () => {
       {
         kind: "attempt",
         segmentKey: SEGMENT,
-        event: { ...attempt("blocked"), unit_id: "u3" },
+        events: [{ ...attempt("blocked"), unit_id: "u3" }],
       },
       ordinals,
       "5".repeat(64),
@@ -279,7 +279,7 @@ describe("planned enrichment recovery", () => {
     ]);
     expect(outputsFromSegment(segment, ["candidate"], 0, identities, SHA)).toEqual([
       { kind: "queue", successfulUnitIds: ["u1"] },
-      { kind: "attempt", event: attempt("transient_failure") },
+      { kind: "attempt", events: [attempt("transient_failure")] },
       { kind: "registry", decisions: [decision("approved")] },
       { kind: "receipt" },
     ]);

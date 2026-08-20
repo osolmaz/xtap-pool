@@ -53,6 +53,7 @@ function planInput() {
       key: "index/databases/base.sqlite",
       sha256: "f".repeat(64),
       bytes: 100,
+      source_revision: "b".repeat(64),
       source_segment_count: 10,
       receipt_count: 2,
       registry_revision: 7,

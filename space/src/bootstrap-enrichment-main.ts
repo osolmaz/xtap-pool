@@ -69,7 +69,21 @@ async function main(): Promise<void> {
     ).count;
     const baseRegistryRevision = index.enrichStore.registryRevision();
     const advance = await index.advanceToLatest();
-    const registryBaselineScanned = log.latestReceipt()?.registry_scan?.scanned ?? 0;
+    const latestReceipt = log.latestReceipt();
+    const registryScan = latestReceipt?.registry_scan;
+    let registryCursor: { afterName: string; scanned: number; observedAt: string } | undefined;
+    if (
+      latestReceipt !== undefined &&
+      registryScan !== undefined &&
+      registryScan.scanned > 0 &&
+      typeof registryScan.after_name === "string"
+    ) {
+      registryCursor = {
+        afterName: registryScan.after_name,
+        scanned: registryScan.scanned,
+        observedAt: latestReceipt.finished_at,
+      };
+    }
     const checkpointStore = createEnrichmentCheckpointStore({
       bucket: config.indexBucket,
       accessToken: config.hfToken,
@@ -77,7 +91,8 @@ async function main(): Promise<void> {
     const result = await bootstrapEnrichmentRun({
       sourceDatabasePath,
       compactDatabasePath: join(dataDir, "work-plan.sqlite"),
-      registryBaselineScanned,
+      registryBaselineScanned: registryCursor?.scanned ?? 0,
+      ...(registryCursor === undefined ? {} : { registryCursor }),
       store: checkpointStore,
       attemptId,
       ...(process.env["JOB_ID"] === undefined ? {} : { jobId: process.env["JOB_ID"] }),
@@ -100,6 +115,7 @@ async function main(): Promise<void> {
           key: manifest.database.key,
           sha256: manifest.database.sha256,
           bytes: baseDatabaseBytes,
+          source_revision: manifest.source.revision,
           source_segment_count: baseSourceSegmentCount,
           receipt_count: manifest.counts.receipts,
           registry_revision: baseRegistryRevision,

@@ -118,6 +118,7 @@ export type EnrichmentRunPlan = {
     key: string;
     sha256: string;
     bytes: number;
+    source_revision: string;
     source_segment_count: number;
     receipt_count: number;
     registry_revision: number;
@@ -244,7 +245,8 @@ For each batch, the worker:
 1. Reads missing ordinals from the frozen plan.
 2. Saves the batch identity and exact unit list locally.
 3. Runs at most the configured concurrency.
-4. Writes one immutable attempt segment.
+4. Writes one immutable attempt segment, including concurrent dispatch
+   reservations before provider calls.
 5. Uploads the segment and downloads it for SHA-256 verification.
 6. Updates the local bitmap and retry details, then updates counters and the output chain.
 7. Commits and verifies a small checkpoint bundle.
@@ -334,7 +336,8 @@ changes only after a verified immutable publication claim.
 Add a read-only bootstrap command. It will:
 
 1. Read `index/current.json` twice and require equal bytes.
-2. Download the referenced database.
+2. Download the referenced database at the base index's own frozen source
+   revision, not the newer work-plan snapshot.
 3. Verify size and SHA-256. Verify provenance and schema, then run
    `PRAGMA quick_check`.
 4. Verify raw Bucket, source snapshot, contract, source segment count, receipts,
@@ -342,7 +345,9 @@ Add a read-only bootstrap command. It will:
 5. Export queue IDs and input hashes in deterministic order.
 6. Build the completion bitmap and preserve unresolved retry or blocked details.
 7. Build the registry candidate plan with the production discovery algorithm.
-8. Verify the saved cursor against the same ordered candidate prefix.
+8. Verify the saved cursor by its scanned count, last name, and receipt time.
+   Exclude old candidates at or before that name, but retain candidates first
+   observed after the receipt even when their names sort before the cursor.
 9. Write a plan and initial checkpoint under an isolated prefix.
 10. Download and verify every new object.
 11. Read `index/current.json` again and abort if it changed during import.

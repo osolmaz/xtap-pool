@@ -153,6 +153,7 @@ describe("planned enrichment runtime", () => {
         key: DATABASE_KEY,
         sha256: BASE_SHA,
         bytes: 1,
+        source_revision: "b".repeat(64),
         source_segment_count: 0,
         receipt_count: 0,
         registry_revision: 1,

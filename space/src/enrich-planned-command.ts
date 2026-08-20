@@ -412,14 +412,13 @@ export async function runPlannedEnrichmentCommand(
           taxonomyVersion: config.taxonomyVersion,
           contractHash,
           expectedCurrentDatabaseSha256: plan.base_index.sha256,
-          predecessorKeys: [plan.base_index.key],
           progress,
           publicationBoundary: commitPublicationBoundary,
         },
         {
           key: plan.base_index.key,
           sha256: plan.base_index.sha256,
-          sourceRevision: plan.source.snapshot_revision,
+          sourceRevision: plan.base_index.source_revision,
         },
       );
       try {
@@ -544,6 +543,7 @@ async function ensureSuccessorRun(options: {
           key: options.manifest.database.key,
           sha256: options.manifest.database.sha256,
           bytes: options.databaseBytes,
+          source_revision: options.manifest.source.revision,
           source_segment_count: sourceSegmentCount,
           receipt_count: options.manifest.counts.receipts,
           registry_revision: registryRevision,
@@ -685,28 +685,7 @@ export function applyDurableOutput(
     return advanceOutputFrontier(next, "enrichment", resultSha256);
   }
   if (output.kind === "attempt") {
-    const ordinal = requireOrdinal(output.event.unit_id, ordinals);
-    if (output.event.outcome === "blocked") {
-      next = recordQueueAttempt(next, {
-        status: "blocked",
-        value: {
-          ordinal,
-          attempts: output.event.attempt,
-          reason: output.event.error_class ?? output.event.outcome,
-          evidence_sha256: rawSegmentSha256(output.segmentKey),
-        },
-      });
-    } else {
-      next = recordQueueAttempt(next, {
-        status: "retrying",
-        value: {
-          ordinal,
-          attempts: output.event.attempt,
-          error_class: output.event.error_class ?? output.event.outcome,
-          next_retry_at: output.event.next_retry_at ?? null,
-        },
-      });
-    }
+    next = applyAttemptEvents(next, output, ordinals);
     return advanceOutputFrontier(next, "attempt", resultSha256);
   }
   if (output.kind === "registry") {
@@ -717,6 +696,38 @@ export function applyDurableOutput(
     return advanceOutputFrontier(next, "registry", resultSha256);
   }
   return advanceOutputFrontier(next, "receipt", resultSha256);
+}
+
+function applyAttemptEvents(
+  current: EnrichmentCheckpointState,
+  output: Extract<DurableWorkerOutput, { kind: "attempt" }>,
+  ordinals: ReadonlyMap<string, number>,
+): EnrichmentCheckpointState {
+  let next = current;
+  for (const event of output.events) {
+    const ordinal = requireOrdinal(event.unit_id, ordinals);
+    next =
+      event.outcome === "blocked"
+        ? recordQueueAttempt(next, {
+            status: "blocked",
+            value: {
+              ordinal,
+              attempts: event.attempt,
+              reason: event.error_class ?? event.outcome,
+              evidence_sha256: rawSegmentSha256(output.segmentKey),
+            },
+          })
+        : recordQueueAttempt(next, {
+            status: "retrying",
+            value: {
+              ordinal,
+              attempts: event.attempt,
+              error_class: event.error_class ?? event.outcome,
+              next_retry_at: event.next_retry_at ?? null,
+            },
+          });
+  }
+  return next;
 }
 
 async function reconcileOrphanOutputs(options: {
@@ -756,7 +767,7 @@ async function reconcileOrphanOutputs(options: {
 
 type RecoveredOutput =
   | { kind: "queue"; successfulUnitIds: readonly string[] }
-  | { kind: "attempt"; event: AttemptEvent }
+  | { kind: "attempt"; events: readonly AttemptEvent[] }
   | { kind: "registry"; decisions: readonly FreeLabelEvent[] }
   | { kind: "receipt" };
 
@@ -827,7 +838,7 @@ export function outputsFromSegment(
   if (successful.size > 0) {
     outputs.push({ kind: "queue", successfulUnitIds: [...successful].sort() });
   }
-  outputs.push(...attempts.map((event) => ({ kind: "attempt" as const, event })));
+  if (attempts.length > 0) outputs.push({ kind: "attempt", events: attempts });
   if (decisions.length > 0) outputs.push({ kind: "registry", decisions });
   if (hasReceipt) outputs.push({ kind: "receipt" });
   return outputs;
@@ -894,7 +905,12 @@ function outputOrdinals(
   registryBaselineOrdinal: number,
 ): number[] {
   if (output.kind === "queue") return requireOrdinals(output.successfulUnitIds, ordinals);
-  if (output.kind === "attempt") return [requireOrdinal(output.event.unit_id, ordinals)];
+  if (output.kind === "attempt") {
+    return requireOrdinals(
+      output.events.map((event) => event.unit_id),
+      ordinals,
+    );
+  }
   if (output.kind === "registry") {
     return registryOutputOrdinals(
       output.decisions,

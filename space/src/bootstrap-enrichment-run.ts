@@ -29,11 +29,19 @@ export type CompactWorkResult = {
   orderedSegments: Uint8Array;
 };
 
+type RegistryImportCursor = {
+  afterName: string;
+  scanned: number;
+  observedAt: string;
+};
+
 export async function compactEnrichmentWorkDatabase(options: {
   sourcePath: string;
   destinationPath: string;
   registryBaselineScanned: number;
+  registryCursor?: RegistryImportCursor;
 }): Promise<CompactWorkResult> {
+  validateRegistryImportCursor(options.registryCursor, options.registryBaselineScanned);
   await rm(options.destinationPath, { force: true });
   await copyFile(options.sourcePath, options.destinationPath);
   const db = new Database(options.destinationPath);
@@ -105,9 +113,15 @@ export async function compactEnrichmentWorkDatabase(options: {
           row.next_retry_at,
         );
       }
-      const candidates = db
-        .prepare(`SELECT name FROM free_label_registry WHERE status = 'candidate' ORDER BY name`)
-        .all() as { name: string }[];
+      const candidateRows = db
+        .prepare(
+          `SELECT name, first_observed_at
+           FROM free_label_registry WHERE status = 'candidate' ORDER BY name`,
+        )
+        .all() as { name: string; first_observed_at: string }[];
+      const candidates = candidateRows.filter((candidate) =>
+        registryCandidateIsPending(candidate, options.registryCursor),
+      );
       const evidence = db.prepare(
         `SELECT unit_id, tweet_id, quote FROM label_evidence
          WHERE kind = 'free' AND name = ? ORDER BY unit_id, tweet_id, quote`,
@@ -221,6 +235,7 @@ export async function bootstrapEnrichmentRun(options: {
   compactDatabasePath: string;
   planInput: Omit<EnrichmentRunPlanInput, "work">;
   registryBaselineScanned: number;
+  registryCursor?: RegistryImportCursor;
   store: CheckpointObjectStore;
   attemptId: string;
   jobId?: string;
@@ -231,6 +246,7 @@ export async function bootstrapEnrichmentRun(options: {
     sourcePath: options.sourceDatabasePath,
     destinationPath: options.compactDatabasePath,
     registryBaselineScanned: options.registryBaselineScanned,
+    ...(options.registryCursor === undefined ? {} : { registryCursor: options.registryCursor }),
   });
   const prefix = options.prefix ?? PLAN_PREFIX;
   const workBytes = new Uint8Array(await readFile(options.compactDatabasePath));
@@ -298,6 +314,33 @@ export async function bootstrapEnrichmentRun(options: {
     adapter,
   );
   return { runId: created.plan.run_id, planSha256: created.sha256 };
+}
+
+function validateRegistryImportCursor(
+  cursor: RegistryImportCursor | undefined,
+  baselineScanned: number,
+): void {
+  if (cursor === undefined) return;
+  if (cursor.scanned !== baselineScanned) {
+    throw new Error("registry import cursor does not match the scanned baseline");
+  }
+  if (cursor.afterName.length === 0) {
+    throw new Error("registry import cursor name must not be empty");
+  }
+  if (Number.isNaN(Date.parse(cursor.observedAt))) {
+    throw new Error("registry import cursor timestamp is invalid");
+  }
+}
+
+function registryCandidateIsPending(
+  candidate: { name: string; first_observed_at: string },
+  cursor: RegistryImportCursor | undefined,
+): boolean {
+  return (
+    cursor === undefined ||
+    candidate.name > cursor.afterName ||
+    candidate.first_observed_at > cursor.observedAt
+  );
 }
 
 function requireImportedErrorClass(row: { last_error_class: string | null }): string {
