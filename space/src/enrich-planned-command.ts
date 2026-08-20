@@ -171,7 +171,6 @@ export async function runPlannedEnrichmentCommand(
       throw new Error("active enrichment plan base index is no longer current");
     }
   }
-  applyCheckpointToWorkerDatabase(tweetStore.database, state);
   const ordinals = readQueueOrdinals(tweetStore.database);
   const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
   const registryNames = readRegistryNames(tweetStore.database);
@@ -238,6 +237,15 @@ export async function runPlannedEnrichmentCommand(
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
     queueIdentities,
     contractHash,
+  });
+  await restoreClaimedWorkerOutputs({
+    log,
+    sourceSegments,
+    checkpointStore,
+    runId,
+    state,
+    tweetStore,
+    enrichStore,
   });
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
 
@@ -733,6 +741,41 @@ function applyAttemptEvents(
           });
   }
   return next;
+}
+
+async function restoreClaimedWorkerOutputs(options: {
+  log: BucketLog;
+  sourceSegments: readonly BucketSnapshotFile[];
+  checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
+  runId: string;
+  state: EnrichmentCheckpointState;
+  tweetStore: TweetStore;
+  enrichStore: EnrichStore;
+}): Promise<void> {
+  const keys = [
+    ...(await readRunOutputKeys(options.checkpointStore, options.runId, options.state)),
+  ].sort((left, right) => rawSegmentCreatedAt(left).localeCompare(rawSegmentCreatedAt(right)));
+  if (keys.length === 0) return;
+  const discovered = await options.log.discoverSnapshot(options.sourceSegments);
+  const files = new Map(
+    [...options.sourceSegments, ...discovered.snapshot.files].map((file) => [file.key, file]),
+  );
+  const segments: BucketSegment[] = [];
+  for (const key of keys) {
+    const file = files.get(key);
+    if (file === undefined) throw new Error(`claimed raw output segment is missing: ${key}`);
+    segments.push(await options.log.loadSegment(file));
+  }
+  applyClaimedWorkerSegments(segments, options.log, options.tweetStore, options.enrichStore);
+}
+
+export function applyClaimedWorkerSegments(
+  segments: readonly BucketSegment[],
+  log: BucketLog,
+  tweetStore: TweetStore,
+  enrichStore: EnrichStore,
+): void {
+  for (const segment of segments) log.applySegment(segment, tweetStore, enrichStore);
 }
 
 async function reconcileOrphanOutputs(options: {

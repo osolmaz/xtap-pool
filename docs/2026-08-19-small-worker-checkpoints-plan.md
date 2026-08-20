@@ -83,9 +83,11 @@ Each completed batch is saved once. A small claimed checkpoint records the
 finished ordinals and unresolved work. `current.json` points to the latest known
 claim so startup is fast, but the immutable claims remain the source of truth.
 
-A normal continuation downloads the frozen plan and small checkpoint. It does
-not restore the public database. The Job builds that database once after queue
-and registry work is complete.
+A normal continuation downloads the frozen plan and small checkpoint. It then
+replays only the raw output segments claimed by that checkpoint into the compact
+worker database so queue results, registry statuses, and registry revisions are
+exact before new work starts. It does not restore the public database. The Job
+builds that database once after queue and registry work is complete.
 
 ## Logical run plan
 
