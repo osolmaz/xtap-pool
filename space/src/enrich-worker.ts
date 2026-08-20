@@ -340,7 +340,7 @@ export type DurableWorkerOutput =
       segmentKey: string;
       successfulUnitIds: readonly string[];
     }
-  | { kind: "attempt"; segmentKey: string; event: AttemptEvent }
+  | { kind: "attempt"; segmentKey: string; events: readonly AttemptEvent[] }
   | { kind: "registry"; segmentKey: string; decisions: readonly FreeLabelEvent[] }
   | { kind: "receipt"; segmentKey: string };
 
@@ -891,7 +891,8 @@ async function persistDispatchReservations(
     })),
   );
   const lock = deps.lock ?? (async <T>(fn: () => Promise<T>): Promise<T> => fn());
-  await lock(() => persistRowsAndEvents(deps, [], events, []));
+  const segmentKey = await lock(() => persistRowsAndEvents(deps, [], events, []));
+  await deps.durableOutput?.({ kind: "attempt", segmentKey, events });
 }
 
 /** Apply observed provider accounting only in durable commit order. */
@@ -1561,7 +1562,7 @@ async function persistAttemptAndApply(deps: EnrichWorkerDeps, event: AttemptEven
     deps.enrichStore.replayAttemptEvent(validated);
   });
   if (segmentKey === undefined) throw new Error("durable attempt segment key is missing");
-  await deps.durableOutput?.({ kind: "attempt", segmentKey, event: validated });
+  await deps.durableOutput?.({ kind: "attempt", segmentKey, events: [validated] });
   await deps.progress?.queue(deps.enrichStore.queueProgress());
 }
 

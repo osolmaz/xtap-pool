@@ -34,6 +34,7 @@ const enrichmentRunPlanInputSchema = z
       })
       .strict(),
     base_index: objectReferenceSchema.extend({
+      source_revision: z.string().regex(SHA256),
       source_segment_count: z.number().int().nonnegative(),
       receipt_count: z.number().int().nonnegative(),
       registry_revision: z.number().int().nonnegative(),

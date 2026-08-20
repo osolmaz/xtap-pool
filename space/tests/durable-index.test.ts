@@ -211,6 +211,27 @@ describe("DurableIndex", () => {
     index.close();
   });
 
+  it("deduplicates a repeated base predecessor before publishing", async () => {
+    await appendTweet("1");
+    const first = await DurableIndex.bootstrap(options("dedupe-first"));
+    const base = await first.publish();
+    first.close();
+
+    const restored = await DurableIndex.restoreReference(options("dedupe-restored"), {
+      key: base.database.key,
+      sha256: base.database.sha256,
+      sourceRevision: base.source.revision,
+      predecessorKeys: [base.database.key, ...base.database.predecessors],
+    });
+    await appendTweet("2");
+    await restored.advanceToLatest();
+    const next = await restored.publish();
+    restored.close();
+
+    expect(next.database.predecessors[0]).toBe(base.database.key);
+    expect(new Set(next.database.predecessors).size).toBe(next.database.predecessors.length);
+  });
+
   it("detects a corrupt published SQLite generation", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("corrupt"));

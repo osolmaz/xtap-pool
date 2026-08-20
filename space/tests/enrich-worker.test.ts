@@ -666,6 +666,32 @@ describe("runEnrichTick", () => {
     expect(enrichStore.queueEntry("100:someone")?.status).toBe("retrying");
   });
 
+  it("claims concurrent dispatch reservations as one durable attempt output", async () => {
+    seedUnit("100", "first");
+    seedUnit("101", "second");
+    const outputs: Parameters<NonNullable<EnrichWorkerDeps["durableOutput"]>>[0][] = [];
+
+    await runEnrichTick(
+      deps(respondingClient(withEvidence), {
+        unitsPerCall: 1,
+        maxConcurrentCalls: 2,
+        durableOutput: (output) => {
+          outputs.push(output);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(outputs[0]).toMatchObject({
+      kind: "attempt",
+      events: [
+        { unit_id: "100:someone", outcome: "dispatched" },
+        { unit_id: "101:someone", outcome: "dispatched" },
+      ],
+    });
+    expect(outputs.filter((output) => output.kind === "queue")).toHaveLength(2);
+  });
+
   it("keeps an unmeasured concurrent cost fail-closed for later waves", async () => {
     seedUnit("100", "first");
     seedUnit("101", "second");

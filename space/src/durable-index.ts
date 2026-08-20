@@ -208,7 +208,9 @@ export class DurableIndex {
     }
     const snapshot = await options.log.loadSnapshot(reference.sourceRevision);
     await options.log.hydrateMetadata(snapshot);
-    return open(options, bucket, [reference.key, ...(reference.predecessorKeys ?? [])]);
+    return open(options, bucket, [
+      ...new Set([reference.key, ...(reference.predecessorKeys ?? [])]),
+    ]);
   }
 
   // eslint-disable-next-line complexity -- Resume verifies each publication boundary before the public pointer changes.
