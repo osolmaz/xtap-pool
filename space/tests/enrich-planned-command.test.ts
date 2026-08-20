@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
 
+import { BucketLog } from "../src/bucket-log.js";
 import {
   applyCheckpointToWorkerDatabase,
+  applyClaimedWorkerSegments,
   applyDurableOutput,
   outputsFromSegment,
   parseSourceSegments,
@@ -16,6 +18,8 @@ import {
   recordQueueAttempt,
   validateEnrichmentState,
 } from "../src/enrich-state.js";
+import { EnrichStore } from "../src/enrich-store.js";
+import { TweetStore } from "../src/store.js";
 
 const SHA = "a".repeat(64);
 const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111-8111-111111111111-${"b".repeat(64)}.json.gz`;
@@ -99,6 +103,50 @@ describe("planned enrichment recovery", () => {
       { unit_id: "u3", status: "blocked", attempts: 5 },
     ]);
     db.close();
+  });
+
+  it("replays claimed registry decisions into a replacement worker database", () => {
+    const tweets = new TweetStore(":memory:");
+    const enrich = new EnrichStore(
+      tweets.database,
+      1,
+      () => new Date("2026-08-19T12:00:00.000Z"),
+      SHA,
+    );
+    tweets.database
+      .prepare("INSERT INTO free_label_registry VALUES (?, 'candidate', ?, ?, NULL)")
+      .run("candidate", "2026-08-19T10:00:00.000Z", "2026-08-19T10:00:00.000Z");
+    const log = new BucketLog(
+      "owner/raw",
+      {
+        list: () => Promise.resolve([]),
+        download: () => Promise.resolve(undefined),
+        upload: () => Promise.resolve(),
+      },
+      "unused-cache",
+    );
+    applyClaimedWorkerSegments(
+      [
+        {
+          schema_version: 1,
+          transaction_id: "11111111-1111-4111-8111-111111111111",
+          created_at: "2026-08-19T12:00:00.000Z",
+          operations: [
+            {
+              path: "enrichment/registry/2026/08/registry-2026-08-19.jsonl",
+              mode: "append",
+              lines: [JSON.stringify(decision("approved"))],
+            },
+          ],
+        },
+      ],
+      log,
+      tweets,
+      enrich,
+    );
+    expect(enrich.registryRevision()).toBe(2);
+    expect(enrich.registryStatus("candidate")).toBe("approved");
+    tweets.close();
   });
 
   it("maps registry results through a nonzero frozen baseline", () => {
