@@ -52,7 +52,7 @@ The implementation must:
 - Use a contiguous immutable activation-claim chain as the authoritative active-run history.
 - Treat the mutable active-run pointer as a startup shortcut only.
 - Resolve the active run from that claim chain so the recurring schedule never pins one completed run forever.
-- Prepare the next compact work database from the already open final publication database, advance that local copy to the latest raw snapshot, and activate the successor only after its plan and bootstrap checkpoint verify.
+- Prepare the next compact work database from the already open final publication database, advance that local copy to the latest raw snapshot, carry the completed registry baseline forward while retaining candidates first observed after the frozen plan time, and activate the successor only after its plan and bootstrap checkpoint verify.
 - Repeat no more than one in-flight concurrency batch after interruption.
 - Keep progress monotonic across attempts in one logical run.
 - Build and fully verify the public SQLite index only after work completes.

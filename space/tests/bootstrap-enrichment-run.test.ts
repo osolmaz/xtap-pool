@@ -134,6 +134,27 @@ describe("enrichment production bootstrap", () => {
       { ordinal: 8, name: "zeta-old" },
     ]);
     work.close();
+
+    const successor = await compactEnrichmentWorkDatabase({
+      sourcePath: join(directory, "source.sqlite"),
+      destinationPath: join(directory, "successor-work.sqlite"),
+      registryBaselineScanned: 9,
+      registryCursor: {
+        afterName: null,
+        scanned: 9,
+        observedAt: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    expect(successor.registryTotal).toBe(10);
+    const successorWork = new Database(join(directory, "successor-work.sqlite"), {
+      readonly: true,
+    });
+    expect(
+      successorWork
+        .prepare("SELECT ordinal, name FROM worker_registry_plan ORDER BY ordinal")
+        .all(),
+    ).toEqual([{ ordinal: 9, name: "beta-new" }]);
+    successorWork.close();
   });
 
   it("rejects malformed blocked source state instead of inventing attempts", async () => {
