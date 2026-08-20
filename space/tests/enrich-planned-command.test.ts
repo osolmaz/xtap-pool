@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 
+import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
 import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
 
 import { BucketLog } from "../src/bucket-log.js";
@@ -10,11 +11,15 @@ import {
   applyDurableOutput,
   outputsFromSegment,
   parseSourceSegments,
+  readRunOutputKeys,
   registryOutputOrdinals,
   runIsComplete,
 } from "../src/enrich-planned-command.js";
+import { publishEnrichmentBatchResult } from "../src/enrich-batch.js";
 import {
+  advanceOutputFrontier,
   createEmptyEnrichmentState,
+  markQueueCompleted,
   recordQueueAttempt,
   validateEnrichmentState,
 } from "../src/enrich-state.js";
@@ -23,6 +28,29 @@ import { TweetStore } from "../src/store.js";
 
 const SHA = "a".repeat(64);
 const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111-8111-111111111111-${"b".repeat(64)}.json.gz`;
+
+class MemoryObjects implements CheckpointObjectStore {
+  readonly bucketId = "memory/results";
+  readonly files = new Map<string, Uint8Array>();
+
+  read(path: string): Promise<Uint8Array | null> {
+    return Promise.resolve(this.files.get(path) ?? null);
+  }
+
+  writeImmutable(path: string, bytes: Uint8Array): Promise<void> {
+    this.files.set(path, Uint8Array.from(bytes));
+    return Promise.resolve();
+  }
+
+  writePointerHint(path: string, bytes: Uint8Array): Promise<void> {
+    this.files.set(path, Uint8Array.from(bytes));
+    return Promise.resolve();
+  }
+
+  list(prefix: string): Promise<readonly string[]> {
+    return Promise.resolve([...this.files.keys()].filter((key) => key.startsWith(prefix)).sort());
+  }
+}
 
 function state() {
   return createEmptyEnrichmentState({
@@ -222,6 +250,68 @@ describe("planned enrichment recovery", () => {
     });
     expect(checkpoint.outputs.receipt.sequence).toBe(1);
     expect(runIsComplete(checkpoint)).toBe(true);
+  });
+
+  it("rejects claimed result hashes and ordinals that disagree with the checkpoint", async () => {
+    const wrongHashStore = new MemoryObjects();
+    const wrongHash = await publishEnrichmentBatchResult({
+      store: wrongHashStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "queue",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "c".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    let wrongHashState = markQueueCompleted(state(), [1]);
+    wrongHashState = advanceOutputFrontier(wrongHashState, "enrichment", wrongHash.sha256);
+    await expect(
+      readRunOutputKeys(wrongHashStore, "run", wrongHashState, { queue: 1, registry: 0 }),
+    ).rejects.toThrow("raw segment SHA-256 mismatch");
+
+    const duplicateStore = new MemoryObjects();
+    const first = await publishEnrichmentBatchResult({
+      store: duplicateStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "queue",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    const second = await publishEnrichmentBatchResult({
+      store: duplicateStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "queue",
+        sequence: 2,
+        previous_result_sha256: first.sha256,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:01.000Z",
+      },
+    });
+    let duplicateState = markQueueCompleted(state(), [1]);
+    duplicateState = advanceOutputFrontier(duplicateState, "enrichment", first.sha256);
+    duplicateState = advanceOutputFrontier(duplicateState, "enrichment", second.sha256);
+    await expect(
+      readRunOutputKeys(duplicateStore, "run", duplicateState, { queue: 1, registry: 0 }),
+    ).rejects.toThrow("queue result ordinal");
   });
 
   it("rejects duplicate and overlapping unresolved queue ordinals", () => {

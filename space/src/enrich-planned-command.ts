@@ -235,6 +235,7 @@ export async function runPlannedEnrichmentCommand(
     commitOutputs,
     registryNames,
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
+    queueBaselineOrdinal: plan.work.queue_baseline_done,
     queueIdentities,
     contractHash,
   });
@@ -244,6 +245,8 @@ export async function runPlannedEnrichmentCommand(
     checkpointStore,
     runId,
     state,
+    queueBaselineOrdinal: plan.work.queue_baseline_done,
+    registryBaselineOrdinal: plan.work.registry_baseline_scanned,
     tweetStore,
     enrichStore,
   });
@@ -406,7 +409,10 @@ export async function runPlannedEnrichmentCommand(
       const outputKeys = [
         ...new Set([
           ...sourceSegments.map((file) => file.key),
-          ...(await readRunOutputKeys(checkpointStore, runId, state)),
+          ...(await readRunOutputKeys(checkpointStore, runId, state, {
+            queue: plan.work.queue_baseline_done,
+            registry: plan.work.registry_baseline_scanned,
+          })),
         ]),
       ].sort();
       const publicationPath = join(config.dataDir, "planned", `${runId}-publication.sqlite`);
@@ -749,11 +755,16 @@ async function restoreClaimedWorkerOutputs(options: {
   checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
   runId: string;
   state: EnrichmentCheckpointState;
+  queueBaselineOrdinal: number;
+  registryBaselineOrdinal: number;
   tweetStore: TweetStore;
   enrichStore: EnrichStore;
 }): Promise<void> {
   const keys = [
-    ...(await readRunOutputKeys(options.checkpointStore, options.runId, options.state)),
+    ...(await readRunOutputKeys(options.checkpointStore, options.runId, options.state, {
+      queue: options.queueBaselineOrdinal,
+      registry: options.registryBaselineOrdinal,
+    })),
   ].sort((left, right) => rawSegmentCreatedAt(left).localeCompare(rawSegmentCreatedAt(right)));
   if (keys.length === 0) return;
   const discovered = await options.log.discoverSnapshot(options.sourceSegments);
@@ -787,11 +798,15 @@ async function reconcileOrphanOutputs(options: {
   commitOutputs: (outputs: readonly DurableWorkerOutput[]) => Promise<void>;
   registryNames: readonly string[];
   registryBaselineOrdinal: number;
+  queueBaselineOrdinal: number;
   queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>;
   contractHash: string;
 }): Promise<void> {
   const processed = new Set(
-    await readRunOutputKeys(options.checkpointStore, options.runId, options.state()),
+    await readRunOutputKeys(options.checkpointStore, options.runId, options.state(), {
+      queue: options.queueBaselineOrdinal,
+      registry: options.registryBaselineOrdinal,
+    }),
   );
   const known = new Set(options.sourceSegments.map((file) => file.key));
   const discovered = await options.log.discoverSnapshot(options.sourceSegments);
@@ -905,14 +920,18 @@ export function parseSourceSegments(bytes: Uint8Array): BucketSnapshotFile[] {
 }
 
 // eslint-disable-next-line complexity -- Publication verifies every claimed result chain before applying raw segments.
-async function readRunOutputKeys(
+export async function readRunOutputKeys(
   store: ReturnType<typeof createEnrichmentCheckpointStore>,
   runId: string,
   state: EnrichmentCheckpointState,
+  baseline: { queue: number; registry: number },
 ): Promise<readonly string[]> {
+  validateOutputBaselines(state, baseline);
   const prefix = `${RUN_PREFIX}/${runId}/batches/`;
   const keys = await store.list(prefix);
   const raw = new Set<string>();
+  const completedQueueOrdinals = new Set<number>();
+  let nextRegistryOrdinal = baseline.registry;
   const chains = new Map<OutputKind, { sequence: number; sha256: string | null }>();
   for (const key of keys) {
     if (!key.endsWith("/result.json")) continue;
@@ -929,11 +948,28 @@ async function readRunOutputKeys(
     ) {
       throw new Error(`broken ${frontierKind} result chain`);
     }
+    validateClaimedResultOrdinals({
+      result,
+      state,
+      queueBaselineOrdinal: baseline.queue,
+      completedQueueOrdinals,
+      nextRegistryOrdinal,
+    });
+    if (result.phase === "registry") nextRegistryOrdinal += result.ordinals.length;
     chains.set(frontierKind, {
       sequence: result.sequence,
       sha256: createHash("sha256").update(bytes).digest("hex"),
     });
+    if (result.raw_segment_sha256 !== rawSegmentSha256(result.raw_segment_key)) {
+      throw new Error("batch result raw segment SHA-256 mismatch");
+    }
     raw.add(result.raw_segment_key);
+  }
+  if (completedQueueOrdinals.size !== state.queue.done - baseline.queue) {
+    throw new Error("queue result ordinals do not match the checkpoint bitmap");
+  }
+  if (nextRegistryOrdinal !== state.registry.next_ordinal) {
+    throw new Error("registry result ordinals do not match the checkpoint cursor");
   }
   for (const kind of ["enrichment", "attempt", "registry", "receipt"] as const) {
     const actual = chains.get(kind) ?? { sequence: 0, sha256: null };
@@ -943,6 +979,77 @@ async function readRunOutputKeys(
     }
   }
   return [...raw].sort();
+}
+
+// eslint-disable-next-line complexity -- Baseline validation checks numeric bounds and every imported completion bit.
+function validateOutputBaselines(
+  state: EnrichmentCheckpointState,
+  baseline: { queue: number; registry: number },
+): void {
+  if (
+    !Number.isSafeInteger(baseline.queue) ||
+    baseline.queue < 0 ||
+    baseline.queue > state.queue.done
+  ) {
+    throw new Error("queue output baseline is invalid");
+  }
+  if (
+    !Number.isSafeInteger(baseline.registry) ||
+    baseline.registry < 0 ||
+    baseline.registry > state.registry.next_ordinal
+  ) {
+    throw new Error("registry output baseline is invalid");
+  }
+  for (let ordinal = 0; ordinal < baseline.queue; ordinal += 1) {
+    if (!isBitmapCompleted(state.completed_bitmap, ordinal)) {
+      throw new Error("queue output baseline is not completed in the checkpoint bitmap");
+    }
+  }
+}
+
+// eslint-disable-next-line complexity -- Each result phase has separate exact ordinal invariants.
+function validateClaimedResultOrdinals(options: {
+  result: z.infer<typeof enrichmentBatchResultSchema>;
+  state: EnrichmentCheckpointState;
+  queueBaselineOrdinal: number;
+  completedQueueOrdinals: Set<number>;
+  nextRegistryOrdinal: number;
+}): void {
+  const { result, state } = options;
+  if (result.phase === "queue") {
+    for (const ordinal of result.ordinals) {
+      if (
+        ordinal < options.queueBaselineOrdinal ||
+        ordinal >= state.queue.total ||
+        !isBitmapCompleted(state.completed_bitmap, ordinal) ||
+        options.completedQueueOrdinals.has(ordinal)
+      ) {
+        throw new Error("queue result ordinal does not match the checkpoint bitmap");
+      }
+      options.completedQueueOrdinals.add(ordinal);
+    }
+    return;
+  }
+  if (result.phase === "registry") {
+    for (const [offset, ordinal] of result.ordinals.entries()) {
+      if (
+        ordinal !== options.nextRegistryOrdinal + offset ||
+        ordinal >= state.registry.next_ordinal
+      ) {
+        throw new Error("registry result ordinals are not a contiguous checkpoint prefix");
+      }
+    }
+    return;
+  }
+  if (result.phase === "attempt") {
+    if (result.ordinals.some((ordinal) => ordinal < 0 || ordinal >= state.queue.total)) {
+      throw new Error("attempt result ordinal is outside the frozen queue");
+    }
+    return;
+  }
+  if (result.ordinals.length > 0) {
+    throw new Error("receipt result must not claim work ordinals");
+  }
 }
 
 function outputOrdinals(
