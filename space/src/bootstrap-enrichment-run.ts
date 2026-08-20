@@ -30,7 +30,7 @@ export type CompactWorkResult = {
 };
 
 type RegistryImportCursor = {
-  afterName: string;
+  afterName: string | null;
   scanned: number;
   observedAt: string;
 };
@@ -324,7 +324,7 @@ function validateRegistryImportCursor(
   if (cursor.scanned !== baselineScanned) {
     throw new Error("registry import cursor does not match the scanned baseline");
   }
-  if (cursor.afterName.length === 0) {
+  if (cursor.afterName !== null && cursor.afterName.length === 0) {
     throw new Error("registry import cursor name must not be empty");
   }
   if (Number.isNaN(Date.parse(cursor.observedAt))) {
@@ -338,8 +338,8 @@ function registryCandidateIsPending(
 ): boolean {
   return (
     cursor === undefined ||
-    candidate.name > cursor.afterName ||
-    candidate.first_observed_at > cursor.observedAt
+    candidate.first_observed_at > cursor.observedAt ||
+    (cursor.afterName !== null && candidate.name > cursor.afterName)
   );
 }
 

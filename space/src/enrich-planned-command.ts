@@ -527,7 +527,12 @@ async function ensureSuccessorRun(options: {
         "planned",
         `${options.plan.run_id}-successor.sqlite`,
       ),
-      registryBaselineScanned: 0,
+      registryBaselineScanned: options.plan.work.registry_total,
+      registryCursor: {
+        afterName: null,
+        scanned: options.plan.work.registry_total,
+        observedAt: options.plan.created_at,
+      },
       store: options.checkpointStore,
       attemptId: options.attemptId,
       planInput: {
