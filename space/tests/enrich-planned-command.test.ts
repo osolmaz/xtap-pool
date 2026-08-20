@@ -18,6 +18,7 @@ import {
 import { publishEnrichmentBatchResult } from "../src/enrich-batch.js";
 import {
   advanceOutputFrontier,
+  advanceRegistryCursor,
   createEmptyEnrichmentState,
   markQueueCompleted,
   recordQueueAttempt,
@@ -312,6 +313,114 @@ describe("planned enrichment recovery", () => {
     await expect(
       readRunOutputKeys(duplicateStore, "run", duplicateState, { queue: 1, registry: 0 }),
     ).rejects.toThrow("queue result ordinal");
+  });
+
+  it("accepts exact queue, attempt, registry, and receipt result histories", async () => {
+    const cases = [
+      { phase: "queue" as const, ordinals: [1] },
+      { phase: "attempt" as const, ordinals: [1] },
+      { phase: "registry" as const, ordinals: [0] },
+      { phase: "receipt" as const, ordinals: [] },
+    ];
+    for (const item of cases) {
+      const store = new MemoryObjects();
+      const published = await publishEnrichmentBatchResult({
+        store,
+        prefix: "operations/enrichment/runs",
+        value: {
+          schema_version: 1,
+          run_id: "run",
+          phase: item.phase,
+          sequence: 1,
+          previous_result_sha256: null,
+          ordinals: item.ordinals,
+          raw_segment_key: SEGMENT,
+          raw_segment_sha256: "b".repeat(64),
+          created_at: "2026-08-19T12:00:00.000Z",
+        },
+      });
+      let checkpoint = state();
+      if (item.phase === "queue") checkpoint = markQueueCompleted(checkpoint, [1]);
+      if (item.phase === "registry") checkpoint = advanceRegistryCursor(checkpoint, ["candidate"]);
+      checkpoint = advanceOutputFrontier(
+        checkpoint,
+        item.phase === "queue" ? "enrichment" : item.phase,
+        published.sha256,
+      );
+      await expect(
+        readRunOutputKeys(store, "run", checkpoint, { queue: 1, registry: 0 }),
+      ).resolves.toEqual([SEGMENT]);
+    }
+  });
+
+  it("rejects phase ordinals outside the exact checkpoint coverage", async () => {
+    const registryStore = new MemoryObjects();
+    const registryResult = await publishEnrichmentBatchResult({
+      store: registryStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "registry",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    let registryState = advanceRegistryCursor(state(), ["candidate"]);
+    registryState = advanceOutputFrontier(registryState, "registry", registryResult.sha256);
+    await expect(
+      readRunOutputKeys(registryStore, "run", registryState, { queue: 1, registry: 0 }),
+    ).rejects.toThrow("contiguous checkpoint prefix");
+
+    const attemptStore = new MemoryObjects();
+    const attemptResult = await publishEnrichmentBatchResult({
+      store: attemptStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "attempt",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [3],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    const attemptState = advanceOutputFrontier(state(), "attempt", attemptResult.sha256);
+    await expect(
+      readRunOutputKeys(attemptStore, "run", attemptState, { queue: 1, registry: 0 }),
+    ).rejects.toThrow("outside the frozen queue");
+
+    const receiptStore = new MemoryObjects();
+    const receiptResult = await publishEnrichmentBatchResult({
+      store: receiptStore,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "receipt",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    const receiptState = advanceOutputFrontier(state(), "receipt", receiptResult.sha256);
+    await expect(
+      readRunOutputKeys(receiptStore, "run", receiptState, { queue: 1, registry: 0 }),
+    ).rejects.toThrow("must not claim work ordinals");
+
+    await expect(
+      readRunOutputKeys(new MemoryObjects(), "run", state(), { queue: -1, registry: 0 }),
+    ).rejects.toThrow("queue output baseline is invalid");
   });
 
   it("rejects duplicate and overlapping unresolved queue ordinals", () => {
