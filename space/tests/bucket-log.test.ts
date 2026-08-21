@@ -327,6 +327,66 @@ describe("BucketLog", () => {
     await expect(state.log.readText("config/pool.json")).resolves.toBe("new");
   });
 
+  it("compares all mixed writes with dedicated configuration writes", async () => {
+    const state = log();
+    const oldMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [
+          { path: "config/labels.json", mode: "write", content: "old" },
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [legacyReceipt()],
+          },
+        ],
+      }),
+    );
+    const dedicated = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [{ path: "config/labels.json", mode: "write", content: "new" }],
+      }),
+    );
+    const laterMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000003",
+        created_at: "2026-08-12T12:20:00.000Z",
+        operations: [
+          { path: "config/pool.json", mode: "write", content: "other" },
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [legacyReceipt()],
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await expect(
+      state.log.readText("config/labels.json", {
+        snapshot,
+        concurrency: 4,
+        progress: async (completed, total) => {
+          progress.push([completed, total]);
+        },
+      }),
+    ).resolves.toBe("new");
+
+    expect(state.bucket.downloads).toContain(oldMixed);
+    expect(state.bucket.downloads).toContain(dedicated);
+    expect(state.bucket.downloads).toContain(laterMixed);
+    expect(progress.at(-1)).toEqual([3, 3]);
+  });
+
   it("rejects duplicate paths, unsupported paths, and malformed records", async () => {
     expect(() =>
       bucketSegmentSchema.parse({
@@ -391,6 +451,57 @@ describe("BucketLog", () => {
       { id: "56", contributed_by: "bob", pooled_at: retained.pooled_at },
     ]);
     expect(readCachedText("/missing", "config/pool.json")).toBeUndefined();
+  });
+
+  it("hydrates receipts from validated database membership without scanning unrelated mixed bodies", async () => {
+    const state = log();
+    const tweet = makePooled({ id: "54", contributed_by: "alice" });
+    const unrelatedMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [
+          { path: "config/pool.json", mode: "write", content: "mixed" },
+          {
+            path: "data/alice/2026/08/tweets-2026-08-12.jsonl",
+            mode: "append",
+            lines: [JSON.stringify(tweet)],
+          },
+        ],
+      }),
+    );
+    const receiptKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [currentReceipt()],
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    const receiptFile = snapshot.files.find((file) => file.key === receiptKey)!;
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.hydrateMetadata(snapshot, {
+      concurrency: 4,
+      receiptFiles: [receiptFile],
+      progress: async (completed, total) => {
+        progress.push([completed, total]);
+      },
+    });
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("worker-1");
+    expect(state.bucket.downloads).not.toContain(unrelatedMixed);
+    expect(state.bucket.downloads).toContain(receiptKey);
+    expect(progress).toEqual([[1, 1]]);
   });
 
   it("selects a newer current receipt from a mixed segment", async () => {
@@ -520,6 +631,50 @@ describe("BucketLog", () => {
     );
     expect(key).toContain("/segments/mixed/");
     await expect(state.log.readText("config/pool.json")).resolves.toBe("mixed");
+  });
+
+  it("uses a loaded snapshot to skip unrelated historical bodies", async () => {
+    const state = log();
+    const receiptKey = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
+      [],
+    );
+    const labels = JSON.stringify([{ name: "ai", description: "Artificial intelligence" }]);
+    const configKey = await state.log.commitBatch(
+      [],
+      [{ path: "config/labels.json", content: labels }],
+    );
+    const created = await state.log.createSnapshot();
+    const reader = {
+      list: state.bucket.list.bind(state.bucket),
+      download: state.bucket.download.bind(state.bucket),
+    };
+    const restored = new BucketLog(
+      "osolmaz/xtap-pool-data",
+      reader,
+      mkdtempSync(join(tmpdir(), "xtap-bucket-log-read-only-")),
+    );
+    await restored.loadSnapshot(created.revision);
+    state.bucket.downloads.length = 0;
+
+    await expect(restored.readText("config/labels.json")).resolves.toBe(labels);
+    expect(state.bucket.downloads).toContain(configKey);
+    expect(state.bucket.downloads).not.toContain(receiptKey);
+  });
+
+  it("fails closed when a read-only log attempts a write", async () => {
+    const state = log();
+    const restored = new BucketLog(
+      "osolmaz/xtap-pool-data",
+      {
+        list: state.bucket.list.bind(state.bucket),
+        download: state.bucket.download.bind(state.bucket),
+      },
+      mkdtempSync(join(tmpdir(), "xtap-bucket-log-read-only-")),
+    );
+    await expect(
+      restored.commitBatch([], [{ path: "config/pool.json", content: "forbidden" }]),
+    ).rejects.toThrow("raw Bucket is read-only");
   });
 
   it("extracts only current receipts from receipt segments", () => {
