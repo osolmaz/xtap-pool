@@ -365,12 +365,26 @@ export class DurableIndex {
     return index;
   }
 
+  sourceSnapshot(): BucketSnapshot {
+    return {
+      schema_version: 1,
+      bucket: this.options.rawBucket,
+      files: [...sourceRows(this.store.database).values()]
+        .map(snapshotFileFromRow)
+        .sort((left, right) => left.key.localeCompare(right.key)),
+    };
+  }
+
   async advanceToLatest(): Promise<IndexAdvance> {
     const previous = sourceRows(this.store.database);
     const { revision, snapshot } = await this.options.log.discoverSnapshot(
       [...previous.values()].map(snapshotFileFromRow),
     );
     return this.advanceToSnapshot(revision, snapshot, previous, false);
+  }
+
+  async advanceToDiscovered(revision: string, snapshot: BucketSnapshot): Promise<IndexAdvance> {
+    return this.advanceToSnapshot(revision, snapshot, sourceRows(this.store.database), false);
   }
 
   async advanceToRevision(revision: string): Promise<IndexAdvance> {

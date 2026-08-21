@@ -387,6 +387,48 @@ describe("BucketLog", () => {
     expect(progress.at(-1)).toEqual([3, 3]);
   });
 
+  it("primes all configuration values with one bounded snapshot scan", async () => {
+    const state = log();
+    await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [{ path: "config/pool.json", mode: "write", content: "pool" }],
+      }),
+    );
+    await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [
+          { path: "config/labels.json", mode: "write", content: "labels" },
+          {
+            path: "config/service-accounts.json",
+            mode: "write",
+            content: "accounts",
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.primeTextCache(snapshot, 4, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
+    const downloads = state.bucket.downloads.length;
+
+    await expect(state.log.readText("config/pool.json")).resolves.toBe("pool");
+    await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
+    await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
+    expect(state.bucket.downloads).toHaveLength(downloads);
+    expect(progress.at(-1)).toEqual([2, 2]);
+  });
+
   it("rejects duplicate paths, unsupported paths, and malformed records", async () => {
     expect(() =>
       bucketSegmentSchema.parse({
