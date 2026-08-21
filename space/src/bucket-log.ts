@@ -214,6 +214,8 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
 export class BucketLog {
   private lastReceipt: EnrichReceipt | undefined;
   private lastCreatedAtMs = 0;
+  private textCacheComplete = false;
+  private readonly textValues = new Map<string, string>();
   private readonly knownFiles = new Map<string, BucketSnapshotFile>();
   private readonly newlyVerifiedSegments = new Map<string, BucketSegment>();
 
@@ -421,9 +423,41 @@ export class BucketLog {
     return segment;
   }
 
+  async primeTextCache(
+    snapshot: BucketSnapshot,
+    concurrency = 16,
+    progress?: BucketReadProgress,
+  ): Promise<void> {
+    const files = snapshot.files.filter(
+      (file) => file.key.includes("/config/") || file.key.includes("/mixed/"),
+    );
+    let completed = 0;
+    if (files.length === 0) await progress?.(0, 0);
+    const entries = await mapConcurrent(
+      files,
+      Math.max(1, Math.min(16, concurrency)),
+      async (file) => {
+        const segment = await this.loadSegment(file);
+        completed += 1;
+        await progress?.(completed, files.length);
+        return { file, segment };
+      },
+    );
+    entries.sort(compareTextEntries);
+    const values = new Map<string, string>();
+    for (const { segment } of entries) {
+      for (const operation of segment.operations) {
+        if (operation.mode === "write") values.set(operation.path, operation.content);
+      }
+    }
+    for (const [path, content] of values) this.rememberText(path, content);
+    this.textCacheComplete = true;
+  }
+
   // eslint-disable-next-line complexity -- Exact snapshot text reconstruction validates source, anchor, and bounded mixed-file order.
   async readText(path: string, options: ReadTextOptions = {}): Promise<string | undefined> {
     assertConfigPath(path);
+    if (this.textCacheComplete && options.snapshot === undefined) return this.textValues.get(path);
     const snapshot =
       options.snapshot === undefined
         ? (await this.discoverSnapshot()).snapshot
@@ -628,6 +662,7 @@ export class BucketLog {
   }
 
   private rememberText(path: string, content: string): void {
+    this.textValues.set(path, content);
     const local = this.localPath(path);
     mkdirSync(dirname(local), { recursive: true });
     writeFileSync(local, content);
@@ -808,6 +843,16 @@ function segmentCreatedAtMs(key: string): number {
   const value = match?.[5];
   if (value === undefined) throw new Error(`invalid Bucket segment key: ${key}`);
   return Number(value);
+}
+
+function compareTextEntries(
+  left: { file: BucketSnapshotFile; segment: BucketSegment },
+  right: { file: BucketSnapshotFile; segment: BucketSegment },
+): number {
+  const time = left.segment.created_at.localeCompare(right.segment.created_at);
+  if (time !== 0) return time;
+  const transaction = left.segment.transaction_id.localeCompare(right.segment.transaction_id);
+  return transaction !== 0 ? transaction : left.file.key.localeCompare(right.file.key);
 }
 
 function latestTextWrite(

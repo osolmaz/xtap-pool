@@ -72,11 +72,7 @@ export async function resolveEnrichmentTaxonomyAfterTail(options: {
     await options.progress?.(0, 0);
   } else {
     const raw = await options.log.readText(LABELS_CONFIG_PATH, {
-      snapshot: {
-        schema_version: 1,
-        bucket: options.finalSnapshot.bucket,
-        files: configTail,
-      },
+      snapshot: options.finalSnapshot,
       concurrency: options.concurrency,
       ...(options.progress === undefined ? {} : { progress: options.progress }),
     });
