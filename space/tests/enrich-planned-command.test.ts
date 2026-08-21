@@ -273,7 +273,10 @@ describe("planned enrichment recovery", () => {
     let wrongHashState = markQueueCompleted(state(), [1]);
     wrongHashState = advanceOutputFrontier(wrongHashState, "enrichment", wrongHash.sha256);
     await expect(
-      readRunOutputKeys(wrongHashStore, "run", wrongHashState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(wrongHashStore, "run", wrongHashState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("raw segment SHA-256 mismatch");
 
     const duplicateStore = new MemoryObjects();
@@ -311,7 +314,10 @@ describe("planned enrichment recovery", () => {
     duplicateState = advanceOutputFrontier(duplicateState, "enrichment", first.sha256);
     duplicateState = advanceOutputFrontier(duplicateState, "enrichment", second.sha256);
     await expect(
-      readRunOutputKeys(duplicateStore, "run", duplicateState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(duplicateStore, "run", duplicateState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("queue result ordinal");
   });
 
@@ -348,7 +354,10 @@ describe("planned enrichment recovery", () => {
         published.sha256,
       );
       await expect(
-        readRunOutputKeys(store, "run", checkpoint, { queue: 1, registry: 0 }),
+        readRunOutputKeys(store, "run", checkpoint, {
+          queue: new Set([0]),
+          registry: 0,
+        }),
       ).resolves.toEqual([SEGMENT]);
     }
   });
@@ -373,7 +382,10 @@ describe("planned enrichment recovery", () => {
     let registryState = advanceRegistryCursor(state(), ["candidate"]);
     registryState = advanceOutputFrontier(registryState, "registry", registryResult.sha256);
     await expect(
-      readRunOutputKeys(registryStore, "run", registryState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(registryStore, "run", registryState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("contiguous checkpoint prefix");
 
     const attemptStore = new MemoryObjects();
@@ -394,7 +406,10 @@ describe("planned enrichment recovery", () => {
     });
     const attemptState = advanceOutputFrontier(state(), "attempt", attemptResult.sha256);
     await expect(
-      readRunOutputKeys(attemptStore, "run", attemptState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(attemptStore, "run", attemptState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("outside the frozen queue");
 
     const receiptStore = new MemoryObjects();
@@ -415,12 +430,39 @@ describe("planned enrichment recovery", () => {
     });
     const receiptState = advanceOutputFrontier(state(), "receipt", receiptResult.sha256);
     await expect(
-      readRunOutputKeys(receiptStore, "run", receiptState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(receiptStore, "run", receiptState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("must not claim work ordinals");
 
     await expect(
-      readRunOutputKeys(new MemoryObjects(), "run", state(), { queue: -1, registry: 0 }),
+      readRunOutputKeys(new MemoryObjects(), "run", state(), {
+        queue: new Set([-1]),
+        registry: 0,
+      }),
     ).rejects.toThrow("queue output baseline is invalid");
+  });
+
+  it("accepts a non-prefix imported queue completion baseline", async () => {
+    const imported = markQueueCompleted(
+      createEmptyEnrichmentState({
+        runId: "run",
+        planSha256: SHA,
+        queueTotal: 3,
+        queueBaselineDone: 0,
+        registryTotal: 0,
+        registryBaselineScanned: 0,
+      }),
+      [2],
+    );
+
+    await expect(
+      readRunOutputKeys(new MemoryObjects(), "run", imported, {
+        queue: new Set([2]),
+        registry: 0,
+      }),
+    ).resolves.toEqual([]);
   });
 
   it("rejects duplicate and overlapping unresolved queue ordinals", () => {
