@@ -31,21 +31,8 @@ export function createEnrichmentCheckpointStore(options: {
   bucket: string;
   accessToken: string;
 }): CheckpointObjectStore {
+  const reader = createCheckpointReader(options);
   const repo = { type: "bucket", name: options.bucket } as const;
-  const read = async (path: string): Promise<Uint8Array | null> => {
-    try {
-      const blob = await downloadFile({
-        repo,
-        accessToken: options.accessToken,
-        path,
-        xet: false,
-      });
-      return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
-    } catch (error) {
-      if (error instanceof HubApiError && error.statusCode === 404) return null;
-      throw error;
-    }
-  };
   const upload = async (path: string, bytes: Uint8Array): Promise<void> => {
     await uploadFile({
       repo,
@@ -55,10 +42,9 @@ export function createEnrichmentCheckpointStore(options: {
     });
   };
   return {
-    bucketId: options.bucket,
-    read,
+    ...reader,
     async writeImmutable(path, bytes): Promise<void> {
-      const existing = await read(path);
+      const existing = await reader.read(path);
       if (existing !== null) {
         if (!Buffer.from(existing).equals(Buffer.from(bytes))) {
           throw new Error(`immutable checkpoint object differs: ${path}`);
@@ -66,13 +52,52 @@ export function createEnrichmentCheckpointStore(options: {
         return;
       }
       await upload(path, bytes);
-      const stored = await read(path);
+      const stored = await reader.read(path);
       if (stored === null || !Buffer.from(stored).equals(Buffer.from(bytes))) {
         throw new Error(`checkpoint object read-back mismatch: ${path}`);
       }
     },
     async writePointerHint(path, bytes): Promise<void> {
       await upload(path, bytes);
+    },
+  };
+}
+
+export function createReadOnlyEnrichmentCheckpointStore(options: {
+  bucket: string;
+  accessToken: string;
+}): CheckpointObjectStore {
+  return {
+    ...createCheckpointReader(options),
+    writeImmutable(): Promise<void> {
+      return Promise.reject(new Error("checkpoint store is read-only"));
+    },
+    writePointerHint(): Promise<void> {
+      return Promise.resolve();
+    },
+  };
+}
+
+function createCheckpointReader(options: {
+  bucket: string;
+  accessToken: string;
+}): Pick<CheckpointObjectStore, "bucketId" | "read" | "list"> {
+  const repo = { type: "bucket", name: options.bucket } as const;
+  return {
+    bucketId: options.bucket,
+    async read(path): Promise<Uint8Array | null> {
+      try {
+        const blob = await downloadFile({
+          repo,
+          accessToken: options.accessToken,
+          path,
+          xet: false,
+        });
+        return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
+      } catch (error) {
+        if (error instanceof HubApiError && error.statusCode === 404) return null;
+        throw error;
+      }
     },
     async list(prefix): Promise<readonly string[]> {
       const paths: string[] = [];

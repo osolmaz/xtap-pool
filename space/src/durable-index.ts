@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, openAsBlob } from "node:fs";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -10,7 +10,7 @@ import { deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/h
 import { z } from "zod";
 
 import { BucketLog } from "./bucket-log.js";
-import type { BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
+import type { BucketSnapshot, BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
 
@@ -70,6 +70,7 @@ export type DurableIndexManifest = z.infer<typeof durableIndexManifestSchema>;
 export type DurableIndexCounts = z.infer<typeof indexCountsSchema>;
 export type IndexAdvance = {
   revision: string;
+  snapshot: BucketSnapshot;
   filesChanged: number;
   rowsApplied: number;
   counts: DurableIndexCounts;
@@ -89,6 +90,7 @@ export type ByteProgress = (completed: number, total: number) => Promise<void>;
 
 export type DurableIndexProgress = {
   restoreDatabase(completed: number, total: number): Promise<void>;
+  metadataReplay?(completed: number, total: number): Promise<void>;
   sourceReplay(options: { revision: string; completed: number; total: number }): Promise<void>;
   databaseBuild(completed: boolean): Promise<void>;
   databaseUpload(completed: number, total: number): Promise<void>;
@@ -96,12 +98,15 @@ export type DurableIndexProgress = {
   manifestPublished(): Promise<void>;
 };
 
-export type DurableIndexBucketClient = {
+export type DurableIndexBucketReader = {
   download(path: string, destination: string, progress?: ByteProgress): Promise<boolean>;
-  uploadFile(path: string, source: string, progress?: ByteProgress): Promise<void>;
   readText(path: string): Promise<string | undefined>;
-  writeText(path: string, content: string): Promise<void>;
   list(prefix: string): Promise<readonly BucketFile[]>;
+};
+
+export type DurableIndexBucketClient = DurableIndexBucketReader & {
+  uploadFile(path: string, source: string, progress?: ByteProgress): Promise<void>;
+  writeText(path: string, content: string): Promise<void>;
   remove(paths: readonly string[]): Promise<void>;
 };
 
@@ -117,6 +122,9 @@ export type DurableIndexOptions = {
   predecessorKeys?: readonly string[];
   progress?: DurableIndexProgress;
   expectedCurrentDatabaseSha256?: string;
+  sourceReplayConcurrency?: number;
+  reuseVerifiedDatabase?: boolean;
+  verifiedBasePath?: string;
   publicationBoundary?: (
     state: "uploaded" | "verified" | "published",
     manifest: DurableIndexManifest,
@@ -175,6 +183,29 @@ export class DurableIndex {
     });
   }
 
+  static async restoreReferenceReadOnly(
+    options: Omit<DurableIndexOptions, "bucketClient"> & {
+      bucketClient?: DurableIndexBucketReader;
+    },
+    reference: {
+      key: string;
+      sha256: string;
+      sourceRevision: string;
+      predecessorKeys?: readonly string[];
+    },
+  ): Promise<
+    Pick<DurableIndex, "store" | "enrichStore" | "advanceToLatest" | "createWorkingCopy" | "close">
+  > {
+    const reader =
+      options.bucketClient ??
+      createDurableIndexBucketReader(options.indexBucket, options.accessToken);
+    return DurableIndex.restoreReference(
+      { ...options, bucketClient: failClosedBucketClient(reader) },
+      reference,
+    );
+  }
+
+  // eslint-disable-next-line complexity -- Restore either reuses one verified local database or verifies a fresh immutable download.
   static async restoreReference(
     options: DurableIndexOptions,
     reference: {
@@ -188,29 +219,58 @@ export class DurableIndex {
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
     await mkdir(dirname(options.databasePath), { recursive: true });
-    const staged = `${options.databasePath}.${randomUUID()}.download`;
-    try {
-      if (
-        !(await bucket.download(
-          reference.key,
-          staged,
-          options.progress?.restoreDatabase.bind(options.progress),
-        ))
-      ) {
-        throw new Error(`durable index database is missing: ${reference.key}`);
+    const verifiedBasePath = options.verifiedBasePath ?? options.databasePath;
+    await mkdir(dirname(verifiedBasePath), { recursive: true });
+    const staged = `${verifiedBasePath}.${randomUUID()}.download`;
+    if (options.reuseVerifiedDatabase === true && existsSync(verifiedBasePath)) {
+      await assertFileSha256(verifiedBasePath, reference.sha256);
+      validateReferencedDatabaseProvenance(verifiedBasePath, options, reference.sourceRevision);
+      const bytes = (await stat(verifiedBasePath)).size;
+      await options.progress?.restoreDatabase(bytes, bytes);
+    } else {
+      try {
+        if (
+          !(await bucket.download(
+            reference.key,
+            staged,
+            options.progress?.restoreDatabase.bind(options.progress),
+          ))
+        ) {
+          throw new Error(`durable index database is missing: ${reference.key}`);
+        }
+        await assertFileSha256(staged, reference.sha256);
+        validateReferencedDatabase(staged, options, reference.sourceRevision);
+        await removeDatabaseFiles(verifiedBasePath);
+        await rename(staged, verifiedBasePath);
+      } finally {
+        await rm(staged, { force: true });
       }
-      await assertFileSha256(staged, reference.sha256);
-      validateReferencedDatabase(staged, options, reference.sourceRevision);
+    }
+    if (verifiedBasePath !== options.databasePath) {
       await removeDatabaseFiles(options.databasePath);
-      await rename(staged, options.databasePath);
-    } finally {
-      await rm(staged, { force: true });
+      await copyFile(verifiedBasePath, options.databasePath);
     }
     const snapshot = await options.log.loadSnapshot(reference.sourceRevision);
-    await options.log.hydrateMetadata(snapshot);
-    return open(options, bucket, [
+    const index = open(options, bucket, [
       ...new Set([reference.key, ...(reference.predecessorKeys ?? [])]),
     ]);
+    try {
+      const source = sourceRows(index.store.database);
+      const receiptFiles = snapshot.files.filter(
+        (file) => (source.get(file.key)?.receipt_rows ?? 0) > 0,
+      );
+      await options.log.hydrateMetadata(snapshot, {
+        concurrency: options.sourceReplayConcurrency ?? 1,
+        receiptFiles,
+        ...(options.progress?.metadataReplay === undefined
+          ? {}
+          : { progress: options.progress.metadataReplay.bind(options.progress) }),
+      });
+      return index;
+    } catch (error) {
+      index.close();
+      throw error;
+    }
   }
 
   // eslint-disable-next-line complexity -- Resume verifies each publication boundary before the public pointer changes.
@@ -336,18 +396,15 @@ export class DurableIndex {
       total: snapshot.files.length,
     });
     let inspected = 0;
-    const staged: {
-      file: BucketSnapshotFile;
-      segment: Awaited<ReturnType<BucketLog["loadSegment"]>>;
-    }[] = [];
+    const pending: BucketSnapshotFile[] = [];
     for (const file of snapshot.files) {
       const old = previous.get(file.key);
-      if (old !== undefined) {
-        assertSameSourceFile(old, file);
-        if (verifyKnown) await this.options.log.loadSegment(file);
-      } else {
-        staged.push({ file, segment: await this.options.log.loadSegment(file) });
+      if (old === undefined) {
+        pending.push(file);
+        continue;
       }
+      assertSameSourceFile(old, file);
+      if (verifyKnown) await this.options.log.loadSegment(file);
       inspected += 1;
       await this.options.progress?.sourceReplay({
         revision,
@@ -355,6 +412,17 @@ export class DurableIndex {
         total: snapshot.files.length,
       });
     }
+    const concurrency = Math.max(1, Math.min(16, this.options.sourceReplayConcurrency ?? 1));
+    const staged = await mapConcurrent(pending, concurrency, async (file) => {
+      const segment = await this.options.log.loadSegment(file);
+      inspected += 1;
+      await this.options.progress?.sourceReplay({
+        revision,
+        completed: inspected,
+        total: snapshot.files.length,
+      });
+      return { file, segment };
+    });
 
     staged.sort(compareReplayOrder);
     let rowsApplied = 0;
@@ -375,6 +443,7 @@ export class DurableIndex {
     assertDatabaseIntegrity(this.store.database);
     return {
       revision,
+      snapshot,
       filesChanged: staged.length,
       rowsApplied,
       counts: databaseCounts(this.store.database),
@@ -536,6 +605,7 @@ export class DurableIndex {
     assertDatabaseIntegrity(this.store.database);
     return {
       revision: snapshot.revision,
+      snapshot: snapshot.snapshot,
       filesChanged: staged.length,
       rowsApplied,
       counts: databaseCounts(this.store.database),
@@ -568,6 +638,18 @@ export class DurableIndex {
     if ((await this.bucket.readText(CURRENT_MANIFEST_KEY)) !== activeRaw) return;
     await this.bucket.remove(stale);
   }
+}
+
+export function createDurableIndexBucketReader(
+  indexBucket: string,
+  accessToken: string,
+): DurableIndexBucketReader {
+  const client = createDurableIndexBucketClient(indexBucket, accessToken);
+  return {
+    download: client.download.bind(client),
+    readText: client.readText.bind(client),
+    list: client.list.bind(client),
+  };
 }
 
 export function createDurableIndexBucketClient(
@@ -649,6 +731,17 @@ export function createDurableIndexBucketClient(
         commitTitle: "Prune durable index generations",
       });
     },
+  };
+}
+
+function failClosedBucketClient(reader: DurableIndexBucketReader): DurableIndexBucketClient {
+  const readOnly = (): Promise<never> =>
+    Promise.reject(new Error("durable index Bucket is read-only"));
+  return {
+    ...reader,
+    uploadFile: readOnly,
+    writeText: readOnly,
+    remove: readOnly,
   };
 }
 
@@ -821,17 +914,39 @@ function validateReferencedDatabase(
   try {
     db.pragma("query_only = ON");
     assertDatabaseIntegrity(db);
-    const metadata = readMetadata(db);
-    if (
-      metadata?.schema_version !== 1 ||
-      metadata.raw_bucket !== options.rawBucket ||
-      metadata.raw_snapshot_revision !== sourceRevision ||
-      metadata.contract_hash !== options.contractHash
-    ) {
-      throw new Error("durable index database provenance mismatch");
-    }
+    assertDatabaseProvenance(db, options, sourceRevision);
   } finally {
     db.close();
+  }
+}
+
+function validateReferencedDatabaseProvenance(
+  path: string,
+  options: Pick<DurableIndexOptions, "rawBucket" | "contractHash">,
+  sourceRevision: string,
+): void {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    db.pragma("query_only = ON");
+    assertDatabaseProvenance(db, options, sourceRevision);
+  } finally {
+    db.close();
+  }
+}
+
+function assertDatabaseProvenance(
+  db: Database.Database,
+  options: Pick<DurableIndexOptions, "rawBucket" | "contractHash">,
+  sourceRevision: string,
+): void {
+  const metadata = readMetadata(db);
+  if (
+    metadata?.schema_version !== 1 ||
+    metadata.raw_bucket !== options.rawBucket ||
+    metadata.raw_snapshot_revision !== sourceRevision ||
+    metadata.contract_hash !== options.contractHash
+  ) {
+    throw new Error("durable index database provenance mismatch");
   }
 }
 
@@ -864,6 +979,28 @@ function assertDatabaseIntegrity(db: Database.Database): void {
   const result = db.pragma("integrity_check") as { integrity_check: string }[];
   if (result.length !== 1 || result[0]?.integrity_check !== "ok")
     throw new Error("durable index SQLite integrity check failed");
+}
+
+async function mapConcurrent<Input, Output>(
+  inputs: readonly Input[],
+  concurrency: number,
+  operation: (input: Input) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(inputs.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < inputs.length) {
+      const index = next;
+      next += 1;
+      const input = inputs[index];
+      if (input === undefined) throw new Error("bounded map input is missing");
+      results[index] = await operation(input);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, inputs.length) }, async () => worker()),
+  );
+  return results;
 }
 
 function totalSourceRows(counts: SourceCounts): number {

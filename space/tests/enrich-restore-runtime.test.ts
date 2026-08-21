@@ -10,10 +10,8 @@ import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-j
 const mocks = vi.hoisted(() => ({
   checkpointStore: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
-  progress: {
-    complete: vi.fn(() => Promise.resolve()),
-    blocked: vi.fn(() => Promise.resolve()),
-  },
+  rawList: vi.fn(() => Promise.reject(new Error("raw listing must not run"))),
+  rawDownload: vi.fn(() => Promise.reject(new Error("raw download must not run"))),
 }));
 
 vi.mock("../src/config.js", () => ({ loadConfig: () => mocks.config() }));
@@ -22,69 +20,59 @@ vi.mock("../src/enrich-checkpoint.js", async (importOriginal) => {
   return {
     ...actual,
     createEnrichmentCheckpointStore: () => mocks.checkpointStore(),
-    createReadOnlyEnrichmentCheckpointStore: () => mocks.checkpointStore(),
+    createReadOnlyEnrichmentCheckpointStore: () => {
+      const store = mocks.checkpointStore();
+      return {
+        bucketId: store.bucketId,
+        read: store.read.bind(store),
+        list: store.list.bind(store),
+        writeImmutable: () => Promise.reject(new Error("checkpoint store is read-only")),
+        writePointerHint: () => Promise.resolve(),
+      };
+    },
   };
 });
 vi.mock("../src/bucket-log.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/bucket-log.js")>();
   return {
     ...actual,
-    BucketLog: class BucketLog {
-      readonly fixture = true;
-
-      discoverSnapshot() {
-        return Promise.resolve({
-          revision: "b".repeat(64),
-          snapshot: {
-            schema_version: 1,
-            created_at: "2026-08-19T12:00:00.000Z",
-            files: [],
-          },
-        });
-      }
-    },
-    createRawBucketClient: () => ({}),
-    createRawBucketReader: () => ({}),
-  };
-});
-vi.mock("../src/enrich-config.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/enrich-config.js")>();
-  return {
-    ...actual,
-    loadEnrichTaxonomy: () => Promise.resolve({ labels: [], version: 1, source: "default" }),
+    createRawBucketReader: () => ({ list: mocks.rawList, download: mocks.rawDownload }),
   };
 });
 vi.mock("../src/job-progress.js", () => ({
-  XTapJobProgress: { create: () => Promise.resolve(mocks.progress) },
+  XTapJobProgress: { create: () => Promise.reject(new Error("progress writer must not run")) },
 }));
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
 import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
+import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
 import { runPlannedEnrichmentCommand } from "../src/enrich-planned-command.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
-import { createEmptyEnrichmentState, setPublicationState } from "../src/enrich-state.js";
+import { createEmptyEnrichmentState } from "../src/enrich-state.js";
 import { contractHashFor } from "../src/enrich-worker.js";
 import { TweetStore } from "../src/store.js";
 
+const CREATED_AT = "2026-08-21T16:16:39.793Z";
+const directories: string[] = [];
+
 class MemoryObjects implements CheckpointObjectStore {
-  readonly bucketId = "memory/checkpoints";
+  readonly bucketId = "owner/index";
   readonly files = new Map<string, Uint8Array>();
+  writes = 0;
 
   read(path: string): Promise<Uint8Array | null> {
     return Promise.resolve(this.files.get(path) ?? null);
   }
 
   writeImmutable(path: string, bytes: Uint8Array): Promise<void> {
-    const existing = this.files.get(path);
-    if (existing !== undefined && !Buffer.from(existing).equals(Buffer.from(bytes))) {
-      throw new Error("immutable object differs");
-    }
+    this.writes += 1;
     this.files.set(path, Uint8Array.from(bytes));
     return Promise.resolve();
   }
 
   writePointerHint(path: string, bytes: Uint8Array): Promise<void> {
+    this.writes += 1;
     this.files.set(path, Uint8Array.from(bytes));
     return Promise.resolve();
   }
@@ -94,23 +82,16 @@ class MemoryObjects implements CheckpointObjectStore {
   }
 }
 
-const directories: string[] = [];
-const CREATED_AT = "2026-08-19T12:00:00.000Z";
-const BASE_SHA = "a".repeat(64);
-const DATABASE_KEY = `index/databases/${BASE_SHA}.sqlite`;
-
 afterEach(async () => {
   vi.clearAllMocks();
-  await Promise.all(
-    directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
-  );
+  await Promise.all(directories.splice(0).map(async (path) => rm(path, { recursive: true })));
 });
 
-describe("planned enrichment runtime", () => {
-  it("finishes a published run and activates its verified successor without the public database", async () => {
+describe("planned enrichment restore-only runtime", () => {
+  it("restores the exact checkpoint without raw reads, provider setup, or object writes", async () => {
     const dataDir = join(
       tmpdir(),
-      `xtap-planned-${process.pid.toString()}-${Date.now().toString()}`,
+      `xtap-restore-${process.pid.toString()}-${Date.now().toString()}`,
     );
     directories.push(dataDir);
     await mkdir(dataDir, { recursive: true });
@@ -127,16 +108,15 @@ describe("planned enrichment runtime", () => {
     `);
     work.close();
     const workBytes = new Uint8Array(await readFile(workPath));
-    const store = new MemoryObjects();
-    const contractHash = contractHashFor({
-      taxonomy: { labels: [], version: 1, source: "default" },
-      model: "model:provider",
-    });
     const sourceSegments = canonicalPlanBytes([]);
     const sourceRevision = sha256(
       canonicalBytes({ schema_version: 1, bucket: "owner/raw", files: [] }),
     );
-    const current = createEnrichmentRunPlan({
+    const contractHash = contractHashFor({
+      taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
+      model: "model:provider",
+    });
+    const created = createEnrichmentRunPlan({
       schema_version: 1,
       created_at: CREATED_AT,
       source: {
@@ -156,8 +136,8 @@ describe("planned enrichment runtime", () => {
         provider: "provider",
       },
       base_index: {
-        key: DATABASE_KEY,
-        sha256: BASE_SHA,
+        key: `index/databases/${"a".repeat(64)}.sqlite`,
+        sha256: "a".repeat(64),
         bytes: 1,
         source_revision: sourceRevision,
         source_segment_count: 0,
@@ -174,87 +154,70 @@ describe("planned enrichment runtime", () => {
         registry_baseline_scanned: 0,
       },
     });
-    const successor = createEnrichmentRunPlan({
-      ...withoutRunId(current.plan),
-      created_at: "2026-08-19T13:00:00.000Z",
-    });
+    const store = new MemoryObjects();
     await Promise.all([
       store.writeImmutable(
-        `operations/enrichment/runs/${current.plan.run_id}/plan.json`,
-        canonicalPlanBytes(current.plan),
+        `operations/enrichment/runs/${created.plan.run_id}/plan.json`,
+        canonicalPlanBytes(created.plan),
       ),
+      store.writeImmutable(created.plan.work.key, workBytes),
+      store.writeImmutable(created.plan.source.ordered_segments.key, sourceSegments),
       store.writeImmutable(
-        `operations/enrichment/runs/${successor.plan.run_id}/plan.json`,
-        canonicalPlanBytes(successor.plan),
+        "index/current.json",
+        canonicalPlanBytes({
+          schema_version: 1,
+          source: { bucket: "owner/raw", revision: sourceRevision },
+          projection: { contract_hash: contractHash },
+          database: {
+            key: created.plan.base_index.key,
+            sha256: created.plan.base_index.sha256,
+            predecessors: [],
+          },
+          counts: {
+            tweets: 0,
+            units: 0,
+            enrichments: 0,
+            attempt_events: 0,
+            registry_events: 0,
+            receipts: 0,
+          },
+        }),
       ),
-      store.writeImmutable(current.plan.work.key, workBytes),
-      store.writeImmutable(current.plan.source.ordered_segments.key, sourceSegments),
     ]);
-    const manifest = {
-      schema_version: 1 as const,
-      source: { bucket: "owner/raw", revision: current.plan.source.snapshot_revision },
-      projection: { contract_hash: contractHash },
-      database: { key: DATABASE_KEY, sha256: BASE_SHA, predecessors: [] },
-      counts: {
-        tweets: 0,
-        units: 0,
-        enrichments: 0,
-        attempt_events: 0,
-        registry_events: 0,
-        receipts: 0,
-      },
-    };
-    const state = setPublicationState(
-      createEmptyEnrichmentState({
-        runId: current.plan.run_id,
-        planSha256: current.sha256,
+    await activateEnrichmentRun({
+      store,
+      runId: created.plan.run_id,
+      planSha256: created.sha256,
+      activatedAt: CREATED_AT,
+    });
+    const adapter = new EnrichmentCheckpointAdapter({
+      ...createEmptyEnrichmentState({
+        runId: created.plan.run_id,
+        planSha256: created.sha256,
         queueTotal: 0,
         queueBaselineDone: 0,
         registryTotal: 0,
         registryBaselineScanned: 0,
       }),
-      {
-        state: "published",
-        database_key: DATABASE_KEY,
-        database_sha256: BASE_SHA,
-        database_bytes: 1,
-        manifest,
-      },
-    );
-    const adapter = new EnrichmentCheckpointAdapter({ ...state, sequence: 1 });
+      sequence: 1,
+    });
     const coordinator = CheckpointCoordinator.create({
-      runId: current.plan.run_id,
+      runId: created.plan.run_id,
       attemptId: "bootstrap",
-      planSha256: current.sha256,
+      planSha256: created.sha256,
       store,
       prefix: "operations/enrichment/runs",
       clock: () => new Date(CREATED_AT),
     });
     await coordinator.commit(
-      { name: "published", sequence: 1, reached_at: CREATED_AT, metadata: {} },
+      { name: "bootstrap", sequence: 1, reached_at: CREATED_AT, metadata: { imported: true } },
       adapter,
     );
-    await store.writeImmutable(
-      `operations/enrichment/runs/${current.plan.run_id}/successor.json`,
-      canonicalPlanBytes({
-        schema_version: 1,
-        predecessor_run_id: current.plan.run_id,
-        predecessor_plan_sha256: current.sha256,
-        run_id: successor.plan.run_id,
-        plan_sha256: successor.sha256,
-        created_at: "2026-08-19T13:00:00.000Z",
-      }),
-    );
-    await activateEnrichmentRun({
-      store,
-      runId: current.plan.run_id,
-      planSha256: current.sha256,
-      activatedAt: CREATED_AT,
-    });
+    const writesBeforeRestore = store.writes;
     mocks.checkpointStore.mockReturnValue(store);
     mocks.config.mockReturnValue({
-      enrichEnabled: true,
-      inferenceToken: "inference",
+      enrichEnabled: false,
+      inferenceToken: undefined,
       indexBucket: "owner/index",
       rawBucket: "owner/raw",
       hfToken: "storage",
@@ -264,29 +227,15 @@ describe("planned enrichment runtime", () => {
     });
 
     await runPlannedEnrichmentCommand({
-      JOB_ID: "attempt-2",
-      XTAP_SOURCE_REVISION: current.plan.contract.worker_revision,
+      XTAP_RESTORE_ONLY: "true",
+      XTAP_SOURCE_REVISION: created.plan.contract.worker_revision,
     });
 
-    expect(mocks.progress.complete).toHaveBeenCalledOnce();
-    const active: unknown = JSON.parse(
-      Buffer.from(
-        store.files.get("operations/enrichment/runs/active.json") ?? new Uint8Array(),
-      ).toString("utf8"),
-    );
-    expect(active).toMatchObject({
-      generation: 2,
-      run_id: successor.plan.run_id,
-      plan_sha256: successor.sha256,
-    });
+    expect(store.writes).toBe(writesBeforeRestore);
+    expect(mocks.rawList).not.toHaveBeenCalled();
+    expect(mocks.rawDownload).not.toHaveBeenCalled();
   });
 });
-
-function withoutRunId(plan: ReturnType<typeof createEnrichmentRunPlan>["plan"]) {
-  const { run_id: excluded, ...input } = plan;
-  void excluded;
-  return input;
-}
 
 function digest(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");

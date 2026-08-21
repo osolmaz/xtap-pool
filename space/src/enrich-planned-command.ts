@@ -15,14 +15,22 @@ import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
 
 import { activateEnrichmentRun, resolveActiveEnrichmentRun } from "./enrich-active-run.js";
 import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
-import { BucketLog, createRawBucketClient } from "./bucket-log.js";
+import {
+  bucketSnapshotSchema,
+  BucketLog,
+  canonicalBytes,
+  createRawBucketClient,
+  createRawBucketReader,
+  sha256,
+} from "./bucket-log.js";
 import type { BucketSegment, BucketSnapshotFile } from "./bucket-log.js";
 import { loadConfig } from "./config.js";
 import { durableIndexManifestSchema, DurableIndex } from "./durable-index.js";
 import type { DurableIndexManifest } from "./durable-index.js";
-import { loadEnrichTaxonomy } from "./enrich-config.js";
+import { resolveEnrichmentTaxonomyForContract } from "./enrich-taxonomy-contract.js";
 import {
   createEnrichmentCheckpointStore,
+  createReadOnlyEnrichmentCheckpointStore,
   EnrichmentCheckpointAdapter,
 } from "./enrich-checkpoint.js";
 import { enrichmentBatchResultSchema, publishEnrichmentBatchResult } from "./enrich-batch.js";
@@ -40,7 +48,6 @@ import {
 } from "./enrich-state.js";
 import { EnrichStore } from "./enrich-store.js";
 import {
-  contractHashFor,
   createExactHubVerifier,
   createFreeLabelJudge,
   createRouterLlmClient,
@@ -86,15 +93,46 @@ export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
 ): Promise<void> {
   const commandStartedAtMs = Date.now();
-  const config = loadConfig(env);
-  if (!config.enrichEnabled || config.inferenceToken === undefined) {
+  const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
+  const config = loadConfig(
+    restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
+  );
+  if (restoreOnly) {
+    if (config.inferenceToken !== undefined) {
+      throw new Error("restore-only validation must not receive INFERENCE_TOKEN");
+    }
+  } else if (!config.enrichEnabled || config.inferenceToken === undefined) {
     throw new Error("planned enrichment requires ENRICH_ENABLED and INFERENCE_TOKEN");
   }
-  const checkpointStore = createEnrichmentCheckpointStore({
-    bucket: config.indexBucket,
-    accessToken: config.hfToken,
-  });
+  const emitRestoreProgress = (
+    stage: string,
+    completed: number,
+    total: number,
+    unit: "items" | "bytes" = "items",
+  ): void => {
+    if (!restoreOnly) return;
+    console.log(
+      JSON.stringify({
+        type: "restore-progress",
+        stage,
+        completed,
+        total,
+        unit,
+        elapsed_ms: Date.now() - commandStartedAtMs,
+      }),
+    );
+  };
+  const checkpointStore = restoreOnly
+    ? createReadOnlyEnrichmentCheckpointStore({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
+      })
+    : createEnrichmentCheckpointStore({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
+      });
   const activeRun = await resolveActiveEnrichmentRun(checkpointStore);
+  emitRestoreProgress("active-run", 1, 1);
   const runId = activeRun.run_id;
   const planSha256 = activeRun.plan_sha256;
   const planPath = `${RUN_PREFIX}/${runId}/plan.json`;
@@ -102,11 +140,13 @@ export async function runPlannedEnrichmentCommand(
   const parsedPlan: unknown = JSON.parse(Buffer.from(planBytes).toString("utf8"));
   const { plan } = parseEnrichmentRunPlan(parsedPlan, planSha256);
   if (plan.run_id !== runId) throw new Error("active enrichment run ID mismatch");
+  emitRestoreProgress("plan", 1, 1);
   if (plan.contract.worker_revision !== requireEnvironment(env, "XTAP_SOURCE_REVISION")) {
     throw new Error("planned enrichment worker revision does not match running code");
   }
   const workBytes = await requiredObject(checkpointStore, plan.work.key);
   verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
+  emitRestoreProgress("work-plan", workBytes.byteLength, plan.work.bytes, "bytes");
   const sourceSegmentsBytes = await requiredObject(
     checkpointStore,
     plan.source.ordered_segments.key,
@@ -118,6 +158,15 @@ export async function runPlannedEnrichmentCommand(
     "ordered source segments",
   );
   const sourceSegments = parseSourceSegments(sourceSegmentsBytes);
+  const sourceSnapshot = bucketSnapshotSchema.parse({
+    schema_version: 1,
+    bucket: plan.source.bucket,
+    files: sourceSegments,
+  });
+  if (sha256(canonicalBytes(sourceSnapshot)) !== plan.source.snapshot_revision) {
+    throw new Error("ordered source segments do not match the plan snapshot");
+  }
+  emitRestoreProgress("source", sourceSegments.length, sourceSegments.length);
   const workPath = join(config.dataDir, "planned", `${runId}.sqlite`);
   await mkdir(dirname(workPath), { recursive: true });
   await rm(workPath, { force: true });
@@ -125,15 +174,24 @@ export async function runPlannedEnrichmentCommand(
 
   const log = new BucketLog(
     config.rawBucket,
-    createRawBucketClient(config.rawBucket, config.hfToken),
+    restoreOnly
+      ? createRawBucketReader(config.rawBucket, config.hfToken)
+      : createRawBucketClient(config.rawBucket, config.hfToken),
     join(config.dataDir, "planned-raw-cache"),
   );
-  const taxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
-  if (taxonomy.error !== undefined) throw new Error(`taxonomy unavailable: ${taxonomy.error}`);
-  const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
-  if (contractHash !== plan.contract.contract_sha256) {
-    throw new Error("planned enrichment contract does not match running code");
-  }
+  const { taxonomy, contractHash } = await resolveEnrichmentTaxonomyForContract({
+    log,
+    snapshot: sourceSnapshot,
+    taxonomyVersion: config.taxonomyVersion,
+    llmModel: config.llmModel,
+    expectedContractHash: plan.contract.contract_sha256,
+    concurrency: restoreOnly ? 16 : 4,
+    progress: (completed, total) => {
+      emitRestoreProgress("taxonomy", completed, total);
+      return Promise.resolve();
+    },
+  });
+  emitRestoreProgress("contract", 1, 1);
   const tweetStore = new TweetStore(workPath);
   const enrichStore = new EnrichStore(
     tweetStore.database,
@@ -161,6 +219,7 @@ export async function runPlannedEnrichmentCommand(
   });
   const restored = await coordinator.restoreLatest(adapter);
   if (restored === null) throw new Error("planned enrichment has no bootstrap checkpoint");
+  emitRestoreProgress("checkpoint", restored.evidence.sequence, restored.evidence.sequence);
   let state = adapter.state;
   if (state.publication.state === "pending" || state.publication.state === "building") {
     const currentIndexBytes = await requiredObject(checkpointStore, "index/current.json");
@@ -171,9 +230,38 @@ export async function runPlannedEnrichmentCommand(
       throw new Error("active enrichment plan base index is no longer current");
     }
   }
+  const quickCheck = tweetStore.database.pragma("quick_check") as { quick_check: string }[];
+  if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
+    throw new Error("planned work database SQLite quick_check failed");
+  }
   const ordinals = readQueueOrdinals(tweetStore.database);
   const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
   const registryNames = readRegistryNames(tweetStore.database);
+  if (ordinals.size !== plan.work.queue_total || queueIdentities.size !== plan.work.queue_total) {
+    throw new Error("planned work queue count does not match the plan");
+  }
+  if (registryNames.length + plan.work.registry_baseline_scanned !== plan.work.registry_total) {
+    throw new Error("planned work registry count does not match the plan");
+  }
+  emitRestoreProgress("database", 1, 1);
+  if (restoreOnly) {
+    console.log(
+      JSON.stringify({
+        type: "restore-complete",
+        run_id: runId,
+        plan_sha256: planSha256,
+        sequence: state.sequence,
+        queue_done: state.queue.done,
+        queue_total: state.queue.total,
+        registry_next_ordinal: state.registry.next_ordinal,
+        registry_total: state.registry.total,
+        provider_calls: 0,
+        elapsed_ms: Date.now() - commandStartedAtMs,
+      }),
+    );
+    tweetStore.close();
+    return;
+  }
   const progress = await XTapJobProgress.create({
     bucket: config.indexBucket,
     accessToken: config.hfToken,
@@ -330,8 +418,10 @@ export async function runPlannedEnrichmentCommand(
       return;
     }
 
+    const inferenceToken = config.inferenceToken;
+    if (inferenceToken === undefined) throw new Error("planned enrichment token is missing");
     const llm = createRouterLlmClient({
-      hfToken: config.inferenceToken,
+      hfToken: inferenceToken,
       model: config.llmModel,
       requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       ...(config.enrichInputTokenUsd === undefined || config.enrichOutputTokenUsd === undefined
