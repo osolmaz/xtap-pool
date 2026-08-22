@@ -97,6 +97,37 @@ describe("resolveEnrichmentTaxonomyAfterTail", () => {
     expect(progress).toEqual([[0, 0]]);
   });
 
+  it("retains the base taxonomy when a configuration tail has no labels write", async () => {
+    const time = Date.parse("2026-08-21T12:00:00.000Z");
+    const tail = bucketSnapshotSchema.parse({
+      schema_version: 1,
+      bucket: SNAPSHOT.bucket,
+      files: [
+        {
+          key: `v1/segments/config/2026/08/21/${time.toString()}-00000000-0000-4000-8000-000000000001-${"b".repeat(64)}.json.gz`,
+          oid: "a".repeat(64),
+          size: 1,
+          content_sha256: "b".repeat(64),
+        },
+      ],
+    });
+    const readText = vi.fn(() => Promise.resolve(undefined));
+
+    const resolved = await resolveEnrichmentTaxonomyAfterTail({
+      log: { readText },
+      baseSnapshot: SNAPSHOT,
+      finalSnapshot: tail,
+      baseTaxonomy,
+      taxonomyVersion: 1,
+      llmModel: MODEL,
+      expectedContractHash,
+      concurrency: 4,
+    });
+
+    expect(resolved.taxonomy).toEqual(baseTaxonomy);
+    expect(readText).toHaveBeenCalledOnce();
+  });
+
   it("rejects a custom taxonomy written in the post-index tail", async () => {
     const labels = [{ name: "custom", description: "Custom label." }];
     const time = Date.parse("2026-08-21T12:00:00.000Z");
@@ -128,7 +159,7 @@ describe("resolveEnrichmentTaxonomyAfterTail", () => {
     ).rejects.toThrow("post-snapshot taxonomy changes");
     expect(readText).toHaveBeenCalledWith(
       "config/labels.json",
-      expect.objectContaining({ concurrency: 4 }),
+      expect.objectContaining({ snapshot: tail, concurrency: 4 }),
     );
   });
 });

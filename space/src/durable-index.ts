@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/hub";
 import { z } from "zod";
 
-import { BucketLog } from "./bucket-log.js";
+import { BucketLog, canonicalBytes, sha256 } from "./bucket-log.js";
 import type { BucketSnapshot, BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
@@ -377,10 +377,62 @@ export class DurableIndex {
 
   async advanceToLatest(): Promise<IndexAdvance> {
     const previous = sourceRows(this.store.database);
-    const { revision, snapshot } = await this.options.log.discoverSnapshot(
-      [...previous.values()].map(snapshotFileFromRow),
-    );
-    return this.advanceToSnapshot(revision, snapshot, previous, false);
+    const known = [...previous.values()].map(snapshotFileFromRow);
+    const metadata = readMetadata(this.store.database);
+    const baseRevision =
+      metadata?.raw_snapshot_revision ??
+      sha256(canonicalBytes({ schema_version: 1, bucket: this.options.rawBucket, files: known }));
+    const concurrency = Math.max(1, Math.min(16, this.options.sourceReplayConcurrency ?? 1));
+    const tailFiles: BucketSnapshotFile[] = [];
+    let rowsApplied = 0;
+    this.store.database.exec("BEGIN IMMEDIATE");
+    try {
+      await this.options.log.replayVerifiedTail(known, {
+        concurrency,
+        progress: async (completed, total) =>
+          this.options.progress?.sourceReplay({
+            revision: baseRevision,
+            completed: known.length + completed,
+            total: known.length + total,
+          }) ?? Promise.resolve(),
+        consume: (file, segment) => {
+          const counts = this.options.log.applySegment(segment, this.store, this.enrichStore);
+          rowsApplied += totalSourceRows(counts);
+          insertSourceRow(this.store.database, file, counts);
+          tailFiles.push(file);
+          return Promise.resolve();
+        },
+      });
+      const snapshot: BucketSnapshot = {
+        schema_version: 1,
+        bucket: this.options.rawBucket,
+        files: [...known, ...tailFiles].sort((left, right) => left.key.localeCompare(right.key)),
+      };
+      const revision = sha256(canonicalBytes(snapshot));
+      writeMetadata(this.store.database, {
+        schema_version: INDEX_SCHEMA_VERSION,
+        raw_bucket: this.options.rawBucket,
+        raw_snapshot_revision: revision,
+        contract_hash: this.options.contractHash,
+      });
+      this.store.database.exec("COMMIT");
+      await this.options.progress?.sourceReplay({
+        revision,
+        completed: snapshot.files.length,
+        total: snapshot.files.length,
+      });
+      assertDatabaseIntegrity(this.store.database);
+      return {
+        revision,
+        snapshot,
+        filesChanged: tailFiles.length,
+        rowsApplied,
+        counts: databaseCounts(this.store.database),
+      };
+    } catch (error) {
+      if (this.store.database.inTransaction) this.store.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   async advanceToDiscovered(revision: string, snapshot: BucketSnapshot): Promise<IndexAdvance> {

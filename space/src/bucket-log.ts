@@ -103,6 +103,10 @@ export type SourceCounts = Readonly<Record<SourceKind, number>>;
 export type BucketObject = { key: string; oid?: string; size: number };
 
 type ReceiptMetadata = { receipt: EnrichReceipt; segmentCreatedAtMs: number };
+type ReceiptSelection = {
+  latest: ReceiptMetadata | undefined;
+  latestRegistry: ReceiptMetadata | undefined;
+};
 
 export type RawBucketReader = {
   list(prefix: string): Promise<readonly BucketObject[]>;
@@ -148,6 +152,31 @@ export function receiptsInSegment(segment: BucketSegment): EnrichReceipt[] {
     }
   }
   return receipts;
+}
+
+function hasRegistryCursor(receipt: EnrichReceipt): boolean {
+  return (
+    receipt.registry_scan !== undefined &&
+    receipt.registry_scan.scanned > 0 &&
+    typeof receipt.registry_scan.after_name === "string"
+  );
+}
+
+function newerReceipt(
+  left: ReceiptMetadata | undefined,
+  right: ReceiptMetadata | undefined,
+): ReceiptMetadata | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return right.receipt.finished_at > left.receipt.finished_at ? right : left;
+}
+
+function earliestReceiptSegment(selection: ReceiptSelection): number | undefined {
+  const values = [
+    selection.latest?.segmentCreatedAtMs,
+    selection.latestRegistry?.segmentCreatedAtMs,
+  ].filter((value): value is number => value !== undefined);
+  return values.length === 0 ? undefined : Math.min(...values);
 }
 
 const legacyReceiptSchema = z
@@ -220,6 +249,7 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
 /** Immutable transaction log and exact snapshots in a private Hugging Face Bucket. */
 export class BucketLog {
   private lastReceipt: EnrichReceipt | undefined;
+  private lastRegistryReceipt: EnrichReceipt | undefined;
   private lastCreatedAtMs = 0;
   private textCacheComplete = false;
   private readonly textValues = new Map<string, string>();
@@ -567,44 +597,47 @@ export class BucketLog {
         }
         return known;
       });
-      this.lastReceipt = (
-        await this.latestReceiptInFiles(receiptFiles, concurrency, options.progress)
-      )?.receipt;
+      const selection = await this.latestReceiptInFiles(
+        receiptFiles,
+        concurrency,
+        options.progress,
+      );
+      this.lastReceipt = selection.latest?.receipt;
+      this.lastRegistryReceipt = selection.latestRegistry?.receipt;
       return;
     }
 
     let completed = 0;
     const dedicated = snapshot.files.filter((file) => file.key.includes("/receipt/"));
-    let latest = await this.latestReceiptInFiles(dedicated, concurrency, (done) => {
+    const dedicatedSelection = await this.latestReceiptInFiles(dedicated, concurrency, (done) => {
       completed = done;
       return Promise.resolve();
     });
+    const cutoff = earliestReceiptSegment(dedicatedSelection);
     const mixedFiles = snapshot.files.filter(
       (file) =>
         file.key.includes("/mixed/") &&
-        (latest === undefined || segmentCreatedAtMs(file.key) >= latest.segmentCreatedAtMs),
+        (cutoff === undefined || segmentCreatedAtMs(file.key) >= cutoff),
     );
     const total = dedicated.length + mixedFiles.length;
     await options.progress?.(completed, total);
-    const mixedLatest = await this.latestReceiptInFiles(
+    const mixedSelection = await this.latestReceiptInFiles(
       mixedFiles,
       concurrency,
       (done) => options.progress?.(completed + done, total) ?? Promise.resolve(),
     );
-    if (
-      mixedLatest !== undefined &&
-      (latest === undefined || mixedLatest.receipt.finished_at > latest.receipt.finished_at)
-    ) {
-      latest = mixedLatest;
-    }
-    this.lastReceipt = latest?.receipt;
+    this.lastReceipt = newerReceipt(dedicatedSelection.latest, mixedSelection.latest)?.receipt;
+    this.lastRegistryReceipt = newerReceipt(
+      dedicatedSelection.latestRegistry,
+      mixedSelection.latestRegistry,
+    )?.receipt;
   }
 
   private async latestReceiptInFiles(
     files: readonly BucketSnapshotFile[],
     concurrency: number,
     progress?: BucketReadProgress,
-  ): Promise<ReceiptMetadata | undefined> {
+  ): Promise<ReceiptSelection> {
     let completed = 0;
     const observed = await mapConcurrent(
       files,
@@ -620,12 +653,14 @@ export class BucketLog {
       },
     );
     let latest: ReceiptMetadata | undefined;
+    let latestRegistry: ReceiptMetadata | undefined;
     for (const item of observed.flat()) {
-      if (latest === undefined || item.receipt.finished_at > latest.receipt.finished_at) {
-        latest = item;
+      latest = newerReceipt(latest, item);
+      if (hasRegistryCursor(item.receipt)) {
+        latestRegistry = newerReceipt(latestRegistry, item);
       }
     }
-    return latest;
+    return { latest, latestRegistry };
   }
 
   applySegment(segment: BucketSegment, store: TweetStore, enrich: EnrichStore): SourceCounts {
@@ -641,6 +676,13 @@ export class BucketLog {
         if (this.lastReceipt === undefined || receipt.finished_at > this.lastReceipt.finished_at) {
           this.lastReceipt = receipt;
         }
+        if (
+          hasRegistryCursor(receipt) &&
+          (this.lastRegistryReceipt === undefined ||
+            receipt.finished_at > this.lastRegistryReceipt.finished_at)
+        ) {
+          this.lastRegistryReceipt = receipt;
+        }
       });
     }
     return counts;
@@ -648,6 +690,10 @@ export class BucketLog {
 
   latestReceipt(): EnrichReceipt | undefined {
     return this.lastReceipt;
+  }
+
+  latestRegistryReceipt(): EnrichReceipt | undefined {
+    return this.lastRegistryReceipt;
   }
 
   private requireWriter(): RawBucketClient {
