@@ -35,6 +35,10 @@ vi.mock("../src/bucket-log.js", async (importOriginal) => {
     BucketLog: class BucketLog {
       readonly fixture = true;
 
+      primeTextCacheFromLatestWrites(): Promise<void> {
+        return Promise.resolve();
+      }
+
       replayVerifiedTail(
         _known: readonly unknown[],
         options: { progress?: (completed: number, total: number) => Promise<void> },

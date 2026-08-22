@@ -533,7 +533,8 @@ export class BucketLog {
     this.rememberTextEntries(entries);
   }
 
-  async primeTextCacheFromAnchor(
+  // eslint-disable-next-line complexity -- Reverse scanning validates source identity and all configuration paths before cache activation.
+  async primeTextCacheFromLatestWrites(
     snapshot: BucketSnapshot,
     concurrency = 16,
     progress?: BucketReadProgress,
@@ -543,45 +544,35 @@ export class BucketLog {
       throw new Error(`Bucket snapshot source mismatch: ${validated.bucket}`);
     }
     this.rememberFiles(validated.files);
-    const configFiles = validated.files
-      .filter((file) => file.key.includes("/config/"))
+    const files = validated.files
+      .filter((file) => file.key.includes("/config/") || file.key.includes("/mixed/"))
       .sort((left, right) => compareSegmentKeys(right.key, left.key));
-    const loaded = new Map<string, { file: BucketSnapshotFile; segment: BucketSegment }>();
-    let anchor: { file: BucketSnapshotFile; segment: BucketSegment } | undefined;
-    for (const file of configFiles) {
-      const entry = { file, segment: await this.loadSegment(file) };
-      loaded.set(file.key, entry);
-      const paths = new Set(
-        entry.segment.operations
-          .filter((operation) => operation.mode === "write")
-          .map((operation) => operation.path),
-      );
-      if (RAW_CONFIG_PATHS.every((path) => paths.has(path))) {
-        anchor = entry;
-        break;
+    const values = new Map<string, string>();
+    const limit = Math.max(1, Math.min(16, concurrency));
+    let completed = 0;
+    for (let start = 0; start < files.length; start += limit) {
+      const batch = files.slice(start, start + limit);
+      const entries = await mapConcurrent(batch, limit, async (file) => ({
+        file,
+        segment: await this.loadSegment(file),
+      }));
+      completed += entries.length;
+      for (const { segment } of entries) {
+        for (const operation of segment.operations) {
+          if (operation.mode === "write" && !values.has(operation.path)) {
+            values.set(operation.path, operation.content);
+          }
+        }
       }
+      if (RAW_CONFIG_PATHS.every((path) => values.has(path))) break;
+      await progress?.(completed, files.length);
     }
-    if (anchor === undefined) throw new Error("complete Bucket configuration anchor is missing");
-    const files = validated.files.filter(
-      (file) =>
-        compareSegmentKeys(file.key, anchor.file.key) >= 0 &&
-        (file.key.includes("/config/") || file.key.includes("/mixed/")),
-    );
-    let completed = files.filter((file) => loaded.has(file.key)).length;
-    await progress?.(completed, files.length);
-    const entries = await mapConcurrent(
-      files,
-      Math.max(1, Math.min(16, concurrency)),
-      async (file) => {
-        const existing = loaded.get(file.key);
-        if (existing !== undefined) return existing;
-        const entry = { file, segment: await this.loadSegment(file) };
-        completed += 1;
-        await progress?.(completed, files.length);
-        return entry;
-      },
-    );
-    this.rememberTextEntries(entries);
+    if (!RAW_CONFIG_PATHS.every((path) => values.has(path))) {
+      throw new Error("complete Bucket configuration state is missing");
+    }
+    for (const [path, content] of values) this.rememberText(path, content);
+    this.textCacheComplete = true;
+    await progress?.(completed, completed);
   }
 
   // eslint-disable-next-line complexity -- Exact snapshot text reconstruction validates source, anchor, and bounded mixed-file order.
