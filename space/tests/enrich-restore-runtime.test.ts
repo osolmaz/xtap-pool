@@ -10,7 +10,7 @@ import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-j
 const mocks = vi.hoisted(() => ({
   checkpointStore: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
-  rawList: vi.fn(() => Promise.reject(new Error("raw listing must not run"))),
+  rawList: vi.fn(() => Promise.resolve([])),
   rawDownload: vi.fn(() => Promise.reject(new Error("raw download must not run"))),
 }));
 
@@ -88,7 +88,7 @@ afterEach(async () => {
 });
 
 describe("planned enrichment restore-only runtime", () => {
-  it("restores the exact checkpoint without raw reads, provider setup, or object writes", async () => {
+  it("restores the exact checkpoint and verifies an empty tail without provider setup or writes", async () => {
     const dataDir = join(
       tmpdir(),
       `xtap-restore-${process.pid.toString()}-${Date.now().toString()}`,
@@ -232,7 +232,7 @@ describe("planned enrichment restore-only runtime", () => {
     });
 
     expect(store.writes).toBe(writesBeforeRestore);
-    expect(mocks.rawList).not.toHaveBeenCalled();
+    expect(mocks.rawList).toHaveBeenCalledTimes(1);
     expect(mocks.rawDownload).not.toHaveBeenCalled();
   });
 });

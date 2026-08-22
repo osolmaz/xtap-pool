@@ -45,6 +45,9 @@ describe("XTapJobProgress", () => {
     await progress.restoreDatabase(100, 100);
     await progress.sourceReplay({ revision: "c".repeat(64), completed: 12, total: 12 });
     await progress.workingCopy(true);
+    await progress.checkpointClaims(10, 10);
+    await progress.outputClaims(8, 8);
+    await progress.checkpointReplay(6, 6);
     await progress.queue({ pending: 0, running: 0, retrying: 0, blocked: 2, done: 8 });
     await progress.registryScan(20, 20);
     await progress.receiptPublished();
@@ -57,7 +60,7 @@ describe("XTapJobProgress", () => {
     const stored = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
     if (stored === null) throw new Error("progress snapshot is missing");
     expect(stored.snapshot.state).toBe("waiting");
-    expect(stored.snapshot.tracks).toHaveLength(13);
+    expect(stored.snapshot.tracks).toHaveLength(16);
     expect(
       stored.snapshot.tracks
         .filter(

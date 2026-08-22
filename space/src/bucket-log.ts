@@ -16,6 +16,7 @@ import {
 } from "@xtap-pool/shared";
 import type { EnrichReceipt, PooledTweet } from "@xtap-pool/shared";
 
+import { consumeBatchesInOrder } from "./bounded-concurrency.js";
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
@@ -124,6 +125,12 @@ export type HydrateMetadataOptions = {
   concurrency?: number;
   receiptFiles?: readonly BucketSnapshotFile[];
   progress?: BucketReadProgress;
+};
+
+export type ReplayVerifiedTailOptions = {
+  concurrency: number;
+  progress?: BucketReadProgress;
+  consume(file: BucketSnapshotFile, segment: BucketSegment): Promise<void>;
 };
 
 export type StorageLog = Pick<
@@ -387,6 +394,56 @@ export class BucketLog {
     if (object === undefined) throw new Error(`Bucket segment is missing: ${key}`);
     const file = await this.verifyListedObject(object);
     return { file, segment: await this.loadSegment(file) };
+  }
+
+  /** Verify and consume only objects after an exact known snapshot. */
+  // eslint-disable-next-line complexity -- Tail replay checks append-only membership, listed identity, content identity, and bounded application order.
+  async replayVerifiedTail(
+    known: readonly BucketSnapshotFile[],
+    options: ReplayVerifiedTailOptions,
+  ): Promise<void> {
+    const previous = new Map(known.map((file) => [file.key, file]));
+    if (previous.size !== known.length)
+      throw new Error("known Bucket snapshot contains duplicates");
+    const objects = [...(await this.client.list(SEGMENT_PREFIX))];
+    const listed = new Set(objects.map((object) => object.key));
+    const deleted = known.find((file) => !listed.has(file.key));
+    if (deleted !== undefined) {
+      throw new Error(`raw Bucket source segments were deleted: ${deleted.key}`);
+    }
+    const tail: BucketObject[] = [];
+    for (const object of objects) {
+      const old = previous.get(object.key);
+      if (old === undefined) {
+        tail.push(object);
+        continue;
+      }
+      if (old.size !== object.size) {
+        throw new Error(`Bucket object size changed while discovering tail: ${object.key}`);
+      }
+      if (object.oid !== undefined && old.listed_oid === object.oid) continue;
+      let verified: BucketSnapshotFile;
+      try {
+        verified = await this.verifyListedObject(object);
+      } catch (error) {
+        throw new Error(`raw Bucket source segment changed: ${object.key}`, { cause: error });
+      }
+      this.newlyVerifiedSegments.delete(object.key);
+      if (verified.oid !== old.oid) {
+        throw new Error(`raw Bucket source segment changed: ${object.key}`);
+      }
+    }
+    tail.sort((left, right) => compareSegmentKeys(left.key, right.key));
+    await consumeBatchesInOrder({
+      inputs: tail,
+      concurrency: options.concurrency,
+      load: async (object) => {
+        const file = await this.verifyListedObject(object);
+        return { file, segment: await this.loadSegment(file) };
+      },
+      consume: async ({ file, segment }) => options.consume(file, segment),
+      ...(options.progress === undefined ? {} : { progress: options.progress }),
+    });
   }
 
   // eslint-disable-next-line complexity -- Segment loading verifies every persisted identity and encoding boundary.
@@ -853,6 +910,15 @@ function compareTextEntries(
   if (time !== 0) return time;
   const transaction = left.segment.transaction_id.localeCompare(right.segment.transaction_id);
   return transaction !== 0 ? transaction : left.file.key.localeCompare(right.file.key);
+}
+
+function compareSegmentKeys(left: string, right: string): number {
+  const leftMatch = SEGMENT_KEY.exec(left);
+  const rightMatch = SEGMENT_KEY.exec(right);
+  if (leftMatch === null || rightMatch === null) throw new Error("invalid Bucket segment key");
+  const leftOrder = `${leftMatch[5] ?? ""}\0${leftMatch[6] ?? ""}\0${left}`;
+  const rightOrder = `${rightMatch[5] ?? ""}\0${rightMatch[6] ?? ""}\0${right}`;
+  return leftOrder.localeCompare(rightOrder);
 }
 
 function latestTextWrite(

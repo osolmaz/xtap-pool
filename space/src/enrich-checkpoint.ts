@@ -1,15 +1,17 @@
 import { Buffer } from "node:buffer";
 
-import type {
-  CheckpointAdapter,
-  CheckpointBoundary,
-  CheckpointManifest,
-  CheckpointObjectStore,
-  CheckpointPayload,
-  JsonValue,
+import {
+  checkpointClaimPrefix,
+  type CheckpointAdapter,
+  type CheckpointBoundary,
+  type CheckpointManifest,
+  type CheckpointObjectStore,
+  type CheckpointPayload,
+  type JsonValue,
 } from "@osolmaz/hf-job-control";
 import { downloadFile, HubApiError, listFiles, uploadFile } from "@huggingface/hub";
 
+import { mapBatchesInOrder } from "./bounded-concurrency.js";
 import {
   enrichmentCheckpointMetadataSchema,
   serializeEnrichmentMetadata,
@@ -74,6 +76,49 @@ export function createReadOnlyEnrichmentCheckpointStore(options: {
     },
     writePointerHint(): Promise<void> {
       return Promise.resolve();
+    },
+  };
+}
+
+export function withCheckpointClaimPrefetch(
+  store: CheckpointObjectStore,
+  options: {
+    runId: string;
+    prefix: string;
+    concurrency: number;
+    progress?: (completed: number, total: number) => Promise<void>;
+  },
+): CheckpointObjectStore {
+  const claimsPrefix = checkpointClaimPrefix(options.prefix, options.runId);
+  const cache = new Map<string, Uint8Array>();
+  return {
+    bucketId: store.bucketId,
+    async read(path): Promise<Uint8Array | null> {
+      const cached = cache.get(path);
+      return cached === undefined ? store.read(path) : Uint8Array.from(cached);
+    },
+    async list(prefix): Promise<readonly string[]> {
+      const keys = await store.list(prefix);
+      if (prefix !== claimsPrefix) return keys;
+      await mapBatchesInOrder({
+        inputs: keys,
+        concurrency: options.concurrency,
+        operation: async (key) => {
+          if (cache.has(key)) return;
+          const value = await store.read(key);
+          if (value === null) throw new Error(`checkpoint claim disappeared: ${key}`);
+          cache.set(key, Uint8Array.from(value));
+        },
+        ...(options.progress === undefined ? {} : { progress: options.progress }),
+      });
+      return keys;
+    },
+    async writeImmutable(path, bytes): Promise<void> {
+      await store.writeImmutable(path, bytes);
+      if (path.startsWith(claimsPrefix)) cache.set(path, Uint8Array.from(bytes));
+    },
+    writePointerHint(path, bytes): Promise<void> {
+      return store.writePointerHint(path, bytes);
     },
   };
 }
