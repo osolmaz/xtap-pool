@@ -530,15 +530,58 @@ export class BucketLog {
         return { file, segment };
       },
     );
-    entries.sort(compareTextEntries);
-    const values = new Map<string, string>();
-    for (const { segment } of entries) {
-      for (const operation of segment.operations) {
-        if (operation.mode === "write") values.set(operation.path, operation.content);
+    this.rememberTextEntries(entries);
+  }
+
+  async primeTextCacheFromAnchor(
+    snapshot: BucketSnapshot,
+    concurrency = 16,
+    progress?: BucketReadProgress,
+  ): Promise<void> {
+    const validated = bucketSnapshotSchema.parse(snapshot);
+    if (validated.bucket !== this.name) {
+      throw new Error(`Bucket snapshot source mismatch: ${validated.bucket}`);
+    }
+    this.rememberFiles(validated.files);
+    const configFiles = validated.files
+      .filter((file) => file.key.includes("/config/"))
+      .sort((left, right) => compareSegmentKeys(right.key, left.key));
+    const loaded = new Map<string, { file: BucketSnapshotFile; segment: BucketSegment }>();
+    let anchor: { file: BucketSnapshotFile; segment: BucketSegment } | undefined;
+    for (const file of configFiles) {
+      const entry = { file, segment: await this.loadSegment(file) };
+      loaded.set(file.key, entry);
+      const paths = new Set(
+        entry.segment.operations
+          .filter((operation) => operation.mode === "write")
+          .map((operation) => operation.path),
+      );
+      if (RAW_CONFIG_PATHS.every((path) => paths.has(path))) {
+        anchor = entry;
+        break;
       }
     }
-    for (const [path, content] of values) this.rememberText(path, content);
-    this.textCacheComplete = true;
+    if (anchor === undefined) throw new Error("complete Bucket configuration anchor is missing");
+    const files = validated.files.filter(
+      (file) =>
+        compareSegmentKeys(file.key, anchor.file.key) >= 0 &&
+        (file.key.includes("/config/") || file.key.includes("/mixed/")),
+    );
+    let completed = files.filter((file) => loaded.has(file.key)).length;
+    await progress?.(completed, files.length);
+    const entries = await mapConcurrent(
+      files,
+      Math.max(1, Math.min(16, concurrency)),
+      async (file) => {
+        const existing = loaded.get(file.key);
+        if (existing !== undefined) return existing;
+        const entry = { file, segment: await this.loadSegment(file) };
+        completed += 1;
+        await progress?.(completed, files.length);
+        return entry;
+      },
+    );
+    this.rememberTextEntries(entries);
   }
 
   // eslint-disable-next-line complexity -- Exact snapshot text reconstruction validates source, anchor, and bounded mixed-file order.
@@ -769,6 +812,20 @@ export class BucketLog {
     const local = this.localPath(path);
     mkdirSync(dirname(local), { recursive: true });
     writeFileSync(local, content);
+  }
+
+  private rememberTextEntries(
+    entries: readonly { file: BucketSnapshotFile; segment: BucketSegment }[],
+  ): void {
+    const ordered = [...entries].sort(compareTextEntries);
+    const values = new Map<string, string>();
+    for (const { segment } of ordered) {
+      for (const operation of segment.operations) {
+        if (operation.mode === "write") values.set(operation.path, operation.content);
+      }
+    }
+    for (const [path, content] of values) this.rememberText(path, content);
+    this.textCacheComplete = true;
   }
 
   private localPath(path: string): string {

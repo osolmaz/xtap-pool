@@ -233,7 +233,7 @@ startEnrichmentRefresh();
 
 async function primeStorageTextCache(snapshot: BucketSnapshot, stage: string): Promise<void> {
   let reported = -1;
-  await log.primeTextCache(snapshot, 16, (completed, total) => {
+  await log.primeTextCacheFromAnchor(snapshot, 16, (completed, total) => {
     if (completed === total || completed - reported >= 100) {
       console.log(JSON.stringify({ type: "startup-progress", stage, completed, total }));
       reported = completed;
