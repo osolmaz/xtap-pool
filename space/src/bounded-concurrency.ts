@@ -29,10 +29,10 @@ export async function consumeBatchesInOrder<Input, Output>(options: {
   let completed = 0;
   for (let offset = 0; offset < options.inputs.length; offset += concurrency) {
     const batch = options.inputs.slice(offset, offset + concurrency);
-    const loaded = await Promise.all(batch.map(async (input) => options.load(input)));
-    for (const [index, output] of loaded.entries()) {
-      const input = batch[index];
-      if (input === undefined) throw new Error("bounded batch input is missing");
+    const loaded = await Promise.all(
+      batch.map(async (input) => ({ input, output: await options.load(input) })),
+    );
+    for (const { input, output } of loaded) {
       await options.consume(output, input);
       completed += 1;
     }

@@ -197,10 +197,10 @@ export async function prepareEnrichmentBootstrap(options: {
       }
     ).count;
     const baseRegistryRevision = index.enrichStore.registryRevision();
-    const baseRegistryCursor = registryCursorFromReceipt(log.latestReceipt());
+    const baseRegistryCursor = registryCursorFromReceipt(log.latestRegistryReceipt());
     const baseWork = inspectBaseWork(index.store.database, baseRegistryCursor);
     const advance = await index.advanceToLatest();
-    const registryCursor = registryCursorFromReceipt(log.latestReceipt());
+    const registryCursor = registryCursorFromReceipt(log.latestRegistryReceipt());
     const { contractHash } = await resolveEnrichmentTaxonomyAfterTail({
       log,
       baseSnapshot: snapshot,

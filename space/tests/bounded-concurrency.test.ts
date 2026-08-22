@@ -19,14 +19,31 @@ describe("bounded concurrency", () => {
     expect(progress).toEqual([[0, 0]]);
   });
 
+  it("reports an exact empty consume", async () => {
+    const progress: [number, number][] = [];
+    await consumeBatchesInOrder({
+      inputs: [],
+      concurrency: 2,
+      load: (value: number) => Promise.resolve(value),
+      consume: () => Promise.resolve(),
+      progress: (completed, total) => {
+        progress.push([completed, total]);
+        return Promise.resolve();
+      },
+    });
+    expect(progress).toEqual([[0, 0]]);
+  });
+
   it("rejects invalid concurrency before consuming input", async () => {
-    await expect(
-      consumeBatchesInOrder({
-        inputs: [1],
-        concurrency: 0,
-        load: (value) => Promise.resolve(value),
-        consume: () => Promise.resolve(),
-      }),
-    ).rejects.toThrow("positive safe integer");
+    for (const concurrency of [0, 1.5]) {
+      await expect(
+        consumeBatchesInOrder({
+          inputs: [1],
+          concurrency,
+          load: (value) => Promise.resolve(value),
+          consume: () => Promise.resolve(),
+        }),
+      ).rejects.toThrow("positive safe integer");
+    }
   });
 });

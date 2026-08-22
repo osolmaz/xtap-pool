@@ -616,6 +616,44 @@ describe("BucketLog", () => {
     expect(progress).toEqual([[1, 1]]);
   });
 
+  it("preserves the latest registry cursor when a newer receipt has no scan", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [
+            currentReceipt("registry-worker", "2026-08-12T12:01:00.000Z", {
+              after_name: "last-label",
+              scanned: 15_840,
+              total: 25_675,
+              complete: false,
+            }),
+          ],
+        },
+      ],
+      [],
+    );
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [currentReceipt("newer-worker", "2026-08-12T12:02:00.000Z")],
+        },
+      ],
+      [],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+
+    await state.log.hydrateMetadata(snapshot);
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("newer-worker");
+    expect(state.log.latestRegistryReceipt()).toMatchObject({
+      worker_id: "registry-worker",
+      registry_scan: { after_name: "last-label", scanned: 15_840 },
+    });
+  });
+
   it("selects a newer current receipt from a mixed segment", async () => {
     const state = log();
     await state.log.commitBatch(
@@ -812,7 +850,16 @@ describe("BucketLog", () => {
   });
 });
 
-function currentReceipt(workerId = "worker-1", finishedAt = "2026-08-12T12:01:00.000Z"): string {
+function currentReceipt(
+  workerId = "worker-1",
+  finishedAt = "2026-08-12T12:01:00.000Z",
+  registryScan?: {
+    after_name: string;
+    scanned: number;
+    total: number;
+    complete: boolean;
+  },
+): string {
   return JSON.stringify({
     started_at: "2026-08-12T12:00:00.000Z",
     finished_at: finishedAt,
@@ -830,6 +877,7 @@ function currentReceipt(workerId = "worker-1", finishedAt = "2026-08-12T12:01:00
     new_candidates: 0,
     new_approvals: 0,
     new_rejections: 0,
+    ...(registryScan === undefined ? {} : { registry_scan: registryScan }),
   });
 }
 
