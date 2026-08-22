@@ -7,11 +7,16 @@ import { createApp } from "./app.js";
 import type { AppReadiness } from "./app.js";
 import { loadConfig } from "./config.js";
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
+import type { BucketSnapshot } from "./bucket-log.js";
 import type { StorageState } from "./storage-state.js";
 import { checkStorageCredential, storageCredentialOk } from "./storage-token.js";
 import type { StorageCredentialReadiness } from "./storage-token.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
-import { DurableIndex } from "./durable-index.js";
+import {
+  createDurableIndexBucketReader,
+  durableIndexManifestSchema,
+  DurableIndex,
+} from "./durable-index.js";
 import { contractHashFor } from "./enrich-worker.js";
 import { ingestBatch, Mutex } from "./ingest.js";
 import { checkInferenceCredential, inferenceCredentialOk } from "./inference-token.js";
@@ -82,20 +87,16 @@ serve({ fetch: (request: Request) => activeFetch(request), port: config.port }, 
 ]);
 await waitForStorageCredential();
 
-const [membership, serviceAccounts] = await Promise.all([
-  PoolMembership.load({
-    log,
-    bootstrapMembers: config.allowedUsers,
-    bootstrapAdmins: config.poolAdmins,
-    now: () => new Date(),
-  }),
-  ServiceAccountRegistry.load({ log, now: () => new Date() }),
-]);
-let taxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
-if (taxonomy.error !== undefined) {
-  throw new Error(`enrichment taxonomy unavailable: ${taxonomy.error}`);
+const indexReader = createDurableIndexBucketReader(config.indexBucket, config.hfToken);
+const currentManifestBytes = await indexReader.readText("index/current.json");
+if (currentManifestBytes === undefined) throw new Error("durable index manifest is missing");
+const startupManifest = durableIndexManifestSchema.parse(
+  JSON.parse(currentManifestBytes) as unknown,
+);
+if (startupManifest.source.bucket !== config.rawBucket) {
+  throw new Error("durable index raw Bucket does not match the Space configuration");
 }
-const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
+const contractHash = startupManifest.projection.contract_hash;
 const index = await DurableIndex.restore({
   rawBucket: config.rawBucket,
   indexBucket: config.indexBucket,
@@ -106,6 +107,26 @@ const index = await DurableIndex.restore({
   contractHash,
 });
 const initialAdvance = await index.advanceToLatest();
+await primeStorageTextCache(initialAdvance.snapshot, "configuration-final");
+const [membership, serviceAccounts] = await Promise.all([
+  PoolMembership.load({
+    log,
+    bootstrapMembers: config.allowedUsers,
+    bootstrapAdmins: config.poolAdmins,
+    now: () => new Date(),
+  }),
+  ServiceAccountRegistry.load({ log, now: () => new Date() }),
+]);
+const finalTaxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
+if (finalTaxonomy.error !== undefined) {
+  throw new Error(`enrichment taxonomy unavailable after source advance: ${finalTaxonomy.error}`);
+}
+const finalContractHash = contractHashFor({ taxonomy: finalTaxonomy, model: config.llmModel });
+if (finalContractHash !== contractHash) {
+  throw new Error("enrichment contract changed after restoring the current source");
+}
+let taxonomy = finalTaxonomy;
+await Promise.all([membership.reload(), serviceAccounts.reload()]);
 const store = index.store;
 const enrichStore = index.enrichStore;
 const unitStore = new UnitStore(store.database, config.taxonomyVersion);
@@ -201,6 +222,25 @@ activeFetch = (request) => app.fetch(request);
 startCredentialRetryIfNeeded();
 startEnrichmentRefresh();
 
+async function primeStorageTextCache(snapshot: BucketSnapshot, stage: string): Promise<void> {
+  let reported = -1;
+  await log.primeTextCacheFromLatestWrites(snapshot, 16, (completed, total) => {
+    if (completed === total || completed - reported >= 100) {
+      console.log(JSON.stringify({ type: "startup-progress", stage, completed, total }));
+      reported = completed;
+    }
+    return Promise.resolve();
+  });
+}
+
+function hasConfigurationTail(base: BucketSnapshot, final: BucketSnapshot): boolean {
+  const baseKeys = new Set(base.files.map((file) => file.key));
+  return final.files.some(
+    (file) =>
+      !baseKeys.has(file.key) && (file.key.includes("/config/") || file.key.includes("/mixed/")),
+  );
+}
+
 function applyIndexStats(): void {
   const stats = index.stats();
   rebuilt = { files: stats.tweetFiles, tweets: stats.tweetRows };
@@ -232,16 +272,24 @@ async function refreshExternalEnrichment(): Promise<void> {
   if (!storageCredentialOk(storageCredential)) return;
   await mutex.run(async () => {
     if (!storageCredentialOk(storageCredential)) return;
-    const nextTaxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
-    if (nextTaxonomy.error !== undefined) {
-      throw new Error(`enrichment taxonomy refresh failed: ${nextTaxonomy.error}`);
+    const baseSnapshot = index.sourceSnapshot();
+    const discovered = await log.discoverSnapshot(baseSnapshot.files);
+    const configChanged = hasConfigurationTail(baseSnapshot, discovered.snapshot);
+    let nextTaxonomy = taxonomy;
+    if (configChanged) {
+      await primeStorageTextCache(discovered.snapshot, "configuration-refresh");
+      nextTaxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
+      if (nextTaxonomy.error !== undefined) {
+        throw new Error(`enrichment taxonomy refresh failed: ${nextTaxonomy.error}`);
+      }
+      const nextContractHash = contractHashFor({ taxonomy: nextTaxonomy, model: config.llmModel });
+      if (nextContractHash !== enrichStore.currentContractHash()) {
+        throw new Error("enrichment contract changed; publish a replacement durable index");
+      }
     }
-    const nextContractHash = contractHashFor({ taxonomy: nextTaxonomy, model: config.llmModel });
-    if (nextContractHash !== enrichStore.currentContractHash()) {
-      throw new Error("enrichment contract changed; publish a replacement durable index");
-    }
+    await index.advanceToDiscovered(discovered.revision, discovered.snapshot);
     taxonomy = nextTaxonomy;
-    await index.advanceToLatest();
+    if (configChanged) await Promise.all([membership.reload(), serviceAccounts.reload()]);
     applyIndexStats();
     storageState = { state: "ready" };
     readiness = buildReadiness();

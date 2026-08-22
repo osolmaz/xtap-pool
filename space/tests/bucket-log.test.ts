@@ -30,6 +30,9 @@ class MemoryBucket implements RawBucketClient {
   readonly files = new Map<string, Uint8Array>();
   readonly downloads: string[] = [];
   failUpload = false;
+  downloadDelayMs = 0;
+  activeDownloads = 0;
+  maxActiveDownloads = 0;
 
   async list(prefix: string): Promise<readonly BucketObject[]> {
     return [...this.files]
@@ -39,8 +42,17 @@ class MemoryBucket implements RawBucketClient {
 
   async download(key: string): Promise<Uint8Array | undefined> {
     this.downloads.push(key);
-    const content = this.files.get(key);
-    return content === undefined ? undefined : new Uint8Array(content);
+    this.activeDownloads += 1;
+    this.maxActiveDownloads = Math.max(this.maxActiveDownloads, this.activeDownloads);
+    try {
+      if (this.downloadDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.downloadDelayMs));
+      }
+      const content = this.files.get(key);
+      return content === undefined ? undefined : new Uint8Array(content);
+    } finally {
+      this.activeDownloads -= 1;
+    }
   }
 
   async upload(key: string, content: Uint8Array): Promise<void> {
@@ -143,6 +155,64 @@ describe("BucketLog", () => {
     expect(second.snapshot).toEqual(first.snapshot);
     state.bucket.files.set(segmentKey, new Uint8Array([1, 2, 3]));
     await expect(state.log.loadSegment(first.snapshot.files[0]!)).rejects.toThrow("size mismatch");
+  });
+
+  it("replays only the verified tail with bounded downloads in chronological order", async () => {
+    const state = log();
+    const base = bucketSegmentSchema.parse({
+      schema_version: 1,
+      transaction_id: "11111111-1111-4111-8111-111111111111",
+      created_at: "2026-08-12T12:00:00.000Z",
+      operations: [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          mode: "append",
+          lines: [legacyReceipt()],
+        },
+      ],
+    });
+    const baseKey = await state.log.putSegment(base);
+    const snapshot = await state.log.createSnapshot();
+    const laterKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        ...base,
+        transaction_id: "33333333-3333-4333-8333-333333333333",
+        created_at: "2026-08-12T12:02:00.000Z",
+        operations: [
+          {
+            path: "data/osolmaz/2026/08/tweets-2026-08-12.jsonl",
+            mode: "append",
+            lines: [JSON.stringify(makePooled({ id: "later" }))],
+          },
+        ],
+      }),
+    );
+    const earlierKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        ...base,
+        transaction_id: "22222222-2222-4222-8222-222222222222",
+        created_at: "2026-08-12T12:01:00.000Z",
+      }),
+    );
+    state.bucket.downloads.length = 0;
+    state.bucket.maxActiveDownloads = 0;
+    state.bucket.downloadDelayMs = 5;
+    const consumed: string[] = [];
+    const progress: [number, number][] = [];
+    await state.log.replayVerifiedTail(snapshot.snapshot.files, {
+      concurrency: 2,
+      progress: async (completed, total) => {
+        progress.push([completed, total]);
+      },
+      consume: async (file) => {
+        consumed.push(file.key);
+      },
+    });
+    expect(consumed).toEqual([earlierKey, laterKey]);
+    expect(state.bucket.downloads).not.toContain(baseKey);
+    expect(state.bucket.downloads.sort()).toEqual([earlierKey, laterKey].sort());
+    expect(state.bucket.maxActiveDownloads).toBe(2);
+    expect(progress).toEqual([[2, 2]]);
   });
 
   it("derives snapshot object identity when Bucket listings omit it", async () => {
@@ -327,6 +397,203 @@ describe("BucketLog", () => {
     await expect(state.log.readText("config/pool.json")).resolves.toBe("new");
   });
 
+  it("compares all mixed writes with dedicated configuration writes", async () => {
+    const state = log();
+    const oldMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [
+          { path: "config/labels.json", mode: "write", content: "old" },
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [legacyReceipt()],
+          },
+        ],
+      }),
+    );
+    const dedicated = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [{ path: "config/labels.json", mode: "write", content: "new" }],
+      }),
+    );
+    const laterMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000003",
+        created_at: "2026-08-12T12:20:00.000Z",
+        operations: [
+          { path: "config/pool.json", mode: "write", content: "other" },
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [legacyReceipt()],
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await expect(
+      state.log.readText("config/labels.json", {
+        snapshot,
+        concurrency: 4,
+        progress: async (completed, total) => {
+          progress.push([completed, total]);
+        },
+      }),
+    ).resolves.toBe("new");
+
+    expect(state.bucket.downloads).toContain(oldMixed);
+    expect(state.bucket.downloads).toContain(dedicated);
+    expect(state.bucket.downloads).toContain(laterMixed);
+    expect(progress.at(-1)).toEqual([3, 3]);
+  });
+
+  it("primes all configuration values with one bounded snapshot scan", async () => {
+    const state = log();
+    await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [{ path: "config/pool.json", mode: "write", content: "pool" }],
+      }),
+    );
+    await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [
+          { path: "config/labels.json", mode: "write", content: "labels" },
+          {
+            path: "config/service-accounts.json",
+            mode: "write",
+            content: "accounts",
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.primeTextCache(snapshot, 4, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
+    const downloads = state.bucket.downloads.length;
+
+    await expect(state.log.readText("config/pool.json")).resolves.toBe("pool");
+    await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
+    await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
+    expect(state.bucket.downloads).toHaveLength(downloads);
+    expect(progress.at(-1)).toEqual([2, 2]);
+  });
+
+  it("primes configuration from one complete anchor and its bounded tail", async () => {
+    const state = log();
+    const oldMixed = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [{ path: "config/pool.json", content: "old" }],
+    );
+    const anchor = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [
+        { path: "config/labels.json", content: "labels" },
+        { path: "config/pool.json", content: "pool" },
+        { path: "config/service-accounts.json", content: "accounts" },
+        { path: "enrichment/vocabulary.json", content: "vocabulary" },
+      ],
+    );
+    const tail = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [{ path: "config/pool.json", content: "new" }],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    state.bucket.downloadDelayMs = 5;
+    const progress: [number, number][] = [];
+
+    await state.log.primeTextCacheFromLatestWrites(snapshot, 2, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
+
+    expect(state.bucket.downloads).not.toContain(oldMixed);
+    expect(state.bucket.maxActiveDownloads).toBe(2);
+    expect(state.bucket.downloads).toContain(anchor);
+    expect(state.bucket.downloads).toContain(tail);
+    await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
+    await expect(state.log.readText("config/pool.json")).resolves.toBe("new");
+    await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
+    await expect(state.log.readText("enrichment/vocabulary.json")).resolves.toBe("vocabulary");
+    expect(progress.at(-1)).toEqual([2, 2]);
+  });
+
+  it("primes configuration from separate migrated configuration segments", async () => {
+    const state = log();
+    await state.log.commitBatch([], [{ path: "config/labels.json", content: "labels" }]);
+    await state.log.commitBatch([], [{ path: "config/pool.json", content: "pool" }]);
+    await state.log.commitBatch(
+      [],
+      [{ path: "config/service-accounts.json", content: "accounts" }],
+    );
+    await state.log.commitBatch(
+      [],
+      [{ path: "enrichment/vocabulary.json", content: "vocabulary" }],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.primeTextCacheFromLatestWrites(snapshot, 0, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
+
+    expect(state.bucket.downloads).toHaveLength(4);
+    expect(progress).toContainEqual([1, 4]);
+    await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
+    await expect(state.log.readText("config/pool.json")).resolves.toBe("pool");
+    await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
+    await expect(state.log.readText("enrichment/vocabulary.json")).resolves.toBe("vocabulary");
+
+    state.bucket.downloads.length = 0;
+    await state.log.primeTextCacheFromLatestWrites(snapshot, 99);
+    expect(state.bucket.downloads).toHaveLength(4);
+  });
+
+  it("rejects a configuration snapshot from another Bucket", async () => {
+    const state = log();
+
+    await expect(
+      state.log.primeTextCacheFromLatestWrites({
+        schema_version: 1,
+        bucket: "other/raw",
+        files: [],
+      }),
+    ).rejects.toThrow("Bucket snapshot source mismatch: other/raw");
+  });
+
+  it("fails closed when the configuration state is incomplete", async () => {
+    const state = log();
+    await state.log.commitBatch([], [{ path: "config/pool.json", content: "pool" }]);
+    const { snapshot } = await state.log.createSnapshot();
+
+    await expect(state.log.primeTextCacheFromLatestWrites(snapshot)).rejects.toThrow(
+      "complete Bucket configuration state is missing",
+    );
+  });
+
   it("rejects duplicate paths, unsupported paths, and malformed records", async () => {
     expect(() =>
       bucketSegmentSchema.parse({
@@ -391,6 +658,95 @@ describe("BucketLog", () => {
       { id: "56", contributed_by: "bob", pooled_at: retained.pooled_at },
     ]);
     expect(readCachedText("/missing", "config/pool.json")).toBeUndefined();
+  });
+
+  it("hydrates receipts from validated database membership without scanning unrelated mixed bodies", async () => {
+    const state = log();
+    const tweet = makePooled({ id: "54", contributed_by: "alice" });
+    const unrelatedMixed = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000001",
+        created_at: "2026-08-12T12:00:00.000Z",
+        operations: [
+          { path: "config/pool.json", mode: "write", content: "mixed" },
+          {
+            path: "data/alice/2026/08/tweets-2026-08-12.jsonl",
+            mode: "append",
+            lines: [JSON.stringify(tweet)],
+          },
+        ],
+      }),
+    );
+    const receiptKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        schema_version: 1,
+        transaction_id: "00000000-0000-4000-8000-000000000002",
+        created_at: "2026-08-12T12:10:00.000Z",
+        operations: [
+          {
+            path: "enrichment/receipts/2026-08-12.jsonl",
+            mode: "append",
+            lines: [currentReceipt()],
+          },
+        ],
+      }),
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    const receiptFile = snapshot.files.find((file) => file.key === receiptKey)!;
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.hydrateMetadata(snapshot, {
+      concurrency: 4,
+      receiptFiles: [receiptFile],
+      progress: async (completed, total) => {
+        progress.push([completed, total]);
+      },
+    });
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("worker-1");
+    expect(state.bucket.downloads).not.toContain(unrelatedMixed);
+    expect(state.bucket.downloads).toContain(receiptKey);
+    expect(progress).toEqual([[1, 1]]);
+  });
+
+  it("preserves the latest registry cursor when a newer receipt has no scan", async () => {
+    const state = log();
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [
+            currentReceipt("registry-worker", "2026-08-12T12:01:00.000Z", {
+              after_name: "last-label",
+              scanned: 15_840,
+              total: 25_675,
+              complete: false,
+            }),
+          ],
+        },
+      ],
+      [],
+    );
+    await state.log.commitBatch(
+      [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          lines: [currentReceipt("newer-worker", "2026-08-12T12:02:00.000Z")],
+        },
+      ],
+      [],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+
+    await state.log.hydrateMetadata(snapshot);
+
+    expect(state.log.latestReceipt()?.worker_id).toBe("newer-worker");
+    expect(state.log.latestRegistryReceipt()).toMatchObject({
+      worker_id: "registry-worker",
+      registry_scan: { after_name: "last-label", scanned: 15_840 },
+    });
   });
 
   it("selects a newer current receipt from a mixed segment", async () => {
@@ -522,6 +878,50 @@ describe("BucketLog", () => {
     await expect(state.log.readText("config/pool.json")).resolves.toBe("mixed");
   });
 
+  it("uses a loaded snapshot to skip unrelated historical bodies", async () => {
+    const state = log();
+    const receiptKey = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [currentReceipt()] }],
+      [],
+    );
+    const labels = JSON.stringify([{ name: "ai", description: "Artificial intelligence" }]);
+    const configKey = await state.log.commitBatch(
+      [],
+      [{ path: "config/labels.json", content: labels }],
+    );
+    const created = await state.log.createSnapshot();
+    const reader = {
+      list: state.bucket.list.bind(state.bucket),
+      download: state.bucket.download.bind(state.bucket),
+    };
+    const restored = new BucketLog(
+      "osolmaz/xtap-pool-data",
+      reader,
+      mkdtempSync(join(tmpdir(), "xtap-bucket-log-read-only-")),
+    );
+    await restored.loadSnapshot(created.revision);
+    state.bucket.downloads.length = 0;
+
+    await expect(restored.readText("config/labels.json")).resolves.toBe(labels);
+    expect(state.bucket.downloads).toContain(configKey);
+    expect(state.bucket.downloads).not.toContain(receiptKey);
+  });
+
+  it("fails closed when a read-only log attempts a write", async () => {
+    const state = log();
+    const restored = new BucketLog(
+      "osolmaz/xtap-pool-data",
+      {
+        list: state.bucket.list.bind(state.bucket),
+        download: state.bucket.download.bind(state.bucket),
+      },
+      mkdtempSync(join(tmpdir(), "xtap-bucket-log-read-only-")),
+    );
+    await expect(
+      restored.commitBatch([], [{ path: "config/pool.json", content: "forbidden" }]),
+    ).rejects.toThrow("raw Bucket is read-only");
+  });
+
   it("extracts only current receipts from receipt segments", () => {
     const segment = bucketSegmentSchema.parse({
       schema_version: 1,
@@ -545,7 +945,16 @@ describe("BucketLog", () => {
   });
 });
 
-function currentReceipt(workerId = "worker-1", finishedAt = "2026-08-12T12:01:00.000Z"): string {
+function currentReceipt(
+  workerId = "worker-1",
+  finishedAt = "2026-08-12T12:01:00.000Z",
+  registryScan?: {
+    after_name: string;
+    scanned: number;
+    total: number;
+    complete: boolean;
+  },
+): string {
   return JSON.stringify({
     started_at: "2026-08-12T12:00:00.000Z",
     finished_at: finishedAt,
@@ -563,6 +972,7 @@ function currentReceipt(workerId = "worker-1", finishedAt = "2026-08-12T12:01:00
     new_candidates: 0,
     new_approvals: 0,
     new_rejections: 0,
+    ...(registryScan === undefined ? {} : { registry_scan: registryScan }),
   });
 }
 

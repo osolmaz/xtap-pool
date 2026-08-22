@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   checkpointStore: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
   progress: {
+    checkpointClaims: vi.fn(() => Promise.resolve()),
+    outputClaims: vi.fn(() => Promise.resolve()),
+    checkpointReplay: vi.fn(() => Promise.resolve()),
     complete: vi.fn(() => Promise.resolve()),
     blocked: vi.fn(() => Promise.resolve()),
   },
@@ -22,6 +25,7 @@ vi.mock("../src/enrich-checkpoint.js", async (importOriginal) => {
   return {
     ...actual,
     createEnrichmentCheckpointStore: () => mocks.checkpointStore(),
+    createReadOnlyEnrichmentCheckpointStore: () => mocks.checkpointStore(),
   };
 });
 vi.mock("../src/bucket-log.js", async (importOriginal) => {
@@ -31,18 +35,19 @@ vi.mock("../src/bucket-log.js", async (importOriginal) => {
     BucketLog: class BucketLog {
       readonly fixture = true;
 
-      discoverSnapshot() {
-        return Promise.resolve({
-          revision: "b".repeat(64),
-          snapshot: {
-            schema_version: 1,
-            created_at: "2026-08-19T12:00:00.000Z",
-            files: [],
-          },
-        });
+      primeTextCacheFromLatestWrites(): Promise<void> {
+        return Promise.resolve();
+      }
+
+      replayVerifiedTail(
+        _known: readonly unknown[],
+        options: { progress?: (completed: number, total: number) => Promise<void> },
+      ) {
+        return options.progress?.(0, 0) ?? Promise.resolve();
       }
     },
     createRawBucketClient: () => ({}),
+    createRawBucketReader: () => ({}),
   };
 });
 vi.mock("../src/enrich-config.js", async (importOriginal) => {
@@ -57,6 +62,7 @@ vi.mock("../src/job-progress.js", () => ({
 }));
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
+import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
 import { runPlannedEnrichmentCommand } from "../src/enrich-planned-command.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
@@ -130,12 +136,15 @@ describe("planned enrichment runtime", () => {
       model: "model:provider",
     });
     const sourceSegments = canonicalPlanBytes([]);
+    const sourceRevision = sha256(
+      canonicalBytes({ schema_version: 1, bucket: "owner/raw", files: [] }),
+    );
     const current = createEnrichmentRunPlan({
       schema_version: 1,
       created_at: CREATED_AT,
       source: {
         bucket: "owner/raw",
-        snapshot_revision: "b".repeat(64),
+        snapshot_revision: sourceRevision,
         ordered_segments: {
           key: "objects/segments.json",
           sha256: digest(sourceSegments),
@@ -153,7 +162,7 @@ describe("planned enrichment runtime", () => {
         key: DATABASE_KEY,
         sha256: BASE_SHA,
         bytes: 1,
-        source_revision: "b".repeat(64),
+        source_revision: sourceRevision,
         source_segment_count: 0,
         receipt_count: 0,
         registry_revision: 1,

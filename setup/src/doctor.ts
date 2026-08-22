@@ -79,6 +79,7 @@ export type DoctorDeps = {
   ) => Promise<readonly string[]>;
   validateInferenceToken?: (token: string) => Promise<readonly string[]>;
   restartAndWait?: (spaceRepo: string) => Promise<void>;
+  storageStats?: (client: HubClient, rawBucket: string) => Promise<StorageSegmentStats>;
   inspectJob?: (
     client: HubClient,
     desired: DesiredEnrichmentJob,
@@ -114,13 +115,25 @@ export async function runDoctor(
   options: DoctorOptions,
   deps: DoctorDeps = {},
 ): Promise<DoctorReport> {
-  let current = await collectDoctorReport(client, username, options.spaceRepo, deps);
+  let cachedStorageStats: StorageSegmentStats | undefined;
+  const doctorDeps: DoctorDeps = {
+    ...deps,
+    storageStats: async (candidateClient, rawBucket) => {
+      cachedStorageStats ??= await (deps.storageStats ?? storageSegmentStats)(
+        candidateClient,
+        rawBucket,
+      );
+      return cachedStorageStats;
+    },
+  };
+  let current = await collectDoctorReport(client, username, options.spaceRepo, doctorDeps);
   if (options.fix && current.rawBucket !== undefined) {
-    await repairDoctorFindings(client, username, current, deps);
-    current = await collectDoctorReport(client, username, options.spaceRepo, deps);
+    await repairDoctorFindings(client, username, current, doctorDeps);
+    current = await collectDoctorReport(client, username, options.spaceRepo, doctorDeps);
   }
   if (options.canary === true) {
-    current = await runDoctorCanary(client, username, current, options, deps);
+    cachedStorageStats = undefined;
+    current = await runDoctorCanary(client, username, current, options, doctorDeps);
   }
   if (options.json) printJson(current);
   else printHuman(current);
@@ -159,7 +172,7 @@ export async function collectDoctorReport(
   if (capacityCheck !== undefined) checks.push(capacityCheck);
 
   await checkSecrets(client, manifest, checks);
-  await checkStorage(client, manifest, checks);
+  await checkStorage(client, manifest, checks, deps);
   await checkIndexBucket(client, manifest, checks);
   await checkEnrichmentJob(client, manifest, variables, checks, deps);
   await checkLiveHealth(manifest, checks, deps.fetchFn ?? fetch);
@@ -345,6 +358,7 @@ async function checkStorage(
   client: HubClient,
   manifest: PoolManifest,
   checks: DoctorCheck[],
+  deps: DoctorDeps,
 ): Promise<void> {
   try {
     const isPrivate = await getRepoPrivateState(client, {
@@ -361,7 +375,7 @@ async function checkStorage(
   }
 
   try {
-    const stats = await storageSegmentStats(client, manifest.rawBucket);
+    const stats = await (deps.storageStats ?? storageSegmentStats)(client, manifest.rawBucket);
     checks.push(
       stats.segments > 0
         ? pass("storage.segments", `Storage has ${String(stats.segments)} verified raw segments.`, {
@@ -1026,6 +1040,8 @@ async function confirmGeneratedSecretRepairDefault(
 }
 
 async function promptJobStorageTokenDefault(rawBucket: string): Promise<string> {
+  const configured = process.env["XTAP_JOB_HF_TOKEN"];
+  if (configured !== undefined && configured.length > 0) return configured;
   note(
     [
       `Paste a fine-grained token scoped to read/write ${rawBucket} and the configured index Bucket.`,
@@ -1038,6 +1054,8 @@ async function promptJobStorageTokenDefault(rawBucket: string): Promise<string> 
 }
 
 async function promptJobInferenceTokenDefault(): Promise<string> {
+  const configured = process.env["XTAP_JOB_INFERENCE_TOKEN"];
+  if (configured !== undefined && configured.length > 0) return configured;
   note(
     [
       "Paste a separate fine-grained token with the `Make calls to Inference Providers` permission.",
@@ -1097,7 +1115,6 @@ async function restartAndWaitDefault(spaceRepo: string): Promise<void> {
 
 type StorageSegmentStats = { segments: number; records: number; tweets: number };
 
-// eslint-disable-next-line complexity -- Segment inspection validates every structural and checksum boundary.
 async function storageSegmentStats(
   client: HubClient,
   rawBucket: string,
@@ -1117,9 +1134,8 @@ async function storageSegmentStats(
     if (asRecord(error)["statusCode"] === 404) return { segments: 0, records: 0, tweets: 0 };
     throw error;
   }
-  let records = 0;
-  let tweets = 0;
-  for (const path of paths) {
+  // eslint-disable-next-line complexity -- Each concurrent segment validation checks all structural and checksum boundaries.
+  const counts = await mapConcurrent(paths, 16, async (path) => {
     const blob = await downloadFile({
       repo: { type: "bucket", name: rawBucket },
       accessToken: client.accessToken,
@@ -1136,6 +1152,8 @@ async function storageSegmentStats(
     if (segment["schema_version"] !== 1 || !Array.isArray(segment["operations"])) {
       throw new Error(`invalid raw Bucket segment: ${path}`);
     }
+    let records = 0;
+    let tweets = 0;
     for (const operation of segment["operations"]) {
       const value = asRecord(operation);
       if (value["mode"] === "append" && Array.isArray(value["lines"])) {
@@ -1153,8 +1171,35 @@ async function storageSegmentStats(
         throw new Error(`invalid raw Bucket operation: ${path}`);
       }
     }
+    return { records, tweets };
+  });
+  return {
+    segments: paths.length,
+    records: counts.reduce((total, count) => total + count.records, 0),
+    tweets: counts.reduce((total, count) => total + count.tweets, 0),
+  };
+}
+
+async function mapConcurrent<Input, Output>(
+  inputs: readonly Input[],
+  concurrency: number,
+  operation: (input: Input) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(inputs.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < inputs.length) {
+      const index = next;
+      next += 1;
+      const input = inputs[index];
+      if (input === undefined) throw new Error("bounded map input is missing");
+      results[index] = await operation(input);
+    }
   }
-  return { segments: paths.length, records, tweets };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, inputs.length) }, async () => worker()),
+  );
+  return results;
 }
 
 function hubOptions(client: HubClient): { hubUrl?: string; fetch?: typeof fetch } {

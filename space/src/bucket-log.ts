@@ -16,6 +16,7 @@ import {
 } from "@xtap-pool/shared";
 import type { EnrichReceipt, PooledTweet } from "@xtap-pool/shared";
 
+import { consumeBatchesInOrder } from "./bounded-concurrency.js";
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
@@ -102,11 +103,38 @@ export type SourceCounts = Readonly<Record<SourceKind, number>>;
 export type BucketObject = { key: string; oid?: string; size: number };
 
 type ReceiptMetadata = { receipt: EnrichReceipt; segmentCreatedAtMs: number };
+type ReceiptSelection = {
+  latest: ReceiptMetadata | undefined;
+  latestRegistry: ReceiptMetadata | undefined;
+};
 
-export type RawBucketClient = {
+export type RawBucketReader = {
   list(prefix: string): Promise<readonly BucketObject[]>;
   download(key: string): Promise<Uint8Array | undefined>;
+};
+
+export type RawBucketClient = RawBucketReader & {
   upload(key: string, content: Uint8Array): Promise<void>;
+};
+
+export type BucketReadProgress = (completed: number, total: number) => Promise<void>;
+
+export type ReadTextOptions = {
+  snapshot?: BucketSnapshot;
+  concurrency?: number;
+  progress?: BucketReadProgress;
+};
+
+export type HydrateMetadataOptions = {
+  concurrency?: number;
+  receiptFiles?: readonly BucketSnapshotFile[];
+  progress?: BucketReadProgress;
+};
+
+export type ReplayVerifiedTailOptions = {
+  concurrency: number;
+  progress?: BucketReadProgress;
+  consume(file: BucketSnapshotFile, segment: BucketSegment): Promise<void>;
 };
 
 export type StorageLog = Pick<
@@ -124,6 +152,31 @@ export function receiptsInSegment(segment: BucketSegment): EnrichReceipt[] {
     }
   }
   return receipts;
+}
+
+function hasRegistryCursor(receipt: EnrichReceipt): boolean {
+  return (
+    receipt.registry_scan !== undefined &&
+    receipt.registry_scan.scanned > 0 &&
+    typeof receipt.registry_scan.after_name === "string"
+  );
+}
+
+function newerReceipt(
+  left: ReceiptMetadata | undefined,
+  right: ReceiptMetadata | undefined,
+): ReceiptMetadata | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return right.receipt.finished_at > left.receipt.finished_at ? right : left;
+}
+
+function earliestReceiptSegment(selection: ReceiptSelection): number | undefined {
+  const values = [
+    selection.latest?.segmentCreatedAtMs,
+    selection.latestRegistry?.segmentCreatedAtMs,
+  ].filter((value): value is number => value !== undefined);
+  return values.length === 0 ? undefined : Math.min(...values);
 }
 
 const legacyReceiptSchema = z
@@ -150,7 +203,7 @@ const legacyEnrichmentRowSchema = z
   })
   .loose();
 
-export function createRawBucketClient(rawBucket: string, accessToken: string): RawBucketClient {
+export function createRawBucketReader(rawBucket: string, accessToken: string): RawBucketReader {
   const repo = { type: "bucket", name: rawBucket } as const;
   return {
     async list(prefix): Promise<readonly BucketObject[]> {
@@ -175,6 +228,13 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
       const blob = await downloadFile({ repo, accessToken, path: key, xet: false });
       return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
     },
+  };
+}
+
+export function createRawBucketClient(rawBucket: string, accessToken: string): RawBucketClient {
+  const repo = { type: "bucket", name: rawBucket } as const;
+  return {
+    ...createRawBucketReader(rawBucket, accessToken),
     async upload(key, content): Promise<void> {
       await uploadFile({
         repo,
@@ -189,13 +249,16 @@ export function createRawBucketClient(rawBucket: string, accessToken: string): R
 /** Immutable transaction log and exact snapshots in a private Hugging Face Bucket. */
 export class BucketLog {
   private lastReceipt: EnrichReceipt | undefined;
+  private lastRegistryReceipt: EnrichReceipt | undefined;
   private lastCreatedAtMs = 0;
+  private textCacheComplete = false;
+  private readonly textValues = new Map<string, string>();
   private readonly knownFiles = new Map<string, BucketSnapshotFile>();
   private readonly newlyVerifiedSegments = new Map<string, BucketSegment>();
 
   constructor(
     readonly name: string,
-    private readonly client: RawBucketClient,
+    private readonly client: RawBucketReader | RawBucketClient,
     private readonly cacheDir: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -246,7 +309,7 @@ export class BucketLog {
     const key = `${SEGMENT_PREFIX}/${category}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(time).padStart(13, "0")}-${segment.transaction_id}-${digest}.json.gz`;
     const compressed = new Uint8Array(await gzipAsync(raw, { level: 9 }));
     const existing = await this.client.download(key);
-    if (existing === undefined) await this.client.upload(key, compressed);
+    if (existing === undefined) await this.requireWriter().upload(key, compressed);
     await this.verifyStoredSegment(key, raw);
     this.knownFiles.set(key, {
       key,
@@ -325,7 +388,7 @@ export class BucketLog {
     const revision = sha256(raw);
     const key = `${SNAPSHOT_PREFIX}/${revision}.json`;
     const existing = await this.client.download(key);
-    if (existing === undefined) await this.client.upload(key, raw);
+    if (existing === undefined) await this.requireWriter().upload(key, raw);
     const stored = await this.client.download(key);
     if (stored === undefined || !equalBytes(stored, raw)) {
       throw new Error(`Bucket snapshot read-back mismatch: ${key}`);
@@ -363,6 +426,56 @@ export class BucketLog {
     return { file, segment: await this.loadSegment(file) };
   }
 
+  /** Verify and consume only objects after an exact known snapshot. */
+  // eslint-disable-next-line complexity -- Tail replay checks append-only membership, listed identity, content identity, and bounded application order.
+  async replayVerifiedTail(
+    known: readonly BucketSnapshotFile[],
+    options: ReplayVerifiedTailOptions,
+  ): Promise<void> {
+    const previous = new Map(known.map((file) => [file.key, file]));
+    if (previous.size !== known.length)
+      throw new Error("known Bucket snapshot contains duplicates");
+    const objects = [...(await this.client.list(SEGMENT_PREFIX))];
+    const listed = new Set(objects.map((object) => object.key));
+    const deleted = known.find((file) => !listed.has(file.key));
+    if (deleted !== undefined) {
+      throw new Error(`raw Bucket source segments were deleted: ${deleted.key}`);
+    }
+    const tail: BucketObject[] = [];
+    for (const object of objects) {
+      const old = previous.get(object.key);
+      if (old === undefined) {
+        tail.push(object);
+        continue;
+      }
+      if (old.size !== object.size) {
+        throw new Error(`Bucket object size changed while discovering tail: ${object.key}`);
+      }
+      if (object.oid !== undefined && old.listed_oid === object.oid) continue;
+      let verified: BucketSnapshotFile;
+      try {
+        verified = await this.verifyListedObject(object);
+      } catch (error) {
+        throw new Error(`raw Bucket source segment changed: ${object.key}`, { cause: error });
+      }
+      this.newlyVerifiedSegments.delete(object.key);
+      if (verified.oid !== old.oid) {
+        throw new Error(`raw Bucket source segment changed: ${object.key}`);
+      }
+    }
+    tail.sort((left, right) => compareSegmentKeys(left.key, right.key));
+    await consumeBatchesInOrder({
+      inputs: tail,
+      concurrency: options.concurrency,
+      load: async (object) => {
+        const file = await this.verifyListedObject(object);
+        return { file, segment: await this.loadSegment(file) };
+      },
+      consume: async ({ file, segment }) => options.consume(file, segment),
+      ...(options.progress === undefined ? {} : { progress: options.progress }),
+    });
+  }
+
   // eslint-disable-next-line complexity -- Segment loading verifies every persisted identity and encoding boundary.
   async loadSegment(file: BucketSnapshotFile): Promise<BucketSegment> {
     if (segmentHash(file.key) !== file.content_sha256) {
@@ -397,20 +510,103 @@ export class BucketLog {
     return segment;
   }
 
-  async readText(path: string): Promise<string | undefined> {
-    assertConfigPath(path);
-    const { snapshot } = await this.discoverSnapshot();
-    let latest: { order: string; value: string } | undefined;
-    for (const file of snapshot.files.filter(
-      (item) => item.key.includes("/config/") || item.key.includes("/mixed/"),
-    )) {
-      const segment = await this.loadSegment(file);
-      for (const operation of segment.operations) {
-        if (operation.mode !== "write" || operation.path !== path) continue;
-        const order = `${segment.created_at}\0${segment.transaction_id}\0${file.key}`;
-        if (latest === undefined || order > latest.order)
-          latest = { order, value: operation.content };
+  async primeTextCache(
+    snapshot: BucketSnapshot,
+    concurrency = 16,
+    progress?: BucketReadProgress,
+  ): Promise<void> {
+    const files = snapshot.files.filter(
+      (file) => file.key.includes("/config/") || file.key.includes("/mixed/"),
+    );
+    let completed = 0;
+    if (files.length === 0) await progress?.(0, 0);
+    const entries = await mapConcurrent(
+      files,
+      Math.max(1, Math.min(16, concurrency)),
+      async (file) => {
+        const segment = await this.loadSegment(file);
+        completed += 1;
+        await progress?.(completed, files.length);
+        return { file, segment };
+      },
+    );
+    this.rememberTextEntries(entries);
+  }
+
+  // eslint-disable-next-line complexity -- Reverse scanning validates source identity and all configuration paths before cache activation.
+  async primeTextCacheFromLatestWrites(
+    snapshot: BucketSnapshot,
+    concurrency = 16,
+    progress?: BucketReadProgress,
+  ): Promise<void> {
+    const validated = bucketSnapshotSchema.parse(snapshot);
+    if (validated.bucket !== this.name) {
+      throw new Error(`Bucket snapshot source mismatch: ${validated.bucket}`);
+    }
+    this.rememberFiles(validated.files);
+    const files = validated.files
+      .filter((file) => file.key.includes("/config/") || file.key.includes("/mixed/"))
+      .sort((left, right) => compareSegmentKeys(right.key, left.key));
+    const values = new Map<string, string>();
+    const limit = Math.max(1, Math.min(16, concurrency));
+    let completed = 0;
+    for (let start = 0; start < files.length; start += limit) {
+      const batch = files.slice(start, start + limit);
+      const entries = await mapConcurrent(batch, limit, async (file) => ({
+        file,
+        segment: await this.loadSegment(file),
+      }));
+      completed += entries.length;
+      for (const { segment } of entries) {
+        for (const operation of segment.operations) {
+          if (operation.mode === "write" && !values.has(operation.path)) {
+            values.set(operation.path, operation.content);
+          }
+        }
       }
+      if (RAW_CONFIG_PATHS.every((path) => values.has(path))) break;
+      await progress?.(completed, files.length);
+    }
+    if (!RAW_CONFIG_PATHS.every((path) => values.has(path))) {
+      throw new Error("complete Bucket configuration state is missing");
+    }
+    for (const [path, content] of values) this.rememberText(path, content);
+    this.textCacheComplete = true;
+    await progress?.(completed, completed);
+  }
+
+  // eslint-disable-next-line complexity -- Exact snapshot text reconstruction validates source, anchor, and bounded mixed-file order.
+  async readText(path: string, options: ReadTextOptions = {}): Promise<string | undefined> {
+    assertConfigPath(path);
+    if (this.textCacheComplete && options.snapshot === undefined) return this.textValues.get(path);
+    const snapshot =
+      options.snapshot === undefined
+        ? (await this.discoverSnapshot()).snapshot
+        : bucketSnapshotSchema.parse(options.snapshot);
+    if (snapshot.bucket !== this.name) {
+      throw new Error(`Bucket snapshot source mismatch: ${snapshot.bucket}`);
+    }
+    this.rememberFiles(snapshot.files);
+    const concurrency = Math.max(1, Math.min(16, options.concurrency ?? 1));
+    const dedicated = snapshot.files.filter((file) => file.key.includes("/config/"));
+    const dedicatedSegments = await mapConcurrent(dedicated, concurrency, async (file) => ({
+      file,
+      segment: await this.loadSegment(file),
+    }));
+    let latest = latestTextWrite(dedicatedSegments, path);
+    const mixed = snapshot.files.filter((file) => file.key.includes("/mixed/"));
+    let completed = dedicated.length;
+    const total = dedicated.length + mixed.length;
+    await options.progress?.(completed, total);
+    const mixedSegments = await mapConcurrent(mixed, concurrency, async (file) => {
+      const segment = await this.loadSegment(file);
+      completed += 1;
+      await options.progress?.(completed, total);
+      return { file, segment };
+    });
+    const mixedLatest = latestTextWrite(mixedSegments, path);
+    if (mixedLatest !== undefined && (latest === undefined || mixedLatest.order > latest.order)) {
+      latest = mixedLatest;
     }
     return latest?.value;
   }
@@ -420,38 +616,85 @@ export class BucketLog {
     this.rememberText(path, content);
   }
 
-  async hydrateMetadata(snapshot: BucketSnapshot): Promise<void> {
-    let latest = await this.latestReceiptInFiles(
-      snapshot.files.filter((file) => file.key.includes("/receipt/")),
-    );
+  // eslint-disable-next-line complexity -- Metadata hydration supports validated database membership and the legacy fallback.
+  async hydrateMetadata(
+    snapshot: BucketSnapshot,
+    options: HydrateMetadataOptions = {},
+  ): Promise<void> {
+    const concurrency = Math.max(1, Math.min(16, options.concurrency ?? 1));
+    if (options.receiptFiles !== undefined) {
+      const snapshotByKey = new Map(snapshot.files.map((file) => [file.key, file]));
+      const receiptFiles = options.receiptFiles.map((file) => {
+        const known = snapshotByKey.get(file.key);
+        if (known === undefined || JSON.stringify(known) !== JSON.stringify(file)) {
+          throw new Error(`receipt source is outside the validated snapshot: ${file.key}`);
+        }
+        return known;
+      });
+      const selection = await this.latestReceiptInFiles(
+        receiptFiles,
+        concurrency,
+        options.progress,
+      );
+      this.lastReceipt = selection.latest?.receipt;
+      this.lastRegistryReceipt = selection.latestRegistry?.receipt;
+      return;
+    }
+
+    let completed = 0;
+    const dedicated = snapshot.files.filter((file) => file.key.includes("/receipt/"));
+    const dedicatedSelection = await this.latestReceiptInFiles(dedicated, concurrency, (done) => {
+      completed = done;
+      return Promise.resolve();
+    });
+    const cutoff = earliestReceiptSegment(dedicatedSelection);
     const mixedFiles = snapshot.files.filter(
       (file) =>
         file.key.includes("/mixed/") &&
-        (latest === undefined || segmentCreatedAtMs(file.key) >= latest.segmentCreatedAtMs),
+        (cutoff === undefined || segmentCreatedAtMs(file.key) >= cutoff),
     );
-    const mixedLatest = await this.latestReceiptInFiles(mixedFiles);
-    if (
-      mixedLatest !== undefined &&
-      (latest === undefined || mixedLatest.receipt.finished_at > latest.receipt.finished_at)
-    ) {
-      latest = mixedLatest;
-    }
-    this.lastReceipt = latest?.receipt;
+    const total = dedicated.length + mixedFiles.length;
+    await options.progress?.(completed, total);
+    const mixedSelection = await this.latestReceiptInFiles(
+      mixedFiles,
+      concurrency,
+      (done) => options.progress?.(completed + done, total) ?? Promise.resolve(),
+    );
+    this.lastReceipt = newerReceipt(dedicatedSelection.latest, mixedSelection.latest)?.receipt;
+    this.lastRegistryReceipt = newerReceipt(
+      dedicatedSelection.latestRegistry,
+      mixedSelection.latestRegistry,
+    )?.receipt;
   }
 
   private async latestReceiptInFiles(
     files: readonly BucketSnapshotFile[],
-  ): Promise<ReceiptMetadata | undefined> {
+    concurrency: number,
+    progress?: BucketReadProgress,
+  ): Promise<ReceiptSelection> {
+    let completed = 0;
+    const observed = await mapConcurrent(
+      files,
+      Math.max(1, Math.min(16, concurrency)),
+      async (file): Promise<readonly ReceiptMetadata[]> => {
+        const segment = await this.loadSegment(file);
+        completed += 1;
+        await progress?.(completed, files.length);
+        return receiptsInSegment(segment).map((receipt) => ({
+          receipt,
+          segmentCreatedAtMs: segmentCreatedAtMs(file.key),
+        }));
+      },
+    );
     let latest: ReceiptMetadata | undefined;
-    for (const file of files) {
-      const segment = await this.loadSegment(file);
-      for (const receipt of receiptsInSegment(segment)) {
-        if (latest === undefined || receipt.finished_at > latest.receipt.finished_at) {
-          latest = { receipt, segmentCreatedAtMs: segmentCreatedAtMs(file.key) };
-        }
+    let latestRegistry: ReceiptMetadata | undefined;
+    for (const item of observed.flat()) {
+      latest = newerReceipt(latest, item);
+      if (hasRegistryCursor(item.receipt)) {
+        latestRegistry = newerReceipt(latestRegistry, item);
       }
     }
-    return latest;
+    return { latest, latestRegistry };
   }
 
   applySegment(segment: BucketSegment, store: TweetStore, enrich: EnrichStore): SourceCounts {
@@ -467,6 +710,13 @@ export class BucketLog {
         if (this.lastReceipt === undefined || receipt.finished_at > this.lastReceipt.finished_at) {
           this.lastReceipt = receipt;
         }
+        if (
+          hasRegistryCursor(receipt) &&
+          (this.lastRegistryReceipt === undefined ||
+            receipt.finished_at > this.lastRegistryReceipt.finished_at)
+        ) {
+          this.lastRegistryReceipt = receipt;
+        }
       });
     }
     return counts;
@@ -474,6 +724,17 @@ export class BucketLog {
 
   latestReceipt(): EnrichReceipt | undefined {
     return this.lastReceipt;
+  }
+
+  latestRegistryReceipt(): EnrichReceipt | undefined {
+    return this.lastRegistryReceipt;
+  }
+
+  private requireWriter(): RawBucketClient {
+    if (!("upload" in this.client) || typeof this.client.upload !== "function") {
+      throw new Error("raw Bucket is read-only");
+    }
+    return this.client;
   }
 
   private nextCreatedAt(): string {
@@ -538,9 +799,24 @@ export class BucketLog {
   }
 
   private rememberText(path: string, content: string): void {
+    this.textValues.set(path, content);
     const local = this.localPath(path);
     mkdirSync(dirname(local), { recursive: true });
     writeFileSync(local, content);
+  }
+
+  private rememberTextEntries(
+    entries: readonly { file: BucketSnapshotFile; segment: BucketSegment }[],
+  ): void {
+    const ordered = [...entries].sort(compareTextEntries);
+    const values = new Map<string, string>();
+    for (const { segment } of ordered) {
+      for (const operation of segment.operations) {
+        if (operation.mode === "write") values.set(operation.path, operation.content);
+      }
+    }
+    for (const [path, content] of values) this.rememberText(path, content);
+    this.textCacheComplete = true;
   }
 
   private localPath(path: string): string {
@@ -720,6 +996,42 @@ function segmentCreatedAtMs(key: string): number {
   return Number(value);
 }
 
+function compareTextEntries(
+  left: { file: BucketSnapshotFile; segment: BucketSegment },
+  right: { file: BucketSnapshotFile; segment: BucketSegment },
+): number {
+  const time = left.segment.created_at.localeCompare(right.segment.created_at);
+  if (time !== 0) return time;
+  const transaction = left.segment.transaction_id.localeCompare(right.segment.transaction_id);
+  return transaction !== 0 ? transaction : left.file.key.localeCompare(right.file.key);
+}
+
+function compareSegmentKeys(left: string, right: string): number {
+  const leftMatch = SEGMENT_KEY.exec(left);
+  const rightMatch = SEGMENT_KEY.exec(right);
+  if (leftMatch === null || rightMatch === null) throw new Error("invalid Bucket segment key");
+  const leftOrder = `${leftMatch[5] ?? ""}\0${leftMatch[6] ?? ""}\0${left}`;
+  const rightOrder = `${rightMatch[5] ?? ""}\0${rightMatch[6] ?? ""}\0${right}`;
+  return leftOrder.localeCompare(rightOrder);
+}
+
+function latestTextWrite(
+  entries: readonly { file: BucketSnapshotFile; segment: BucketSegment }[],
+  path: string,
+): { order: string; value: string } | undefined {
+  let latest: { order: string; value: string } | undefined;
+  for (const { file, segment } of entries) {
+    for (const operation of segment.operations) {
+      if (operation.mode !== "write" || operation.path !== path) continue;
+      const order = `${segment.created_at}\0${segment.transaction_id}\0${file.key}`;
+      if (latest === undefined || order > latest.order) {
+        latest = { order, value: operation.content };
+      }
+    }
+  }
+  return latest;
+}
+
 // eslint-disable-next-line complexity -- The key parser verifies all independent path and identity components.
 function segmentHash(key: string): string {
   const match = SEGMENT_KEY.exec(key);
@@ -733,6 +1045,28 @@ function segmentHash(key: string): string {
     throw new Error(`invalid Bucket segment key: ${key}`);
   }
   return digest;
+}
+
+async function mapConcurrent<Input, Output>(
+  inputs: readonly Input[],
+  concurrency: number,
+  operation: (input: Input) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(inputs.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < inputs.length) {
+      const index = next;
+      next += 1;
+      const input = inputs[index];
+      if (input === undefined) throw new Error("bounded map input is missing");
+      results[index] = await operation(input);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, inputs.length) }, async () => worker()),
+  );
+  return results;
 }
 
 function emptyCounts(): Record<SourceKind, number> {

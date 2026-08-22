@@ -3,7 +3,7 @@ import { z } from "zod";
 import { labelConfigSchema } from "@xtap-pool/shared";
 import type { LabelConfig } from "@xtap-pool/shared";
 
-import type { StorageLog } from "./bucket-log.js";
+import type { ReadTextOptions, StorageLog } from "./bucket-log.js";
 
 /** Bucket logical path of the preset taxonomy: an array of `{name, description}`. */
 export const LABELS_CONFIG_PATH = "config/labels.json";
@@ -67,16 +67,21 @@ const labelsFileSchema = z.array(labelConfigSchema).min(1);
  * The taxonomy version comes from the environment (`TAXONOMY_VERSION`).
  */
 export async function loadEnrichTaxonomy(
-  log: StorageLog,
+  log: Pick<StorageLog, "readText">,
   version: number,
+  readOptions?: ReadTextOptions,
 ): Promise<EnrichTaxonomy> {
   let raw: string | undefined;
   try {
-    raw = await log.readText(LABELS_CONFIG_PATH);
+    raw = await log.readText(LABELS_CONFIG_PATH, readOptions);
   } catch (error) {
     return { labels: DEFAULT_TAXONOMY, version, source: "default", error: errorMessage(error) };
   }
   if (raw === undefined) return { labels: DEFAULT_TAXONOMY, version, source: "default" };
+  return parseEnrichTaxonomyText(raw, version);
+}
+
+export function parseEnrichTaxonomyText(raw: string, version: number): EnrichTaxonomy {
   try {
     const labels = labelsFileSchema.parse(JSON.parse(raw));
     return { labels, version, source: "bucket" };

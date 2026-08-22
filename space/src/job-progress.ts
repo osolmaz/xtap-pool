@@ -14,6 +14,9 @@ const TRACKS = [
   "index-restore",
   "source-replay",
   "working-copy",
+  "checkpoint-claims",
+  "output-claims",
+  "checkpoint-replay",
   "enrichment-queue",
   "enrichment-successful",
   "enrichment-blocked",
@@ -140,6 +143,48 @@ export class XTapJobProgress {
         unit: "copies",
       },
       completed,
+    );
+  }
+
+  async checkpointClaims(completed: number, total: number): Promise<void> {
+    await this.update(
+      "checkpoint-claims",
+      {
+        planId: `checkpoint-claims-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
+        status: completed === total ? "completed" : "running",
+        completed,
+        total,
+        unit: "claims",
+      },
+      completed === total,
+    );
+  }
+
+  async outputClaims(completed: number, total: number): Promise<void> {
+    await this.update(
+      "output-claims",
+      {
+        planId: `output-claims-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
+        status: completed === total ? "completed" : "running",
+        completed,
+        total,
+        unit: "claims",
+      },
+      completed === total,
+    );
+  }
+
+  async checkpointReplay(completed: number, total: number): Promise<void> {
+    await this.update(
+      "checkpoint-replay",
+      {
+        planId: `checkpoint-replay-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
+        status: completed === total ? "completed" : "running",
+        completed,
+        total,
+        unit: "segments",
+      },
+      completed === total,
     );
   }
 

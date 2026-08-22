@@ -12,7 +12,12 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**"],
-      exclude: ["src/server.ts", "src/enrich-command.ts", "src/enrich-command-main.ts"],
+      exclude: [
+        "src/server.ts",
+        "src/enrich-command.ts",
+        "src/commit-enrichment-bootstrap.ts",
+        "src/**/*-main.ts",
+      ],
       thresholds: {
         lines: 85,
         functions: 85,

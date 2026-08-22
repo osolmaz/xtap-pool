@@ -14,16 +14,26 @@ import {
 import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
 
 import { activateEnrichmentRun, resolveActiveEnrichmentRun } from "./enrich-active-run.js";
+import { mapBatchesInOrder } from "./bounded-concurrency.js";
 import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
-import { BucketLog, createRawBucketClient } from "./bucket-log.js";
+import {
+  bucketSnapshotSchema,
+  BucketLog,
+  canonicalBytes,
+  createRawBucketClient,
+  createRawBucketReader,
+  sha256,
+} from "./bucket-log.js";
 import type { BucketSegment, BucketSnapshotFile } from "./bucket-log.js";
 import { loadConfig } from "./config.js";
 import { durableIndexManifestSchema, DurableIndex } from "./durable-index.js";
 import type { DurableIndexManifest } from "./durable-index.js";
-import { loadEnrichTaxonomy } from "./enrich-config.js";
+import { resolveEnrichmentTaxonomyForContract } from "./enrich-taxonomy-contract.js";
 import {
   createEnrichmentCheckpointStore,
+  createReadOnlyEnrichmentCheckpointStore,
   EnrichmentCheckpointAdapter,
+  withCheckpointClaimPrefetch,
 } from "./enrich-checkpoint.js";
 import { enrichmentBatchResultSchema, publishEnrichmentBatchResult } from "./enrich-batch.js";
 import { canonicalPlanBytes, parseEnrichmentRunPlan } from "./enrich-run-plan.js";
@@ -40,7 +50,6 @@ import {
 } from "./enrich-state.js";
 import { EnrichStore } from "./enrich-store.js";
 import {
-  contractHashFor,
   createExactHubVerifier,
   createFreeLabelJudge,
   createRouterLlmClient,
@@ -86,54 +95,128 @@ export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
 ): Promise<void> {
   const commandStartedAtMs = Date.now();
-  const config = loadConfig(env);
-  if (!config.enrichEnabled || config.inferenceToken === undefined) {
+  const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
+  const config = loadConfig(
+    restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
+  );
+  if (restoreOnly) {
+    if (config.inferenceToken !== undefined) {
+      throw new Error("restore-only validation must not receive INFERENCE_TOKEN");
+    }
+  } else if (!config.enrichEnabled || config.inferenceToken === undefined) {
     throw new Error("planned enrichment requires ENRICH_ENABLED and INFERENCE_TOKEN");
   }
-  const checkpointStore = createEnrichmentCheckpointStore({
-    bucket: config.indexBucket,
-    accessToken: config.hfToken,
-  });
-  const activeRun = await resolveActiveEnrichmentRun(checkpointStore);
+  const emitRestoreProgress = (
+    stage: string,
+    completed: number,
+    total: number,
+    unit: "items" | "bytes" = "items",
+  ): void => {
+    if (!restoreOnly) return;
+    console.log(
+      JSON.stringify({
+        type: "restore-progress",
+        stage,
+        completed,
+        total,
+        unit,
+        elapsed_ms: Date.now() - commandStartedAtMs,
+      }),
+    );
+  };
+  const baseCheckpointStore = restoreOnly
+    ? createReadOnlyEnrichmentCheckpointStore({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
+      })
+    : createEnrichmentCheckpointStore({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
+      });
+  const activeRun = await resolveActiveEnrichmentRun(baseCheckpointStore);
+  emitRestoreProgress("active-run", 1, 1);
   const runId = activeRun.run_id;
   const planSha256 = activeRun.plan_sha256;
   const planPath = `${RUN_PREFIX}/${runId}/plan.json`;
-  const planBytes = await requiredObject(checkpointStore, planPath);
+  const planBytes = await requiredObject(baseCheckpointStore, planPath);
   const parsedPlan: unknown = JSON.parse(Buffer.from(planBytes).toString("utf8"));
   const { plan } = parseEnrichmentRunPlan(parsedPlan, planSha256);
   if (plan.run_id !== runId) throw new Error("active enrichment run ID mismatch");
+  emitRestoreProgress("plan", 1, 1);
   if (plan.contract.worker_revision !== requireEnvironment(env, "XTAP_SOURCE_REVISION")) {
     throw new Error("planned enrichment worker revision does not match running code");
   }
-  const workBytes = await requiredObject(checkpointStore, plan.work.key);
-  verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
-  const sourceSegmentsBytes = await requiredObject(
-    checkpointStore,
-    plan.source.ordered_segments.key,
-  );
-  verifyObject(
-    sourceSegmentsBytes,
-    plan.source.ordered_segments.bytes,
-    plan.source.ordered_segments.sha256,
-    "ordered source segments",
-  );
-  const sourceSegments = parseSourceSegments(sourceSegmentsBytes);
   const workPath = join(config.dataDir, "planned", `${runId}.sqlite`);
   await mkdir(dirname(workPath), { recursive: true });
   await rm(workPath, { force: true });
-  await writeFile(workPath, workBytes);
+  {
+    const workBytes = await requiredObject(baseCheckpointStore, plan.work.key);
+    verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
+    emitRestoreProgress("work-plan", workBytes.byteLength, plan.work.bytes, "bytes");
+    await writeFile(workPath, workBytes);
+  }
+  let sourceSegments: BucketSnapshotFile[];
+  {
+    const sourceSegmentsBytes = await requiredObject(
+      baseCheckpointStore,
+      plan.source.ordered_segments.key,
+    );
+    verifyObject(
+      sourceSegmentsBytes,
+      plan.source.ordered_segments.bytes,
+      plan.source.ordered_segments.sha256,
+      "ordered source segments",
+    );
+    sourceSegments = parseSourceSegments(sourceSegmentsBytes);
+  }
+  const sourceSnapshot = bucketSnapshotSchema.parse({
+    schema_version: 1,
+    bucket: plan.source.bucket,
+    files: sourceSegments,
+  });
+  if (sha256(canonicalBytes(sourceSnapshot)) !== plan.source.snapshot_revision) {
+    throw new Error("ordered source segments do not match the plan snapshot");
+  }
+  emitRestoreProgress("source", sourceSegments.length, sourceSegments.length);
 
   const log = new BucketLog(
     config.rawBucket,
-    createRawBucketClient(config.rawBucket, config.hfToken),
+    restoreOnly
+      ? createRawBucketReader(config.rawBucket, config.hfToken)
+      : createRawBucketClient(config.rawBucket, config.hfToken),
     join(config.dataDir, "planned-raw-cache"),
   );
-  const taxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
-  if (taxonomy.error !== undefined) throw new Error(`taxonomy unavailable: ${taxonomy.error}`);
-  const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
-  if (contractHash !== plan.contract.contract_sha256) {
-    throw new Error("planned enrichment contract does not match running code");
-  }
+  const { taxonomy, contractHash } = await resolveEnrichmentTaxonomyForContract({
+    log,
+    snapshot: sourceSnapshot,
+    taxonomyVersion: config.taxonomyVersion,
+    llmModel: config.llmModel,
+    expectedContractHash: plan.contract.contract_sha256,
+    concurrency: restoreOnly ? 16 : 4,
+    progress: (completed, total) => {
+      emitRestoreProgress("taxonomy", completed, total);
+      return Promise.resolve();
+    },
+  });
+  emitRestoreProgress("contract", 1, 1);
+  const progress = restoreOnly
+    ? null
+    : await XTapJobProgress.create({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
+        sourceRevision: plan.source.snapshot_revision,
+        contractHash,
+        env: { ...env, XTAP_PROGRESS_RUN_ID: runId },
+      });
+  const checkpointStore = withCheckpointClaimPrefetch(baseCheckpointStore, {
+    runId,
+    prefix: RUN_PREFIX,
+    concurrency: 16,
+    progress: async (completed, total) => {
+      emitRestoreProgress("checkpoint-claims", completed, total);
+      await progress?.checkpointClaims(completed, total);
+    },
+  });
   const tweetStore = new TweetStore(workPath);
   const enrichStore = new EnrichStore(
     tweetStore.database,
@@ -161,6 +244,7 @@ export async function runPlannedEnrichmentCommand(
   });
   const restored = await coordinator.restoreLatest(adapter);
   if (restored === null) throw new Error("planned enrichment has no bootstrap checkpoint");
+  emitRestoreProgress("checkpoint", restored.evidence.sequence, restored.evidence.sequence);
   let state = adapter.state;
   if (state.publication.state === "pending" || state.publication.state === "building") {
     const currentIndexBytes = await requiredObject(checkpointStore, "index/current.json");
@@ -171,16 +255,24 @@ export async function runPlannedEnrichmentCommand(
       throw new Error("active enrichment plan base index is no longer current");
     }
   }
+  const quickCheck = tweetStore.database.pragma("quick_check") as { quick_check: string }[];
+  if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
+    throw new Error("planned work database SQLite quick_check failed");
+  }
   const ordinals = readQueueOrdinals(tweetStore.database);
+  const queueBaselineOrdinals = readQueueBaselineOrdinals(tweetStore.database);
   const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
   const registryNames = readRegistryNames(tweetStore.database);
-  const progress = await XTapJobProgress.create({
-    bucket: config.indexBucket,
-    accessToken: config.hfToken,
-    sourceRevision: plan.source.snapshot_revision,
-    contractHash,
-    env: { ...env, XTAP_PROGRESS_RUN_ID: runId },
-  });
+  if (ordinals.size !== plan.work.queue_total || queueIdentities.size !== plan.work.queue_total) {
+    throw new Error("planned work queue count does not match the plan");
+  }
+  if (queueBaselineOrdinals.size !== plan.work.queue_baseline_done) {
+    throw new Error("planned work queue baseline does not match the plan");
+  }
+  if (registryNames.length + plan.work.registry_baseline_scanned !== plan.work.registry_total) {
+    throw new Error("planned work registry count does not match the plan");
+  }
+  emitRestoreProgress("database", 1, 1);
 
   const commitOutputs = async (outputs: readonly DurableWorkerOutput[]): Promise<void> => {
     const resultSha256: string[] = [];
@@ -226,31 +318,57 @@ export async function runPlannedEnrichmentCommand(
   };
   const commitOutput = (output: DurableWorkerOutput): Promise<void> => commitOutputs([output]);
 
-  await reconcileOrphanOutputs({
+  const replayEvidence = await restoreAndReconcileWorkerOutputs({
     log,
     sourceSegments,
     checkpointStore,
     runId,
     state: () => state,
-    commitOutputs,
+    ...(restoreOnly ? {} : { commitOutputs }),
     registryNames,
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
-    queueBaselineOrdinal: plan.work.queue_baseline_done,
+    queueBaselineOrdinals,
     queueIdentities,
     contractHash,
-  });
-  await restoreClaimedWorkerOutputs({
-    log,
-    sourceSegments,
-    checkpointStore,
-    runId,
-    state,
-    queueBaselineOrdinal: plan.work.queue_baseline_done,
-    registryBaselineOrdinal: plan.work.registry_baseline_scanned,
     tweetStore,
     enrichStore,
+    outputClaimsProgress: async (completed, total) => {
+      emitRestoreProgress("output-claims", completed, total);
+      await progress?.outputClaims(completed, total);
+    },
+    replayProgress: async (completed, total) => {
+      emitRestoreProgress("checkpoint-replay", completed, total);
+      await progress?.checkpointReplay(completed, total);
+    },
   });
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
+  const restoredQuickCheck = tweetStore.database.pragma("quick_check") as {
+    quick_check: string;
+  }[];
+  if (restoredQuickCheck.length !== 1 || restoredQuickCheck[0]?.quick_check !== "ok") {
+    throw new Error("restored work database SQLite quick_check failed");
+  }
+  if (restoreOnly) {
+    console.log(
+      JSON.stringify({
+        type: "restore-complete",
+        run_id: runId,
+        plan_sha256: planSha256,
+        sequence: state.sequence,
+        queue_done: state.queue.done,
+        queue_total: state.queue.total,
+        registry_next_ordinal: state.registry.next_ordinal,
+        registry_total: state.registry.total,
+        claimed_segments: replayEvidence.claimedSegments,
+        orphan_segments: replayEvidence.orphanSegments,
+        provider_calls: 0,
+        elapsed_ms: Date.now() - commandStartedAtMs,
+      }),
+    );
+    tweetStore.close();
+    return;
+  }
+  if (progress === null) throw new Error("planned enrichment progress is unavailable");
 
   const commitPublicationBoundary = async (
     publicationState: "uploaded" | "verified" | "published",
@@ -330,8 +448,10 @@ export async function runPlannedEnrichmentCommand(
       return;
     }
 
+    const inferenceToken = config.inferenceToken;
+    if (inferenceToken === undefined) throw new Error("planned enrichment token is missing");
     const llm = createRouterLlmClient({
-      hfToken: config.inferenceToken,
+      hfToken: inferenceToken,
       model: config.llmModel,
       requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
       ...(config.enrichInputTokenUsd === undefined || config.enrichOutputTokenUsd === undefined
@@ -410,7 +530,7 @@ export async function runPlannedEnrichmentCommand(
         ...new Set([
           ...sourceSegments.map((file) => file.key),
           ...(await readRunOutputKeys(checkpointStore, runId, state, {
-            queue: plan.work.queue_baseline_done,
+            queue: queueBaselineOrdinals,
             registry: plan.work.registry_baseline_scanned,
           })),
         ]),
@@ -660,6 +780,13 @@ function readQueueOrdinals(db: Database.Database): ReadonlyMap<string, number> {
   return new Map(rows.map((row) => [row.unit_id, row.ordinal]));
 }
 
+function readQueueBaselineOrdinals(db: Database.Database): ReadonlySet<number> {
+  const rows = db
+    .prepare("SELECT ordinal FROM worker_queue_plan WHERE initial_status = 'done'")
+    .all() as { ordinal: number }[];
+  return new Set(rows.map((row) => row.ordinal));
+}
+
 type FrozenQueueIdentity = {
   inputHash: string;
   taxonomyVersion: number;
@@ -749,35 +876,73 @@ function applyAttemptEvents(
   return next;
 }
 
-async function restoreClaimedWorkerOutputs(options: {
+async function restoreAndReconcileWorkerOutputs(options: {
   log: BucketLog;
   sourceSegments: readonly BucketSnapshotFile[];
   checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
   runId: string;
-  state: EnrichmentCheckpointState;
-  queueBaselineOrdinal: number;
+  state: () => EnrichmentCheckpointState;
+  commitOutputs?: (outputs: readonly DurableWorkerOutput[]) => Promise<void>;
+  registryNames: readonly string[];
   registryBaselineOrdinal: number;
+  queueBaselineOrdinals: ReadonlySet<number>;
+  queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>;
+  contractHash: string;
   tweetStore: TweetStore;
   enrichStore: EnrichStore;
-}): Promise<void> {
-  const keys = [
-    ...(await readRunOutputKeys(options.checkpointStore, options.runId, options.state, {
-      queue: options.queueBaselineOrdinal,
+  outputClaimsProgress: (completed: number, total: number) => Promise<void>;
+  replayProgress: (completed: number, total: number) => Promise<void>;
+}): Promise<{ claimedSegments: number; orphanSegments: number }> {
+  const claimedKeys = await readRunOutputKeys(
+    options.checkpointStore,
+    options.runId,
+    options.state(),
+    {
+      queue: options.queueBaselineOrdinals,
       registry: options.registryBaselineOrdinal,
-    })),
-  ].sort((left, right) => rawSegmentCreatedAt(left).localeCompare(rawSegmentCreatedAt(right)));
-  if (keys.length === 0) return;
-  const discovered = await options.log.discoverSnapshot(options.sourceSegments);
-  const files = new Map(
-    [...options.sourceSegments, ...discovered.snapshot.files].map((file) => [file.key, file]),
+    },
+    { concurrency: 16, progress: options.outputClaimsProgress },
   );
-  const segments: BucketSegment[] = [];
-  for (const key of keys) {
-    const file = files.get(key);
-    if (file === undefined) throw new Error(`claimed raw output segment is missing: ${key}`);
-    segments.push(await options.log.loadSegment(file));
+  const claimed = new Set(claimedKeys);
+  const seen = new Set<string>();
+  const sourceFiles = new Map(options.sourceSegments.map((file) => [file.key, file]));
+  let claimedSegments = 0;
+  let orphanSegments = 0;
+  for (const key of claimedKeys) {
+    const file = sourceFiles.get(key);
+    if (file === undefined) continue;
+    const segment = await options.log.loadSegment(file);
+    applyClaimedWorkerSegments([segment], options.log, options.tweetStore, options.enrichStore);
+    seen.add(key);
+    claimedSegments += 1;
   }
-  applyClaimedWorkerSegments(segments, options.log, options.tweetStore, options.enrichStore);
+  await options.log.replayVerifiedTail(options.sourceSegments, {
+    concurrency: 16,
+    progress: options.replayProgress,
+    consume: async (file, segment) => {
+      if (claimed.has(file.key)) {
+        applyClaimedWorkerSegments([segment], options.log, options.tweetStore, options.enrichStore);
+        seen.add(file.key);
+        claimedSegments += 1;
+        return;
+      }
+      const outputs = outputsFromSegment(
+        segment,
+        options.registryNames,
+        options.state().registry.next_ordinal - options.registryBaselineOrdinal,
+        options.queueIdentities,
+        options.contractHash,
+      );
+      if (outputs.length === 0) return;
+      orphanSegments += 1;
+      if (options.commitOutputs === undefined) return;
+      await options.commitOutputs(outputs.map((output) => withSegmentKey(output, file.key)));
+      applyClaimedWorkerSegments([segment], options.log, options.tweetStore, options.enrichStore);
+    },
+  });
+  const missing = claimedKeys.find((key) => !seen.has(key));
+  if (missing !== undefined) throw new Error(`claimed raw output segment is missing: ${missing}`);
+  return { claimedSegments, orphanSegments };
 }
 
 export function applyClaimedWorkerSegments(
@@ -787,45 +952,6 @@ export function applyClaimedWorkerSegments(
   enrichStore: EnrichStore,
 ): void {
   for (const segment of segments) log.applySegment(segment, tweetStore, enrichStore);
-}
-
-async function reconcileOrphanOutputs(options: {
-  log: BucketLog;
-  sourceSegments: readonly BucketSnapshotFile[];
-  checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
-  runId: string;
-  state: () => EnrichmentCheckpointState;
-  commitOutputs: (outputs: readonly DurableWorkerOutput[]) => Promise<void>;
-  registryNames: readonly string[];
-  registryBaselineOrdinal: number;
-  queueBaselineOrdinal: number;
-  queueIdentities: ReadonlyMap<string, FrozenQueueIdentity>;
-  contractHash: string;
-}): Promise<void> {
-  const processed = new Set(
-    await readRunOutputKeys(options.checkpointStore, options.runId, options.state(), {
-      queue: options.queueBaselineOrdinal,
-      registry: options.registryBaselineOrdinal,
-    }),
-  );
-  const known = new Set(options.sourceSegments.map((file) => file.key));
-  const discovered = await options.log.discoverSnapshot(options.sourceSegments);
-  const newFiles = discovered.snapshot.files.filter(
-    (file) => !known.has(file.key) && !processed.has(file.key),
-  );
-  for (const file of newFiles) {
-    const segment = await options.log.loadSegment(file);
-    const outputs = outputsFromSegment(
-      segment,
-      options.registryNames,
-      options.state().registry.next_ordinal - options.registryBaselineOrdinal,
-      options.queueIdentities,
-      options.contractHash,
-    );
-    if (outputs.length > 0) {
-      await options.commitOutputs(outputs.map((output) => withSegmentKey(output, file.key)));
-    }
-  }
 }
 
 type RecoveredOutput =
@@ -924,20 +1050,33 @@ export async function readRunOutputKeys(
   store: ReturnType<typeof createEnrichmentCheckpointStore>,
   runId: string,
   state: EnrichmentCheckpointState,
-  baseline: { queue: number; registry: number },
+  baseline: { queue: ReadonlySet<number>; registry: number },
+  options: {
+    concurrency: number;
+    progress?: (completed: number, total: number) => Promise<void>;
+  } = { concurrency: 1 },
 ): Promise<readonly string[]> {
   validateOutputBaselines(state, baseline);
   const prefix = `${RUN_PREFIX}/${runId}/batches/`;
-  const keys = await store.list(prefix);
+  const keys = (await store.list(prefix)).filter((key) => key.endsWith("/result.json"));
+  const results = await mapBatchesInOrder({
+    inputs: keys,
+    concurrency: options.concurrency,
+    operation: async (key) => {
+      const bytes = await requiredObject(store, key);
+      const value: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
+      return {
+        result: enrichmentBatchResultSchema.parse(value),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      };
+    },
+    ...(options.progress === undefined ? {} : { progress: options.progress }),
+  });
   const raw = new Set<string>();
   const completedQueueOrdinals = new Set<number>();
   let nextRegistryOrdinal = baseline.registry;
   const chains = new Map<OutputKind, { sequence: number; sha256: string | null }>();
-  for (const key of keys) {
-    if (!key.endsWith("/result.json")) continue;
-    const bytes = await requiredObject(store, key);
-    const value: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
-    const result = enrichmentBatchResultSchema.parse(value);
+  for (const { result, sha256: resultSha256 } of results) {
     if (result.run_id !== runId) throw new Error("batch result run ID mismatch");
     const frontierKind: OutputKind = result.phase === "queue" ? "enrichment" : result.phase;
     if (result.sequence > state.outputs[frontierKind].sequence) continue;
@@ -951,21 +1090,21 @@ export async function readRunOutputKeys(
     validateClaimedResultOrdinals({
       result,
       state,
-      queueBaselineOrdinal: baseline.queue,
+      queueBaselineOrdinals: baseline.queue,
       completedQueueOrdinals,
       nextRegistryOrdinal,
     });
     if (result.phase === "registry") nextRegistryOrdinal += result.ordinals.length;
     chains.set(frontierKind, {
       sequence: result.sequence,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha256: resultSha256,
     });
     if (result.raw_segment_sha256 !== rawSegmentSha256(result.raw_segment_key)) {
       throw new Error("batch result raw segment SHA-256 mismatch");
     }
     raw.add(result.raw_segment_key);
   }
-  if (completedQueueOrdinals.size !== state.queue.done - baseline.queue) {
+  if (completedQueueOrdinals.size !== state.queue.done - baseline.queue.size) {
     throw new Error("queue result ordinals do not match the checkpoint bitmap");
   }
   if (nextRegistryOrdinal !== state.registry.next_ordinal) {
@@ -984,13 +1123,9 @@ export async function readRunOutputKeys(
 // eslint-disable-next-line complexity -- Baseline validation checks numeric bounds and every imported completion bit.
 function validateOutputBaselines(
   state: EnrichmentCheckpointState,
-  baseline: { queue: number; registry: number },
+  baseline: { queue: ReadonlySet<number>; registry: number },
 ): void {
-  if (
-    !Number.isSafeInteger(baseline.queue) ||
-    baseline.queue < 0 ||
-    baseline.queue > state.queue.done
-  ) {
+  if (baseline.queue.size > state.queue.done) {
     throw new Error("queue output baseline is invalid");
   }
   if (
@@ -1000,7 +1135,10 @@ function validateOutputBaselines(
   ) {
     throw new Error("registry output baseline is invalid");
   }
-  for (let ordinal = 0; ordinal < baseline.queue; ordinal += 1) {
+  for (const ordinal of baseline.queue) {
+    if (!Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= state.queue.total) {
+      throw new Error("queue output baseline is invalid");
+    }
     if (!isBitmapCompleted(state.completed_bitmap, ordinal)) {
       throw new Error("queue output baseline is not completed in the checkpoint bitmap");
     }
@@ -1011,7 +1149,7 @@ function validateOutputBaselines(
 function validateClaimedResultOrdinals(options: {
   result: z.infer<typeof enrichmentBatchResultSchema>;
   state: EnrichmentCheckpointState;
-  queueBaselineOrdinal: number;
+  queueBaselineOrdinals: ReadonlySet<number>;
   completedQueueOrdinals: Set<number>;
   nextRegistryOrdinal: number;
 }): void {
@@ -1019,7 +1157,7 @@ function validateClaimedResultOrdinals(options: {
   if (result.phase === "queue") {
     for (const ordinal of result.ordinals) {
       if (
-        ordinal < options.queueBaselineOrdinal ||
+        options.queueBaselineOrdinals.has(ordinal) ||
         ordinal >= state.queue.total ||
         !isBitmapCompleted(state.completed_bitmap, ordinal) ||
         options.completedQueueOrdinals.has(ordinal)

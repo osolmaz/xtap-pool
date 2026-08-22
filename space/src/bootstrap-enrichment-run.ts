@@ -29,7 +29,7 @@ export type CompactWorkResult = {
   orderedSegments: Uint8Array;
 };
 
-type RegistryImportCursor = {
+export type RegistryImportCursor = {
   afterName: string | null;
   scanned: number;
   observedAt: string;
@@ -332,7 +332,7 @@ function validateRegistryImportCursor(
   }
 }
 
-function registryCandidateIsPending(
+export function registryCandidateIsPending(
   candidate: { name: string; first_observed_at: string },
   cursor: RegistryImportCursor | undefined,
 ): boolean {

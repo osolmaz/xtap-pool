@@ -15,6 +15,8 @@
     "doctor": "npm run --silent build --workspace shared && npm run --silent build --workspace setup && npm run --silent start --workspace setup -- doctor",
     "index:bootstrap": "npm run build --workspace shared && npm run build --workspace space && npm run index:bootstrap --workspace space",
     "enrich:bootstrap-run": "npm run build --workspace shared && npm run build --workspace space && npm run enrich:bootstrap-run --workspace space",
+    "enrich:bootstrap-shadow": "npm run build --workspace shared && npm run build --workspace space && npm run enrich:bootstrap-shadow --workspace space",
+    "enrich:restore-canary": "npm run build --workspace shared && npm run build --workspace space && npm run enrich:restore-canary --workspace space",
     "storage:import": "npm run build --workspace shared && npm run build --workspace space && npm run storage:import --workspace space --",
     "storage:verify": "npm run build --workspace shared && npm run build --workspace space && npm run storage:verify --workspace space --",
     "format": "prettier --check .",

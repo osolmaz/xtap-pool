@@ -45,6 +45,9 @@ describe("XTapJobProgress", () => {
     await progress.restoreDatabase(100, 100);
     await progress.sourceReplay({ revision: "c".repeat(64), completed: 12, total: 12 });
     await progress.workingCopy(true);
+    await progress.checkpointClaims(10, 10);
+    await progress.outputClaims(8, 8);
+    await progress.checkpointReplay(6, 6);
     await progress.queue({ pending: 0, running: 0, retrying: 0, blocked: 2, done: 8 });
     await progress.registryScan(20, 20);
     await progress.receiptPublished();
@@ -57,7 +60,7 @@ describe("XTapJobProgress", () => {
     const stored = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
     if (stored === null) throw new Error("progress snapshot is missing");
     expect(stored.snapshot.state).toBe("waiting");
-    expect(stored.snapshot.tracks).toHaveLength(13);
+    expect(stored.snapshot.tracks).toHaveLength(16);
     expect(
       stored.snapshot.tracks
         .filter(
@@ -98,6 +101,38 @@ describe("XTapJobProgress", () => {
       },
     );
     expect(resumed.snapshot.sequence).toBeGreaterThan(stored.snapshot.sequence);
+  });
+
+  it("starts a new progress plan when the durable replay frontier grows", async () => {
+    const objects = new MemoryObjects();
+    const progress = await XTapJobProgress.create({
+      bucket: objects.bucketId,
+      accessToken: "test",
+      sourceRevision: "a".repeat(40),
+      contractHash: "b".repeat(64),
+      env: { JOB_ID: "job-growing-frontier" },
+      objectStore: objects,
+    });
+
+    await progress.checkpointClaims(1, 1);
+    await progress.checkpointClaims(2, 2);
+    await progress.outputClaims(0, 0);
+    await progress.outputClaims(1, 1);
+    await progress.checkpointReplay(0, 0);
+    await progress.checkpointReplay(1, 1);
+
+    const stored = await new ObjectProgressStore(objects).loadLatest("xtap-enrichment-v1");
+    expect(
+      stored?.snapshot.tracks.find((track) => track.key === "checkpoint-claims"),
+    ).toMatchObject({ status: "completed", completed: 2, total: 2 });
+    expect(stored?.snapshot.tracks.find((track) => track.key === "output-claims")).toMatchObject({
+      status: "completed",
+      completed: 1,
+      total: 1,
+    });
+    expect(
+      stored?.snapshot.tracks.find((track) => track.key === "checkpoint-replay"),
+    ).toMatchObject({ status: "completed", completed: 1, total: 1 });
   });
 
   it("publishes active, waiting, blocked, and resumed phase transitions", async () => {

@@ -1,15 +1,17 @@
 import { Buffer } from "node:buffer";
 
-import type {
-  CheckpointAdapter,
-  CheckpointBoundary,
-  CheckpointManifest,
-  CheckpointObjectStore,
-  CheckpointPayload,
-  JsonValue,
+import {
+  checkpointClaimPrefix,
+  type CheckpointAdapter,
+  type CheckpointBoundary,
+  type CheckpointManifest,
+  type CheckpointObjectStore,
+  type CheckpointPayload,
+  type JsonValue,
 } from "@osolmaz/hf-job-control";
 import { downloadFile, HubApiError, listFiles, uploadFile } from "@huggingface/hub";
 
+import { mapBatchesInOrder } from "./bounded-concurrency.js";
 import {
   enrichmentCheckpointMetadataSchema,
   serializeEnrichmentMetadata,
@@ -31,21 +33,8 @@ export function createEnrichmentCheckpointStore(options: {
   bucket: string;
   accessToken: string;
 }): CheckpointObjectStore {
+  const reader = createCheckpointReader(options);
   const repo = { type: "bucket", name: options.bucket } as const;
-  const read = async (path: string): Promise<Uint8Array | null> => {
-    try {
-      const blob = await downloadFile({
-        repo,
-        accessToken: options.accessToken,
-        path,
-        xet: false,
-      });
-      return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
-    } catch (error) {
-      if (error instanceof HubApiError && error.statusCode === 404) return null;
-      throw error;
-    }
-  };
   const upload = async (path: string, bytes: Uint8Array): Promise<void> => {
     await uploadFile({
       repo,
@@ -55,10 +44,9 @@ export function createEnrichmentCheckpointStore(options: {
     });
   };
   return {
-    bucketId: options.bucket,
-    read,
+    ...reader,
     async writeImmutable(path, bytes): Promise<void> {
-      const existing = await read(path);
+      const existing = await reader.read(path);
       if (existing !== null) {
         if (!Buffer.from(existing).equals(Buffer.from(bytes))) {
           throw new Error(`immutable checkpoint object differs: ${path}`);
@@ -66,13 +54,95 @@ export function createEnrichmentCheckpointStore(options: {
         return;
       }
       await upload(path, bytes);
-      const stored = await read(path);
+      const stored = await reader.read(path);
       if (stored === null || !Buffer.from(stored).equals(Buffer.from(bytes))) {
         throw new Error(`checkpoint object read-back mismatch: ${path}`);
       }
     },
     async writePointerHint(path, bytes): Promise<void> {
       await upload(path, bytes);
+    },
+  };
+}
+
+export function createReadOnlyEnrichmentCheckpointStore(options: {
+  bucket: string;
+  accessToken: string;
+}): CheckpointObjectStore {
+  return {
+    ...createCheckpointReader(options),
+    writeImmutable(): Promise<void> {
+      return Promise.reject(new Error("checkpoint store is read-only"));
+    },
+    writePointerHint(): Promise<void> {
+      return Promise.resolve();
+    },
+  };
+}
+
+export function withCheckpointClaimPrefetch(
+  store: CheckpointObjectStore,
+  options: {
+    runId: string;
+    prefix: string;
+    concurrency: number;
+    progress?: (completed: number, total: number) => Promise<void>;
+  },
+): CheckpointObjectStore {
+  const claimsPrefix = checkpointClaimPrefix(options.prefix, options.runId);
+  const cache = new Map<string, Uint8Array>();
+  return {
+    bucketId: store.bucketId,
+    async read(path): Promise<Uint8Array | null> {
+      const cached = cache.get(path);
+      return cached === undefined ? store.read(path) : Uint8Array.from(cached);
+    },
+    async list(prefix): Promise<readonly string[]> {
+      const keys = await store.list(prefix);
+      if (prefix !== claimsPrefix) return keys;
+      await mapBatchesInOrder({
+        inputs: keys,
+        concurrency: options.concurrency,
+        operation: async (key) => {
+          if (cache.has(key)) return;
+          const value = await store.read(key);
+          if (value === null) throw new Error(`checkpoint claim disappeared: ${key}`);
+          cache.set(key, Uint8Array.from(value));
+        },
+        ...(options.progress === undefined ? {} : { progress: options.progress }),
+      });
+      return keys;
+    },
+    async writeImmutable(path, bytes): Promise<void> {
+      await store.writeImmutable(path, bytes);
+      if (path.startsWith(claimsPrefix)) cache.set(path, Uint8Array.from(bytes));
+    },
+    writePointerHint(path, bytes): Promise<void> {
+      return store.writePointerHint(path, bytes);
+    },
+  };
+}
+
+function createCheckpointReader(options: {
+  bucket: string;
+  accessToken: string;
+}): Pick<CheckpointObjectStore, "bucketId" | "read" | "list"> {
+  const repo = { type: "bucket", name: options.bucket } as const;
+  return {
+    bucketId: options.bucket,
+    async read(path): Promise<Uint8Array | null> {
+      try {
+        const blob = await downloadFile({
+          repo,
+          accessToken: options.accessToken,
+          path,
+          xet: false,
+        });
+        return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
+      } catch (error) {
+        if (error instanceof HubApiError && error.statusCode === 404) return null;
+        throw error;
+      }
     },
     async list(prefix): Promise<readonly string[]> {
       const paths: string[] = [];

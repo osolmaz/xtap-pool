@@ -33,9 +33,21 @@ const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111
 class MemoryObjects implements CheckpointObjectStore {
   readonly bucketId = "memory/results";
   readonly files = new Map<string, Uint8Array>();
+  readDelayMs = 0;
+  activeReads = 0;
+  maxActiveReads = 0;
 
-  read(path: string): Promise<Uint8Array | null> {
-    return Promise.resolve(this.files.get(path) ?? null);
+  async read(path: string): Promise<Uint8Array | null> {
+    this.activeReads += 1;
+    this.maxActiveReads = Math.max(this.maxActiveReads, this.activeReads);
+    try {
+      if (this.readDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.readDelayMs));
+      }
+      return this.files.get(path) ?? null;
+    } finally {
+      this.activeReads -= 1;
+    }
   }
 
   writeImmutable(path: string, bytes: Uint8Array): Promise<void> {
@@ -273,7 +285,10 @@ describe("planned enrichment recovery", () => {
     let wrongHashState = markQueueCompleted(state(), [1]);
     wrongHashState = advanceOutputFrontier(wrongHashState, "enrichment", wrongHash.sha256);
     await expect(
-      readRunOutputKeys(wrongHashStore, "run", wrongHashState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(wrongHashStore, "run", wrongHashState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("raw segment SHA-256 mismatch");
 
     const duplicateStore = new MemoryObjects();
@@ -311,7 +326,10 @@ describe("planned enrichment recovery", () => {
     duplicateState = advanceOutputFrontier(duplicateState, "enrichment", first.sha256);
     duplicateState = advanceOutputFrontier(duplicateState, "enrichment", second.sha256);
     await expect(
-      readRunOutputKeys(duplicateStore, "run", duplicateState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(duplicateStore, "run", duplicateState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("queue result ordinal");
   });
 
@@ -348,7 +366,10 @@ describe("planned enrichment recovery", () => {
         published.sha256,
       );
       await expect(
-        readRunOutputKeys(store, "run", checkpoint, { queue: 1, registry: 0 }),
+        readRunOutputKeys(store, "run", checkpoint, {
+          queue: new Set([0]),
+          registry: 0,
+        }),
       ).resolves.toEqual([SEGMENT]);
     }
   });
@@ -373,7 +394,10 @@ describe("planned enrichment recovery", () => {
     let registryState = advanceRegistryCursor(state(), ["candidate"]);
     registryState = advanceOutputFrontier(registryState, "registry", registryResult.sha256);
     await expect(
-      readRunOutputKeys(registryStore, "run", registryState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(registryStore, "run", registryState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("contiguous checkpoint prefix");
 
     const attemptStore = new MemoryObjects();
@@ -394,7 +418,10 @@ describe("planned enrichment recovery", () => {
     });
     const attemptState = advanceOutputFrontier(state(), "attempt", attemptResult.sha256);
     await expect(
-      readRunOutputKeys(attemptStore, "run", attemptState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(attemptStore, "run", attemptState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("outside the frozen queue");
 
     const receiptStore = new MemoryObjects();
@@ -415,12 +442,116 @@ describe("planned enrichment recovery", () => {
     });
     const receiptState = advanceOutputFrontier(state(), "receipt", receiptResult.sha256);
     await expect(
-      readRunOutputKeys(receiptStore, "run", receiptState, { queue: 1, registry: 0 }),
+      readRunOutputKeys(receiptStore, "run", receiptState, {
+        queue: new Set([0]),
+        registry: 0,
+      }),
     ).rejects.toThrow("must not claim work ordinals");
 
     await expect(
-      readRunOutputKeys(new MemoryObjects(), "run", state(), { queue: -1, registry: 0 }),
+      readRunOutputKeys(new MemoryObjects(), "run", state(), {
+        queue: new Set([-1]),
+        registry: 0,
+      }),
     ).rejects.toThrow("queue output baseline is invalid");
+  });
+
+  it("reads claimed result manifests with bounded concurrency and exact progress", async () => {
+    const store = new MemoryObjects();
+    const queue = await publishEnrichmentBatchResult({
+      store,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "queue",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [1],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:00.000Z",
+      },
+    });
+    const attemptResult = await publishEnrichmentBatchResult({
+      store,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "attempt",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [2],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:01.000Z",
+      },
+    });
+    const receipt = await publishEnrichmentBatchResult({
+      store,
+      prefix: "operations/enrichment/runs",
+      value: {
+        schema_version: 1,
+        run_id: "run",
+        phase: "receipt",
+        sequence: 1,
+        previous_result_sha256: null,
+        ordinals: [],
+        raw_segment_key: SEGMENT,
+        raw_segment_sha256: "b".repeat(64),
+        created_at: "2026-08-19T12:00:02.000Z",
+      },
+    });
+    let checkpoint = markQueueCompleted(state(), [1]);
+    checkpoint = advanceOutputFrontier(checkpoint, "enrichment", queue.sha256);
+    checkpoint = advanceOutputFrontier(checkpoint, "attempt", attemptResult.sha256);
+    checkpoint = advanceOutputFrontier(checkpoint, "receipt", receipt.sha256);
+    store.readDelayMs = 2;
+    store.maxActiveReads = 0;
+    const progress: [number, number][] = [];
+
+    await expect(
+      readRunOutputKeys(
+        store,
+        "run",
+        checkpoint,
+        { queue: new Set([0]), registry: 0 },
+        {
+          concurrency: 2,
+          progress: (completed, total) => {
+            progress.push([completed, total]);
+            return Promise.resolve();
+          },
+        },
+      ),
+    ).resolves.toEqual([SEGMENT]);
+    expect(store.maxActiveReads).toBe(2);
+    expect(progress).toEqual([
+      [2, 3],
+      [3, 3],
+    ]);
+  });
+
+  it("accepts a non-prefix imported queue completion baseline", async () => {
+    const imported = markQueueCompleted(
+      createEmptyEnrichmentState({
+        runId: "run",
+        planSha256: SHA,
+        queueTotal: 3,
+        queueBaselineDone: 0,
+        registryTotal: 0,
+        registryBaselineScanned: 0,
+      }),
+      [2],
+    );
+
+    await expect(
+      readRunOutputKeys(new MemoryObjects(), "run", imported, {
+        queue: new Set([2]),
+        registry: 0,
+      }),
+    ).resolves.toEqual([]);
   });
 
   it("rejects duplicate and overlapping unresolved queue ordinals", () => {
