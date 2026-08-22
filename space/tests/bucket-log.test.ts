@@ -553,14 +553,35 @@ describe("BucketLog", () => {
     );
     const { snapshot } = await state.log.createSnapshot();
     state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
 
-    await state.log.primeTextCacheFromLatestWrites(snapshot);
+    await state.log.primeTextCacheFromLatestWrites(snapshot, 0, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
 
     expect(state.bucket.downloads).toHaveLength(4);
+    expect(progress).toContainEqual([1, 4]);
     await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
     await expect(state.log.readText("config/pool.json")).resolves.toBe("pool");
     await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
     await expect(state.log.readText("enrichment/vocabulary.json")).resolves.toBe("vocabulary");
+
+    state.bucket.downloads.length = 0;
+    await state.log.primeTextCacheFromLatestWrites(snapshot, 99);
+    expect(state.bucket.downloads).toHaveLength(4);
+  });
+
+  it("rejects a configuration snapshot from another Bucket", async () => {
+    const state = log();
+
+    await expect(
+      state.log.primeTextCacheFromLatestWrites({
+        schema_version: 1,
+        bucket: "other/raw",
+        files: [],
+      }),
+    ).rejects.toThrow("Bucket snapshot source mismatch: other/raw");
   });
 
   it("fails closed when the configuration state is incomplete", async () => {
