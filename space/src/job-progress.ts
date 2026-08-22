@@ -150,7 +150,7 @@ export class XTapJobProgress {
     await this.update(
       "checkpoint-claims",
       {
-        planId: `checkpoint-claims-${this.#attemptPlanId.slice(-48)}`,
+        planId: `checkpoint-claims-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
         status: completed === total ? "completed" : "running",
         completed,
         total,
@@ -164,7 +164,7 @@ export class XTapJobProgress {
     await this.update(
       "output-claims",
       {
-        planId: `output-claims-${this.#attemptPlanId.slice(-48)}`,
+        planId: `output-claims-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
         status: completed === total ? "completed" : "running",
         completed,
         total,
@@ -178,7 +178,7 @@ export class XTapJobProgress {
     await this.update(
       "checkpoint-replay",
       {
-        planId: `checkpoint-replay-${this.#attemptPlanId.slice(-48)}`,
+        planId: `checkpoint-replay-${total.toString()}-${this.#attemptPlanId.slice(-48)}`,
         status: completed === total ? "completed" : "running",
         completed,
         total,
