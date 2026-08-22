@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   checkpointStore: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
   progress: {
+    checkpointClaims: vi.fn(() => Promise.resolve()),
+    outputClaims: vi.fn(() => Promise.resolve()),
+    checkpointReplay: vi.fn(() => Promise.resolve()),
     complete: vi.fn(() => Promise.resolve()),
     blocked: vi.fn(() => Promise.resolve()),
   },
@@ -32,15 +35,11 @@ vi.mock("../src/bucket-log.js", async (importOriginal) => {
     BucketLog: class BucketLog {
       readonly fixture = true;
 
-      discoverSnapshot() {
-        return Promise.resolve({
-          revision: "b".repeat(64),
-          snapshot: {
-            schema_version: 1,
-            created_at: "2026-08-19T12:00:00.000Z",
-            files: [],
-          },
-        });
+      replayVerifiedTail(
+        _known: readonly unknown[],
+        options: { progress?: (completed: number, total: number) => Promise<void> },
+      ) {
+        return options.progress?.(0, 0) ?? Promise.resolve();
       }
     },
     createRawBucketClient: () => ({}),

@@ -30,6 +30,9 @@ class MemoryBucket implements RawBucketClient {
   readonly files = new Map<string, Uint8Array>();
   readonly downloads: string[] = [];
   failUpload = false;
+  downloadDelayMs = 0;
+  activeDownloads = 0;
+  maxActiveDownloads = 0;
 
   async list(prefix: string): Promise<readonly BucketObject[]> {
     return [...this.files]
@@ -39,8 +42,17 @@ class MemoryBucket implements RawBucketClient {
 
   async download(key: string): Promise<Uint8Array | undefined> {
     this.downloads.push(key);
-    const content = this.files.get(key);
-    return content === undefined ? undefined : new Uint8Array(content);
+    this.activeDownloads += 1;
+    this.maxActiveDownloads = Math.max(this.maxActiveDownloads, this.activeDownloads);
+    try {
+      if (this.downloadDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.downloadDelayMs));
+      }
+      const content = this.files.get(key);
+      return content === undefined ? undefined : new Uint8Array(content);
+    } finally {
+      this.activeDownloads -= 1;
+    }
   }
 
   async upload(key: string, content: Uint8Array): Promise<void> {
@@ -143,6 +155,64 @@ describe("BucketLog", () => {
     expect(second.snapshot).toEqual(first.snapshot);
     state.bucket.files.set(segmentKey, new Uint8Array([1, 2, 3]));
     await expect(state.log.loadSegment(first.snapshot.files[0]!)).rejects.toThrow("size mismatch");
+  });
+
+  it("replays only the verified tail with bounded downloads in chronological order", async () => {
+    const state = log();
+    const base = bucketSegmentSchema.parse({
+      schema_version: 1,
+      transaction_id: "11111111-1111-4111-8111-111111111111",
+      created_at: "2026-08-12T12:00:00.000Z",
+      operations: [
+        {
+          path: "enrichment/receipts/2026-08-12.jsonl",
+          mode: "append",
+          lines: [legacyReceipt()],
+        },
+      ],
+    });
+    const baseKey = await state.log.putSegment(base);
+    const snapshot = await state.log.createSnapshot();
+    const laterKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        ...base,
+        transaction_id: "33333333-3333-4333-8333-333333333333",
+        created_at: "2026-08-12T12:02:00.000Z",
+        operations: [
+          {
+            path: "data/osolmaz/2026/08/tweets-2026-08-12.jsonl",
+            mode: "append",
+            lines: [JSON.stringify(makePooled({ id: "later" }))],
+          },
+        ],
+      }),
+    );
+    const earlierKey = await state.log.putSegment(
+      bucketSegmentSchema.parse({
+        ...base,
+        transaction_id: "22222222-2222-4222-8222-222222222222",
+        created_at: "2026-08-12T12:01:00.000Z",
+      }),
+    );
+    state.bucket.downloads.length = 0;
+    state.bucket.maxActiveDownloads = 0;
+    state.bucket.downloadDelayMs = 5;
+    const consumed: string[] = [];
+    const progress: [number, number][] = [];
+    await state.log.replayVerifiedTail(snapshot.snapshot.files, {
+      concurrency: 2,
+      progress: async (completed, total) => {
+        progress.push([completed, total]);
+      },
+      consume: async (file) => {
+        consumed.push(file.key);
+      },
+    });
+    expect(consumed).toEqual([earlierKey, laterKey]);
+    expect(state.bucket.downloads).not.toContain(baseKey);
+    expect(state.bucket.downloads.sort()).toEqual([earlierKey, laterKey].sort());
+    expect(state.bucket.maxActiveDownloads).toBe(2);
+    expect(progress).toEqual([[2, 2]]);
   });
 
   it("derives snapshot object identity when Bucket listings omit it", async () => {
