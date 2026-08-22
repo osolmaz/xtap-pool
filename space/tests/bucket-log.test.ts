@@ -499,6 +499,54 @@ describe("BucketLog", () => {
     expect(progress.at(-1)).toEqual([2, 2]);
   });
 
+  it("primes configuration from one complete anchor and its bounded tail", async () => {
+    const state = log();
+    const oldMixed = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [{ path: "config/pool.json", content: "old" }],
+    );
+    const anchor = await state.log.commitBatch(
+      [],
+      [
+        { path: "config/labels.json", content: "labels" },
+        { path: "config/pool.json", content: "pool" },
+        { path: "config/service-accounts.json", content: "accounts" },
+        { path: "enrichment/vocabulary.json", content: "vocabulary" },
+      ],
+    );
+    const tail = await state.log.commitBatch(
+      [{ path: "enrichment/receipts/2026-08-12.jsonl", lines: [legacyReceipt()] }],
+      [{ path: "config/pool.json", content: "new" }],
+    );
+    const { snapshot } = await state.log.createSnapshot();
+    state.bucket.downloads.length = 0;
+    const progress: [number, number][] = [];
+
+    await state.log.primeTextCacheFromAnchor(snapshot, 4, (completed, total) => {
+      progress.push([completed, total]);
+      return Promise.resolve();
+    });
+
+    expect(state.bucket.downloads).not.toContain(oldMixed);
+    expect(state.bucket.downloads).toContain(anchor);
+    expect(state.bucket.downloads).toContain(tail);
+    await expect(state.log.readText("config/labels.json")).resolves.toBe("labels");
+    await expect(state.log.readText("config/pool.json")).resolves.toBe("new");
+    await expect(state.log.readText("config/service-accounts.json")).resolves.toBe("accounts");
+    await expect(state.log.readText("enrichment/vocabulary.json")).resolves.toBe("vocabulary");
+    expect(progress.at(-1)).toEqual([2, 2]);
+  });
+
+  it("fails closed when the configuration anchor is incomplete", async () => {
+    const state = log();
+    await state.log.commitBatch([], [{ path: "config/pool.json", content: "pool" }]);
+    const { snapshot } = await state.log.createSnapshot();
+
+    await expect(state.log.primeTextCacheFromAnchor(snapshot)).rejects.toThrow(
+      "complete Bucket configuration anchor is missing",
+    );
+  });
+
   it("rejects duplicate paths, unsupported paths, and malformed records", async () => {
     expect(() =>
       bucketSegmentSchema.parse({
