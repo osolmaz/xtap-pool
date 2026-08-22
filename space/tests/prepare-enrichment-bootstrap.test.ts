@@ -64,6 +64,22 @@ describe("resolveEnrichmentTaxonomyForContract", () => {
     expect(resolved.taxonomy.labels).toEqual(labels);
   });
 
+  it("rejects a source taxonomy that cannot be read", async () => {
+    await expect(
+      resolveEnrichmentTaxonomyForContract({
+        log: {
+          primeTextCacheFromLatestWrites: () => Promise.resolve(),
+          readText: () => Promise.reject(new Error("unavailable")),
+        },
+        snapshot: SNAPSHOT,
+        taxonomyVersion: 1,
+        llmModel: MODEL,
+        expectedContractHash: "a".repeat(64),
+        concurrency: 4,
+      }),
+    ).rejects.toThrow("taxonomy unavailable: unavailable");
+  });
+
   it("rejects a source taxonomy that disagrees with the authenticated contract", async () => {
     const labels = [{ name: "custom", description: "Custom label." }];
     const expectedContractHash = contractHashFor({
