@@ -18,10 +18,7 @@ import {
   durableIndexManifestSchema,
   DurableIndex,
 } from "./durable-index.js";
-import {
-  resolveEnrichmentTaxonomyAfterTail,
-  resolveEnrichmentTaxonomyForContract,
-} from "./enrich-taxonomy-contract.js";
+import { resolveEnrichmentTaxonomyForContract } from "./enrich-taxonomy-contract.js";
 
 const CURRENT_MANIFEST_KEY = "index/current.json";
 const RUN_PREFIX = "operations/enrichment/runs";
@@ -33,7 +30,6 @@ export type BootstrapProgress = {
     | "snapshot"
     | "metadata"
     | "source"
-    | "taxonomy-base"
     | "taxonomy-final"
     | "contract"
     | "projection"
@@ -179,17 +175,6 @@ export async function prepareEnrichmentBootstrap(options: {
     },
   );
   try {
-    const { taxonomy: baseTaxonomy, contractHash: baseContractHash } =
-      await resolveEnrichmentTaxonomyForContract({
-        log,
-        snapshot,
-        taxonomyVersion: options.taxonomyVersion,
-        llmModel: options.llmModel,
-        expectedContractHash: manifest.projection.contract_hash,
-        concurrency: options.sourceReplayConcurrency ?? 1,
-        progress: async (completed, total) => emit("taxonomy-base", completed, total, "items"),
-      });
-
     const baseDatabaseBytes = (await stat(sourceDatabasePath)).size;
     const baseSourceSegmentCount = (
       index.store.database.prepare("SELECT COUNT(*) AS count FROM source_segments").get() as {
@@ -201,20 +186,15 @@ export async function prepareEnrichmentBootstrap(options: {
     const baseWork = inspectBaseWork(index.store.database, baseRegistryCursor);
     const advance = await index.advanceToLatest();
     const registryCursor = registryCursorFromReceipt(log.latestRegistryReceipt());
-    const { contractHash } = await resolveEnrichmentTaxonomyAfterTail({
+    const { contractHash } = await resolveEnrichmentTaxonomyForContract({
       log,
-      baseSnapshot: snapshot,
-      finalSnapshot: advance.snapshot,
-      baseTaxonomy,
+      snapshot: advance.snapshot,
       taxonomyVersion: options.taxonomyVersion,
       llmModel: options.llmModel,
       expectedContractHash: manifest.projection.contract_hash,
       concurrency: options.sourceReplayConcurrency ?? 1,
       progress: async (completed, total) => emit("taxonomy-final", completed, total, "items"),
     });
-    if (contractHash !== baseContractHash) {
-      throw new Error("final source taxonomy contract differs from the validated base contract");
-    }
     await emit("contract", 1, 1, "items");
     await index.createWorkingCopy(compactionSourcePath);
     const compact = await compactEnrichmentWorkDatabase({

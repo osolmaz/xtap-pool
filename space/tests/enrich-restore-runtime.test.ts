@@ -12,9 +12,13 @@ const mocks = vi.hoisted(() => ({
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
   rawList: vi.fn(() => Promise.resolve([])),
   rawDownload: vi.fn(() => Promise.reject(new Error("raw download must not run"))),
+  taxonomy: vi.fn<(options: unknown) => Promise<unknown>>(),
 }));
 
 vi.mock("../src/config.js", () => ({ loadConfig: () => mocks.config() }));
+vi.mock("../src/enrich-taxonomy-contract.js", () => ({
+  resolveEnrichmentTaxonomyForContract: (options: unknown) => mocks.taxonomy(options),
+}));
 vi.mock("../src/enrich-checkpoint.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/enrich-checkpoint.js")>();
   return {
@@ -112,10 +116,9 @@ describe("planned enrichment restore-only runtime", () => {
     const sourceRevision = sha256(
       canonicalBytes({ schema_version: 1, bucket: "owner/raw", files: [] }),
     );
-    const contractHash = contractHashFor({
-      taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
-      model: "model:provider",
-    });
+    const taxonomy = { labels: DEFAULT_TAXONOMY, version: 1, source: "default" as const };
+    const contractHash = contractHashFor({ taxonomy, model: "model:provider" });
+    mocks.taxonomy.mockResolvedValue({ taxonomy, contractHash });
     const created = createEnrichmentRunPlan({
       schema_version: 1,
       created_at: CREATED_AT,

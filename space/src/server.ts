@@ -96,23 +96,7 @@ const startupManifest = durableIndexManifestSchema.parse(
 if (startupManifest.source.bucket !== config.rawBucket) {
   throw new Error("durable index raw Bucket does not match the Space configuration");
 }
-const startupSnapshot = await log.loadSnapshot(startupManifest.source.revision);
-await primeStorageTextCache(startupSnapshot, "configuration-base");
-
-const [membership, serviceAccounts] = await Promise.all([
-  PoolMembership.load({
-    log,
-    bootstrapMembers: config.allowedUsers,
-    bootstrapAdmins: config.poolAdmins,
-    now: () => new Date(),
-  }),
-  ServiceAccountRegistry.load({ log, now: () => new Date() }),
-]);
-let taxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
-if (taxonomy.error !== undefined) {
-  throw new Error(`enrichment taxonomy unavailable: ${taxonomy.error}`);
-}
-const contractHash = contractHashFor({ taxonomy, model: config.llmModel });
+const contractHash = startupManifest.projection.contract_hash;
 const index = await DurableIndex.restore({
   rawBucket: config.rawBucket,
   indexBucket: config.indexBucket,
@@ -123,9 +107,16 @@ const index = await DurableIndex.restore({
   contractHash,
 });
 const initialAdvance = await index.advanceToLatest();
-if (hasConfigurationTail(startupSnapshot, initialAdvance.snapshot)) {
-  await primeStorageTextCache(initialAdvance.snapshot, "configuration-final");
-}
+await primeStorageTextCache(initialAdvance.snapshot, "configuration-final");
+const [membership, serviceAccounts] = await Promise.all([
+  PoolMembership.load({
+    log,
+    bootstrapMembers: config.allowedUsers,
+    bootstrapAdmins: config.poolAdmins,
+    now: () => new Date(),
+  }),
+  ServiceAccountRegistry.load({ log, now: () => new Date() }),
+]);
 const finalTaxonomy = await loadEnrichTaxonomy(log, config.taxonomyVersion);
 if (finalTaxonomy.error !== undefined) {
   throw new Error(`enrichment taxonomy unavailable after source advance: ${finalTaxonomy.error}`);
@@ -134,7 +125,7 @@ const finalContractHash = contractHashFor({ taxonomy: finalTaxonomy, model: conf
 if (finalContractHash !== contractHash) {
   throw new Error("enrichment contract changed after restoring the current source");
 }
-taxonomy = finalTaxonomy;
+let taxonomy = finalTaxonomy;
 await Promise.all([membership.reload(), serviceAccounts.reload()]);
 const store = index.store;
 const enrichStore = index.enrichStore;
@@ -233,7 +224,7 @@ startEnrichmentRefresh();
 
 async function primeStorageTextCache(snapshot: BucketSnapshot, stage: string): Promise<void> {
   let reported = -1;
-  await log.primeTextCacheFromAnchor(snapshot, 16, (completed, total) => {
+  await log.primeTextCacheFromLatestWrites(snapshot, 16, (completed, total) => {
     if (completed === total || completed - reported >= 100) {
       console.log(JSON.stringify({ type: "startup-progress", stage, completed, total }));
       reported = completed;
