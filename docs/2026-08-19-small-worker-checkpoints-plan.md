@@ -24,7 +24,7 @@ cursor, but new enrichment work can still reset that scan.
 This plan keeps the raw Bucket as the system of record and the public index as a
 replaceable read model. It adds a separate compact work plan and worker
 checkpoint. The shared checkpoint mechanics come from
-[HF Job Control](https://github.com/osolmaz/hf-job-control/blob/main/docs/2026-08-19-durable-job-resume-plan.md).
+[HF Job Control](https://github.com/osolmaz/hf-job-control/blob/feat/durable-job-resume/docs/2026-08-19-durable-job-resume-plan.md).
 
 ## Outcome
 
@@ -333,32 +333,162 @@ All paths except the two current pointers are immutable. The run pointer is a
 startup hint. `index/current.json` keeps its existing public read contract and
 changes only after a verified immutable publication claim.
 
-## Production state import
+## Bootstrap preparation and commit
 
-Add a read-only bootstrap command. It will:
+Bootstrap has two phases. Preparation is read-only. Commit owns every remote
+write.
 
-1. Read `index/current.json` twice and require equal bytes.
-2. Download the referenced database at the base index's own frozen source
-   revision, not the newer work-plan snapshot.
-3. Verify size and SHA-256. Verify provenance and schema, then run
-   `PRAGMA quick_check`.
-4. Verify raw Bucket, source snapshot, contract, source segment count, receipts,
-   registry revision, and queue state.
-5. Export queue IDs and input hashes in deterministic order.
-6. Build the completion bitmap and preserve unresolved retry or blocked details.
-7. Build the registry candidate plan with the production discovery algorithm.
-8. Verify the saved cursor by its scanned count, last name, and receipt time.
-   Exclude old candidates at or before that name, but retain candidates first
-   observed after the receipt even when their names sort before the cursor.
-9. Write a plan and initial checkpoint under an isolated prefix.
-10. Download and verify every new object.
-11. Read `index/current.json` again and abort if it changed during import.
+This boundary fixes a defect found during the production transition. The first
+bootstrap resolved taxonomy before it loaded the validated raw snapshot. An
+empty `BucketLog` therefore treated all 19,140 historical segment files as new,
+downloaded them serially, retained them in memory, and reported no exact
+progress. The repair must load known snapshot identities before taxonomy
+resolution.
 
-The command never writes `index/current.json`. Because recovery is still moving,
-implementation tests may import a stable observed generation, but deployment
-must repeat the import from the final recovery generation. After the final
-production import and canary, remove the importer from the runtime image and
-retain its source only as an explicit audit and migration command.
+### Bucket capabilities
+
+Reader interfaces expose only listing, download, and text reads. Writer
+interfaces add upload, deletion, checkpoint publication, activation, and
+pointer replacement. Preparation accepts readers only. The read-only shadow
+binary must not import a provider, checkpoint writer, activation writer, upload
+method, delete method, or schedule method.
+
+A validated snapshot can seed `BucketLog` only after all of these checks pass:
+
+- The snapshot bytes hash to the source revision in `index/current.json`.
+- The snapshot names the expected raw Bucket.
+- Every segment key, size, content hash, and listed object identity is valid.
+- No key or identity is duplicated.
+
+Seeding records known immutable identities. It does not claim that the current
+process downloaded those segment bodies. Head discovery still lists all keys
+so it can detect deletion, size drift, or identity drift. It downloads and
+fully verifies bodies only for new or conflicting tail objects.
+
+Tail body verification can use a small fixed worker pool. Verification results
+must be retained by immutable key and applied in sorted key order, so request
+completion order cannot change the projection. The first missing, deleted,
+changed, duplicate, or invalid object fails preparation.
+
+### Read-only preparation
+
+Preparation does this work in order:
+
+1. Read and parse `index/current.json`. Record its exact bytes and SHA-256.
+2. Require the expected raw Bucket, database key and SHA-256, source snapshot
+   revision, projection contract hash, predecessor identities, and counts.
+3. Use the manifest contract hash only to restore the already validated
+   database and raw snapshot. Verify the 1,328,619,520-byte database, its
+   SHA-256, provenance, schema, and `PRAGMA quick_check` result.
+4. Seed `BucketLog` with the validated snapshot before it reads taxonomy.
+5. Resolve taxonomy from the seeded log. Derive the taxonomy and model contract
+   and require exact equality with the manifest contract before tail work.
+6. Discover the current raw head against the known snapshot. Check every known
+   listing identity and download only the tail.
+7. Verify tail bodies with bounded concurrency and apply them in deterministic
+   order. Durable registry revision 31,201 must appear exactly once after base
+   revision 31,200.
+8. Advance a disposable local database. Verify source continuity, receipt
+   continuity, queue state, registry state, leases, retry timestamps, and all
+   physical row counts.
+9. Export queue IDs and input hashes in deterministic order. Build the completion
+   bitmap and preserve unresolved retry or blocked details.
+10. Build the registry candidate plan with the production discovery algorithm.
+    Verify the saved cursor by scanned count, last name, and receipt time.
+    Exclude old candidates at or before that name, but retain candidates first
+    observed after the receipt even when their names sort before the cursor.
+11. Build and verify the compact local work database. Run its SQLite integrity
+    and provenance checks.
+12. Return a content-addressed `BootstrapCandidate`. Do not write a remote
+    object.
+
+The candidate records:
+
+- The source pointer bytes and digest.
+- The base database key, size, digest, and source revision.
+- The validated raw snapshot and discovered head revisions.
+- The ordered tail digest and counts.
+- The taxonomy, model, provider, worker revision, and contract digest.
+- Queue and registry totals, baselines, ordinals, cursor, and unresolved state.
+- The compact local database path, size, and digest.
+- Exact progress totals and elapsed time for each preparation stage.
+
+Observational timestamps do not contribute to semantic identity. Repeated
+preparation from the same inputs must produce the same candidate identities and
+local artifact digests.
+
+### Exclusive commit
+
+`commitBootstrapCandidate` is the only bootstrap operation that can write the
+plan, work database, initial checkpoint, activation claim, or active-run hint.
+It must revalidate the candidate digest, source head, public pointer bytes, and
+exclusive-writer admission immediately before its first write. It uses the
+existing `bootstrapEnrichmentRun` and `activateEnrichmentRun` formats. The repair
+must not change compact-run keys, checkpoint formats, claims, or public pointer
+formats.
+
+The production bootstrap command composes preparation and commit. The shadow
+command calls preparation only. A candidate prepared while another writer is
+active cannot commit until a later exclusive-writer check passes.
+
+### Progress
+
+Preparation reports these stable stages:
+
+- Manifest and pointer validation.
+- Database download and byte verification.
+- Snapshot load and known-identity seeding.
+- Head listing and known-identity checks.
+- Tail body verification.
+- Deterministic tail application.
+- Queue and registry projection.
+- Compact database validation.
+- Candidate validation.
+
+Each stage reports exact completed and total items or bytes and elapsed
+milliseconds. These events are local observations. They do not add a remote
+progress API or a new durable format.
+
+### Read-only shadow validation
+
+While the original production importer is active, a shadow run must remain
+structurally read-only. For this transition, session 216 and PID 3252076 identify
+the original importer and only possible writer:
+
+1. Create a clean repair worktree from merged revision
+   `c0a1a95ebf6a4209f9f4d9505e9b6748af08216b`. Leave the dirty documentation
+   tree and exact deployment worktree unchanged.
+2. Record the original process state and I/O, active xTap Jobs, Space revision,
+   enrichment state, suspended schedule, public pointer bytes, and complete
+   `operations/enrichment/runs` object listing.
+3. Run all deterministic tests, repository gates, mutation tests, and review in
+   the repair worktree. Fix all P0 and P1 findings before a live shadow run.
+4. Start the shadow in a fresh local directory with only the approved storage
+   credential mapped to `HF_TOKEN`. Do not load `INFERENCE_TOKEN`.
+5. Use conservative tail concurrency. Stop only the shadow if it harms original
+   process I/O or host health.
+6. Monitor exact shadow progress and the original process independently. Do not
+   signal, cancel, restart, or replace the original process while it progresses.
+7. If the original writes during shadow preparation, treat that as observed
+   source drift. The shadow remains read-only and must revalidate its candidate
+   before later use.
+8. Verify the candidate schema and digest, local artifact sizes and hashes,
+   SQLite integrity and provenance, source and ordinal continuity, queue and
+   registry parity, and exact single application of revision 31,201.
+9. Prove provider calls are zero.
+10. Re-read the public pointer, active-run object listing, Jobs, Space, and
+    schedule after the shadow exits. Require no shadow-caused change.
+
+The shadow writes only local candidate and evidence files. It cannot write a
+plan, checkpoint, activation claim, publication, pointer, Space setting, or
+schedule. It cannot launch a Hugging Face Job.
+
+Do not commit, push, open, merge, or deploy the repair during shadow validation.
+If the original importer completes validly, compare its immutable result with
+the shadow candidate and prefer the accepted production result. If the original
+fails without writes, the production transition can consider the reviewed
+repair only after it proves that no writer is active and repeats all admission
+checks.
 
 ## Files
 
@@ -371,6 +501,8 @@ space/src/enrich-state.ts
 space/src/enrich-batch.ts
 space/src/enrich-planned-command.ts
 space/src/bootstrap-enrichment-run.ts
+space/src/prepare-enrichment-bootstrap.ts
+space/src/verify-enrichment-bootstrap-main.ts
 space/src/bootstrap-enrichment-main.ts
 ```
 
@@ -383,11 +515,15 @@ space/src/enrich-store.ts
 space/src/durable-index.ts
 space/src/job-progress.ts
 space/src/bucket-log.ts
+space/package.json
+package.json
 ```
 
-`durable-index.ts` becomes the public-index import and publication boundary.
-Normal queue and registry work will use the work plan and checkpoint plus
-immutable raw output segments.
+`durable-index.ts` remains the public-index import and publication boundary.
+Normal queue and registry work uses the work plan and checkpoint plus immutable
+raw output segments. The new preparation module is the shared read-only import
+path. The production bootstrap adds commit capability at its composition root.
+The shadow composition root has read capability only.
 
 ## Forced-stop tests
 
@@ -431,42 +567,223 @@ Add tests for plan determinism, production import, checkpoint round trips,
 missing-only queue work, registry cursor continuity, deterministic batch replay,
 publication recovery, and resumed-versus-uninterrupted equivalence.
 
-## Delivery
+The bootstrap repair also needs tests for:
 
-1. Adopt the released HF Job Control TypeScript checkpoint package.
-2. Add plans, compact state, deterministic batches, and local recovery.
-3. Add the read-only production importer.
-4. Run the complete forced-stop and corruption suites locally.
-5. Import a stable production generation under an isolated test prefix.
-6. Verify that no production pointer or existing object changed.
-7. Run a remote canary only after the changed Job contract has approval.
-8. Wait for the immutable recovery to finish and validate its final artifacts.
-9. Suspend the old schedule and verify no enrichment Job is active.
-10. Repeat the import from the final production generation.
-11. Deploy the tested Space revision with Space enrichment disabled.
-12. Replace the old Job schedule with one suspended exact new schedule that
-    resolves the active run from immutable activation claims and has no per-run
-    environment values.
-13. Run the required sequential canary and verify resume, successor activation,
-    and publication.
-14. Activate the canonical schedule, remove the old runtime path, and keep the
-    bootstrap importer outside normal runtime execution.
+- Validated snapshot seeding, known-body skipping, and rejection of duplicate,
+  missing, deleted, changed, malformed, or wrong-Bucket identities.
+- The tail verification concurrency ceiling, deterministic application order,
+  fail-fast behavior, and exact progress totals.
+- Manifest-first database and snapshot restore followed by independent taxonomy
+  and model contract verification.
+- Queue and registry parity, source continuity, and exactly one application of
+  registry revision 31,201.
+- Read-only capability enforcement, zero provider construction, and zero remote
+  writes from the shadow binary.
+- `BootstrapCandidate` schema, canonical bytes, digest, local artifact hashes,
+  and repeated-run determinism.
+- Prepared-state equivalence between seeded-tail preparation and full replay.
+- Live before-and-after evidence for pointer bytes, active-run objects, Jobs,
+  Space state, original process state, progress counts, and provider calls.
+
+## Production baseline
+
+The final legacy Job completed on 2026-08-20. Use this generation as the only
+bootstrap input:
+
+- Public pointer SHA-256:
+  `5a259cc95a3437d1c983d7d123efe476cf6bf3d48e14f97fec31bb4067834740`.
+- Database SHA-256:
+  `9e9940b063f615dae42ed86ba08ec6aab27873b61b8da8b7ad42ee8fff413c12`.
+- The database is 1,328,619,520 bytes.
+- The queue has 252,042 completed records out of 252,504. It has 462 pending
+  records, no leases, and no retry timestamps.
+- The registry scan has checked 15,840 of 25,675 candidates.
+- The database contains registry revision 31,200.
+- The later durable registry revision is 31,201. The importer must apply it
+  exactly once after the base revision.
+- Settled restoration spend is $102.3746080.
+- Conservative exposure before the new canaries is $602.3746080.
+- The approved cumulative restoration ceiling is $2,000.
+- The merged worker revision is
+  `c0a1a95ebf6a4209f9f4d9505e9b6748af08216b`.
+
+The final receipt, pointer, full database hash, `PRAGMA quick_check`, source
+identity, queue state, registry revision, and raw segment hashes were verified.
+The legacy schedule is suspended and no enrichment Job is active.
+
+## Production transition
+
+This is a hard replacement. Do not start another legacy full-index worker.
+Keep all schedules suspended until the final activation step.
+
+1. Re-read the final receipt, pointer, database, raw segment frontier, Job list,
+   and schedule. Stop if any identity differs from the production baseline.
+2. Create or verify a clean deployment worktree at the exact merged worker
+   revision. Keep documentation updates outside that worktree. Do not deploy
+   uncommitted files or a later revision, and do not merge or change the pinned
+   HF Job Control dependency during this transition.
+3. Before each paid action, add settled spend, prior unreceipted attempt caps,
+   active reservations, and the next worst-case action. Stop before an action
+   that can take conservative exposure above $2,000.
+4. Load only the approved storage and inference credentials in a short-lived,
+   non-traced process. The Space, canary Jobs, and scheduled Job may contain
+   only `HF_TOKEN` and `INFERENCE_TOKEN` where each interface requires them.
+5. During the bounded bootstrap repair, leave the original importer running as
+   the only possible writer. Run the repaired shadow with `HF_TOKEN` only. It
+   prepares and verifies a local candidate but cannot commit or activate it.
+   If the original importer completes validly, use its immutable result and
+   compare it with the candidate. If it fails without writes, use the repaired
+   commit path only after all tests and review pass and a new admission check
+   proves no writer is active.
+6. Run `npm run enrich:bootstrap-run` from the accepted exact worktree only when
+   exclusive-writer admission passes. The importer must restore the exact base,
+   advance over later valid raw segments including registry revision 31,201,
+   write the frozen plan, compact work database, bootstrap checkpoint,
+   activation claim, and active-run hint, then read them back. A repaired
+   bootstrap must prepare the candidate first and revalidate the pointer,
+   source head, candidate digest, and writer exclusion before commit.
+7. Treat `operations/enrichment/runs` as the isolated future-runtime namespace.
+   The suspended legacy schedule and old deployed worker do not read it.
+   Capture `index/current.json` before and after import and require byte equality.
+8. Validate the imported plan SHA, run ID, source snapshot, worker revision,
+   contract hash, base reference, queue and registry order, cursor, ordinal
+   coverage, checkpoint sequence, activation chain, claims, output frontiers,
+   object hashes, and unresolved rows. Revision 31,201 must be neither missing
+   nor applied twice.
+9. Restore the active plan and checkpoint twice into clean directories, with
+   the second run using no local cache. Both restores must return the same state
+   in less than five minutes, make zero provider calls, and leave all production
+   pointers unchanged.
+10. Deploy the merged revision from the exact deployment worktree with:
+
+```sh
+npm run update -- osolmaz/xtap-pool
+```
+
+Wait for the exact repository and runtime revision to become `RUNNING` and
+`READY`. Require HTTP 200 from `/readyz`, ready storage, and enrichment
+disabled before schedule repair.
+
+11. Inspect the schedule contract without mutation:
+
+    ```sh
+    npm run --silent doctor -- osolmaz/xtap-pool --json
+    ```
+
+    Then use `npm run doctor -- osolmaz/xtap-pool --fix` to replace the legacy
+    schedule. Read back exactly one suspended, non-concurrent `cpu-upgrade`
+    schedule at `17 */6 * * *`. It must run
+    `space/dist/src/enrich-job-main.js`, use the merged deployment contract,
+    have a 2,700-second platform timeout and 2,400,000-millisecond worker budget,
+    keep the checked-in $10 run ceiling, and use only `HF_TOKEN` and
+    `INFERENCE_TOKEN`.
+
+12. Recheck cost admission and trigger one physical Job from the suspended
+    schedule. Require restore under five minutes and wait for a verified output
+    claim and checkpoint boundary before any interruption.
+13. Save the Job inspection, logs, active run, plan, checkpoint hashes, output
+    frontier, provider receipt frontier, and cost evidence. Cancel only that
+    physical Job. Do not create a receipt for work that did not publish one.
+14. After the canceled Job is terminal and no xTap Job is active, trigger the
+    same suspended schedule once. The replacement must use the same run ID and
+    plan SHA, restore the prior checkpoint, reconcile orphan outputs, process
+    only missing ordinals, and keep progress monotonic. At most the documented
+    in-flight concurrency batch may repeat.
+15. Continue the frozen run one physical Job at a time. After each attempt,
+    validate the terminal state, exact receipt, referenced outputs, checkpoint
+    chain, claims, cost, and no-overlap state before another trigger. A valid
+    deterministic blocked record is data, not a shared failure.
+16. After queue and registry completion, validate resumable publication. The
+    database key must equal its SHA-256, `PRAGMA quick_check` must return `ok`,
+    metadata and counts must match the frozen plan and completed checkpoint,
+    and every manifest and receipt reference must exist. Move
+    `index/current.json` only after full read-back.
+17. Resolve every activation claim and require one contiguous chain. The
+    completed plan must create exactly one verified successor, with no competing
+    plan or work object. The active hint must match the last valid claim.
+18. Run the two-Job steady canary while the schedule is suspended. Use the hard
+    ceiling reported by setup doctor and pass the approved ceiling explicitly:
+
+    ```sh
+    npm run doctor -- osolmaz/xtap-pool --fix --canary \
+      --approved-cost-ceiling-usd=<approved-canary-ceiling>
+    ```
+
+    Validate both receipts and every referenced output. Both Jobs must use the
+    successor, restore bounded state, and remain non-overlapping.
+
+19. Activate only after every earlier gate passes:
+
+    ```sh
+    npm run doctor -- osolmaz/xtap-pool --fix --canary \
+      --approved-cost-ceiling-usd=<approved-canary-ceiling> --enable-schedule
+    ```
+
+    Read back exactly one active canonical schedule. Remove the legacy schedule
+    and source revision. Leave no physical xTap Job active at handoff.
+
+## Failure handling
+
+Fail closed before new provider calls or pointer writes when an identity, hash,
+ordinal, predecessor, cursor, source revision, or count differs.
+
+If import writes only part of the new immutable graph, keep the public pointer
+and schedules unchanged. Re-run only after every existing immutable object
+matches the intended bytes.
+
+If a read-only shadow detects pointer, source, or object drift, stop only the
+shadow and preserve its candidate and evidence. It must not signal the original
+importer or commit remote state. Revalidate the candidate only after the source
+and writer state are stable.
+
+If shadow CPU, memory, disk, or network use harms the original importer or host,
+stop only the shadow. Keep its bounded concurrency low and preserve the original
+as the only writer.
+
+If deployment fails, keep the schedule suspended. Repair only the bounded defect
+inside this repository, run the full quality gates and review, and repeat the
+failed gate. Do not substitute an upstream dependency or unreviewed runtime.
+
+If a Job stops outside a verified boundary, preserve its inspection and logs,
+then restore from the last valid checkpoint and reconcile orphan outputs. Do not
+fabricate a receipt or mark unverified work complete.
+
+If repeated work exceeds one in-flight concurrency batch, stop the run and
+investigate the claim frontier before another paid attempt.
+
+If the next action can take conservative exposure above $2,000, do not launch
+it. Preserve the current state and report the exact cost evidence.
 
 ## Acceptance criteria
 
 The work is complete when:
 
+- Read-only preparation seeds the validated snapshot before taxonomy lookup,
+  downloads no known historical body, verifies only the tail, and reports exact
+  progress.
+- Shadow validation makes zero provider calls and leaves the public pointer,
+  active-run objects, Jobs, Space, and schedule unchanged.
+- The exact legacy generation and revision 31,201 are imported without changing
+  the public pointer or any raw object.
 - A normal continuation does not download the public SQLite database.
+- Two cold checkpoint restores take less than five minutes and make zero
+  provider calls.
 - Checkpoint restore takes less than five minutes at current production size.
 - Queue and registry totals remain fixed for one logical run.
 - Completed queue work and registry decisions are not repeated.
 - At most one in-flight concurrency batch repeats after interruption.
 - Progress stays monotonic across physical attempts.
 - Registry work never resets because queue work or new source data appeared.
-- A completed run activates exactly one verified successor, and the next scheduled Job uses it without schedule replacement.
+- A completed run activates exactly one verified successor, and the next
+  scheduled Job uses it without schedule replacement.
 - Interrupted final publication resumes from its last claimed state and reuses
   uploaded or verified immutable artifacts.
 - Resumed and uninterrupted runs produce the same logical database and manifest.
-- Invalid, duplicate, overlapping, or conflicting ordinal state fails before new provider calls or pointer writes.
-- Existing production objects remain unchanged during implementation and import.
-- Production uses one active non-concurrent schedule and no legacy runtime path.
+- Invalid, duplicate, overlapping, or conflicting ordinal state fails before
+  new provider calls or pointer writes.
+- Two steady canary receipts and every referenced output validate.
+- Settled spend and conservative exposure stay at or below $2,000.
+- The Space is healthy on the merged runtime with enrichment disabled.
+- Production uses one active non-concurrent schedule at `17 */6 * * *`, with
+  only `HF_TOKEN` and `INFERENCE_TOKEN`, and no legacy runtime path.
+- No physical xTap Job is active at final handoff.

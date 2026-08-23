@@ -6,6 +6,13 @@ date: 2026-08-16
 
 # Make registry review resumable
 
+> **Historical plan:** [Add small worker checkpoints](2026-08-19-small-worker-checkpoints-plan.md)
+> replaces this receipt-cursor continuation path in production. Existing receipt
+> cursor fields remain valid historical evidence. New Jobs use a frozen logical
+> run, registry ordinals, immutable output claims, and compact checkpoints. Use
+> the newer plan for production recovery, spending limits, canaries, and schedule
+> activation.
+
 The enrichment worker must save useful work before a Hugging Face Job reaches its timeout. The current worker saves post enrichment as it goes, then reviews free-label candidates in one long pass. It keeps that pass in memory until the full scan ends. A timeout can therefore discard hours of registry review.
 
 This plan makes registry review resume from a durable cursor and makes the worker's elapsed-time limit include index restoration. It also removes the full mixed-segment scan from normal index restoration so the steady 45-minute Job can start useful work quickly.

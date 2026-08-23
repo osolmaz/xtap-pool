@@ -156,23 +156,42 @@ shown once; only its hash is stored in `config/service-accounts.json`.
 ## Scheduled enrichment
 
 Production enrichment runs in one non-concurrent scheduled Hugging Face Job.
-The Job uses the same immutable raw log and SQLite index as the Space.
+The private raw Bucket is the system of record. The SQLite index is a
+replaceable public read model.
+
+A logical run freezes one source snapshot, queue order, registry order, and
+enrichment contract. Each physical Job restores the small active plan and
+compact checkpoint, then processes only missing ordinals. It does not download
+the public SQLite database during normal queue or registry work. The completed
+logical run restores the frozen base once, applies its verified result batches,
+and publishes a new checksum-verified index.
+
+Run enrichment manually only for local development:
 
 ```sh
 npm run enrich --workspace space
 ```
 
-Each process restores the current verified SQLite generation, creates an exact
-raw snapshot, and applies only immutable segments absent from the generation.
-A missing, corrupt, rewritten, or conflicting object fails closed. Operators
-can rebuild and publish the projection intentionally:
+The scheduled production command is `space/dist/src/enrich-job-main.js`. The
+schedule must remain non-concurrent and use only `HF_TOKEN` and
+`INFERENCE_TOKEN`. Setup doctor owns schedule creation, replacement, canaries,
+and activation. Keep a replacement schedule suspended until bounded restore,
+interruption recovery, final publication, successor activation, and the
+required two-Job recovery canary have passed.
+
+The checked-in defaults give each Job a 40-minute worker budget, a 45-minute
+platform timeout, and a $10 inference limit. The operator-approved cumulative
+ceiling must cover both canary Jobs before either starts. The web Space keeps
+enrichment disabled, and GitHub Actions remains CI-only.
+
+Use an explicit rebuild only as a recovery operation:
 
 ```sh
 npm run index:bootstrap
 ```
 
-The default recovery canary limits each Job to $2 of inference and 40 minutes.
-The web Space never runs enrichment, and GitHub Actions remains CI-only.
+See [Add small worker checkpoints](docs/2026-08-19-small-worker-checkpoints-plan.md)
+for the logical-run contract, production transition gates, and failure rules.
 
 ## Join a pool
 
