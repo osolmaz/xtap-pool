@@ -255,12 +255,10 @@ async function runSinglePlannedEnrichmentRun(
   const workPath = join(config.dataDir, "planned", `${runId}.sqlite`);
   await mkdir(dirname(workPath), { recursive: true });
   await rm(workPath, { force: true });
-  {
-    const workBytes = await requiredObject(preflightStore, plan.work.key);
-    verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
-    emitRestoreProgress("work-plan", workBytes.byteLength, plan.work.bytes, "bytes");
-    await writeFile(workPath, workBytes);
-  }
+  const workBytes = await requiredObject(preflightStore, plan.work.key);
+  verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
+  emitRestoreProgress("work-plan", workBytes.byteLength, plan.work.bytes, "bytes");
+  await writeFile(workPath, workBytes);
   let sourceSegments: BucketSnapshotFile[];
   {
     const sourceSegmentsBytes = await requiredObject(
@@ -303,6 +301,71 @@ async function runSinglePlannedEnrichmentRun(
     },
   });
   emitRestoreProgress("contract", 1, 1);
+  let tweetStore = new TweetStore(workPath);
+  let enrichStore = new EnrichStore(
+    tweetStore.database,
+    taxonomy.version,
+    () => new Date(),
+    contractHash,
+  );
+  const quickCheck = tweetStore.database.pragma("quick_check") as { quick_check: string }[];
+  if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
+    throw new Error("planned work database SQLite quick_check failed");
+  }
+  const ordinals = readQueueOrdinals(tweetStore.database);
+  const queueBaselineOrdinals = readQueueBaselineOrdinals(tweetStore.database);
+  const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
+  const registryNames = readRegistryNames(tweetStore.database);
+  if (ordinals.size !== plan.work.queue_total || queueIdentities.size !== plan.work.queue_total) {
+    throw new Error("planned work queue count does not match the plan");
+  }
+  if (queueBaselineOrdinals.size !== plan.work.queue_baseline_done) {
+    throw new Error("planned work queue baseline does not match the plan");
+  }
+  if (registryNames.length + plan.work.registry_baseline_scanned !== plan.work.registry_total) {
+    throw new Error("planned work registry count does not match the plan");
+  }
+  emitRestoreProgress("database", 1, 1);
+
+  if (!restoreOnly) {
+    try {
+      const preflightState = preparedRevision.adapter.state;
+      await restoreAndReconcileWorkerOutputs({
+        log: preflightLog,
+        sourceSegments,
+        checkpointStore: preflightStore,
+        runId,
+        state: () => preflightState,
+        registryNames,
+        registryBaselineOrdinal: plan.work.registry_baseline_scanned,
+        queueBaselineOrdinals,
+        queueIdentities,
+        contractHash,
+        tweetStore,
+        enrichStore,
+        outputClaimsProgress: () => Promise.resolve(),
+        replayProgress: () => Promise.resolve(),
+      });
+      applyCheckpointToWorkerDatabase(tweetStore.database, preflightState);
+      const restoredQuickCheck = tweetStore.database.pragma("quick_check") as {
+        quick_check: string;
+      }[];
+      if (restoredQuickCheck.length !== 1 || restoredQuickCheck[0]?.quick_check !== "ok") {
+        throw new Error("preflight work database SQLite quick_check failed");
+      }
+    } finally {
+      tweetStore.close();
+    }
+    await writeFile(workPath, workBytes);
+    tweetStore = new TweetStore(workPath);
+    enrichStore = new EnrichStore(
+      tweetStore.database,
+      taxonomy.version,
+      () => new Date(),
+      contractHash,
+    );
+  }
+
   const log = restoreOnly
     ? preflightLog
     : new BucketLog(
@@ -334,13 +397,6 @@ async function runSinglePlannedEnrichmentRun(
       await progress?.checkpointClaims(completed, total);
     },
   });
-  const tweetStore = new TweetStore(workPath);
-  const enrichStore = new EnrichStore(
-    tweetStore.database,
-    taxonomy.version,
-    () => new Date(),
-    contractHash,
-  );
   const adapter = restoreOnly
     ? preparedRevision.adapter
     : new EnrichmentCheckpointAdapter(
@@ -383,24 +439,6 @@ async function runSinglePlannedEnrichmentRun(
       throw new Error("active enrichment plan base index is no longer current");
     }
   }
-  const quickCheck = tweetStore.database.pragma("quick_check") as { quick_check: string }[];
-  if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
-    throw new Error("planned work database SQLite quick_check failed");
-  }
-  const ordinals = readQueueOrdinals(tweetStore.database);
-  const queueBaselineOrdinals = readQueueBaselineOrdinals(tweetStore.database);
-  const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
-  const registryNames = readRegistryNames(tweetStore.database);
-  if (ordinals.size !== plan.work.queue_total || queueIdentities.size !== plan.work.queue_total) {
-    throw new Error("planned work queue count does not match the plan");
-  }
-  if (queueBaselineOrdinals.size !== plan.work.queue_baseline_done) {
-    throw new Error("planned work queue baseline does not match the plan");
-  }
-  if (registryNames.length + plan.work.registry_baseline_scanned !== plan.work.registry_total) {
-    throw new Error("planned work registry count does not match the plan");
-  }
-  emitRestoreProgress("database", 1, 1);
 
   const commitOutputs = async (outputs: readonly DurableWorkerOutput[]): Promise<void> => {
     const resultSha256: string[] = [];
