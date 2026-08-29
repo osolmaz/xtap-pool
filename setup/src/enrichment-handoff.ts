@@ -77,6 +77,7 @@ export function productionEnrichmentHandoffPreparation(options: {
     prepareHandoff: (targetRevision) =>
       runReadOnlyHandoffPreparation({
         root: options.root,
+        rawBucket: options.config.rawBucket,
         indexBucket: options.config.indexBucket,
         storageToken: options.storageToken,
         targetRevision,
@@ -86,6 +87,7 @@ export function productionEnrichmentHandoffPreparation(options: {
 
 async function runReadOnlyHandoffPreparation(options: {
   root: string;
+  rawBucket: string;
   indexBucket: string;
   storageToken: string;
   targetRevision: string;
@@ -100,6 +102,7 @@ async function runReadOnlyHandoffPreparation(options: {
         env: {
           ...process.env,
           DATA_DIR: dataDir,
+          RAW_BUCKET: options.rawBucket,
           INDEX_BUCKET: options.indexBucket,
           HF_TOKEN: options.storageToken,
           XTAP_TARGET_SOURCE_REVISION: options.targetRevision,

@@ -73,11 +73,13 @@ vi.mock("../src/job-progress.js", () => ({
 }));
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
+import { createEnrichmentBatchResult, enrichmentBatchResultKey } from "../src/enrich-batch.js";
 import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
 import {
   runPlannedEnrichmentCommand,
   successorContractForWorker,
+  validatePreparedEnrichmentWorkerOutputs,
 } from "../src/enrich-planned-command.js";
 import { prepareEnrichmentRevision } from "../src/enrich-revision-handoff.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
@@ -392,12 +394,41 @@ describe("planned enrichment runtime", () => {
       `${"0".repeat(64)}/result.json`;
     store.files.set(malformedResultKey, Buffer.from("{"));
 
+    const handoffValidation = () =>
+      validatePreparedEnrichmentWorkerOutputs({
+        preparedRevision,
+        checkpointStore: store,
+        rawBucket: "owner/raw",
+        accessToken: "storage",
+        dataDir: join(dataDir, "handoff-validation"),
+      });
+    await expect(handoffValidation()).rejects.toThrow();
     await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow();
     expect(mocks.rawWriter).not.toHaveBeenCalled();
     expect(mocks.progressCreate).not.toHaveBeenCalled();
     expect(mocks.checkpointWriter).not.toHaveBeenCalled();
 
     store.files.delete(malformedResultKey);
+    const uncheckpointed = createEnrichmentBatchResult({
+      schema_version: 1,
+      run_id: current.plan.run_id,
+      phase: "receipt",
+      sequence: 1,
+      previous_result_sha256: null,
+      ordinals: [],
+      raw_segment_key: `v1/segments/receipt/2026/08/19/1-${"0".repeat(36)}-${"e".repeat(64)}.json.gz`,
+      raw_segment_sha256: "e".repeat(64),
+      created_at: CREATED_AT,
+    });
+    const uncheckpointedKey = enrichmentBatchResultKey(
+      "operations/enrichment/runs",
+      uncheckpointed.result,
+    );
+    store.files.set(uncheckpointedKey, uncheckpointed.bytes);
+    await expect(handoffValidation()).rejects.toThrow("uncheckpointed receipt result manifest");
+
+    store.files.delete(uncheckpointedKey);
+    await expect(handoffValidation()).resolves.toEqual({ claimedSegments: 0, orphanSegments: 0 });
     await runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions);
 
     expect(mocks.rawWriter).toHaveBeenCalledOnce();
