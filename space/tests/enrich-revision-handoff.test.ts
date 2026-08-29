@@ -14,6 +14,7 @@ import {
   stableCheckpointJsonBytes,
   type CheckpointObjectStore,
 } from "@osolmaz/hf-job-control";
+import { enrichmentRevisionHandoffSchema } from "@xtap-pool/shared";
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
@@ -286,6 +287,49 @@ describe("immutable enrichment revision handoff", () => {
     const twice = markQueueCompleted(once, [firstMissingOrdinal]);
     expect(once.queue.done).toBe(QUEUE_DONE + 1);
     expect(twice.queue.done).toBe(once.queue.done);
+  }, 30_000);
+
+  it("accepts the same pinned checkpoint after restore refreshes only the pointer timestamp", async () => {
+    const { store, active } = await productionBoundaryFixture();
+    const prepared = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+    const handoff = enrichmentRevisionHandoffSchema.parse(prepared.handoff);
+    const manifest = {
+      source_revision: TARGET_REVISION,
+      enrichment_revision_handoff: handoff,
+    };
+    const pointerKey = checkpointPointerKey(RUN_PREFIX, active.plan.run_id);
+    const pointerBefore = Uint8Array.from(store.files.get(pointerKey) ?? new Uint8Array());
+    const coordinator = CheckpointCoordinator.create({
+      runId: active.plan.run_id,
+      attemptId: "interrupted-handoff-attempt",
+      planSha256: active.sha256,
+      store,
+      prefix: RUN_PREFIX,
+      clock: () => new Date("2026-08-29T13:00:00.000Z"),
+    });
+
+    await coordinator.restoreLatest(prepared.adapter);
+
+    const pointerAfter = store.files.get(pointerKey) ?? new Uint8Array();
+    expect(Buffer.from(pointerAfter).equals(Buffer.from(pointerBefore))).toBe(false);
+    const retry = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+    const retryHandoff = enrichmentRevisionHandoffSchema.parse(retry.handoff);
+    expect(retryHandoff).toMatchObject({
+      checkpoint_sequence: handoff.checkpoint_sequence,
+      checkpoint_key: handoff.checkpoint_key,
+      checkpoint_sha256: handoff.checkpoint_sha256,
+      checkpoint_bytes: handoff.checkpoint_bytes,
+    });
+    expect(retryHandoff.checkpoint_pointer_sha256).not.toBe(handoff.checkpoint_pointer_sha256);
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, retry, TARGET_REVISION, store),
+    ).resolves.toEqual(manifest);
   }, 30_000);
 
   it("accepts later checkpoints only when they descend from the reviewed handoff anchor", async () => {
