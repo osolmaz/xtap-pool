@@ -7,9 +7,20 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-job-control";
 
+type ProgressMock = {
+  checkpointClaims: (completed: number, total: number) => Promise<void>;
+  outputClaims: (completed: number, total: number) => Promise<void>;
+  checkpointReplay: (completed: number, total: number) => Promise<void>;
+  complete: () => Promise<void>;
+  blocked: () => Promise<void>;
+};
+
 const mocks = vi.hoisted(() => ({
   checkpointStore: vi.fn<() => CheckpointObjectStore>(),
+  checkpointWriter: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
+  rawWriter: vi.fn(() => ({})),
+  progressCreate: vi.fn<() => Promise<ProgressMock>>(),
   progress: {
     checkpointClaims: vi.fn(() => Promise.resolve()),
     outputClaims: vi.fn(() => Promise.resolve()),
@@ -24,7 +35,7 @@ vi.mock("../src/enrich-checkpoint.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/enrich-checkpoint.js")>();
   return {
     ...actual,
-    createEnrichmentCheckpointStore: () => mocks.checkpointStore(),
+    createEnrichmentCheckpointStore: () => mocks.checkpointWriter(),
     createReadOnlyEnrichmentCheckpointStore: () => mocks.checkpointStore(),
   };
 });
@@ -46,7 +57,7 @@ vi.mock("../src/bucket-log.js", async (importOriginal) => {
         return options.progress?.(0, 0) ?? Promise.resolve();
       }
     },
-    createRawBucketClient: () => ({}),
+    createRawBucketClient: () => mocks.rawWriter(),
     createRawBucketReader: () => ({}),
   };
 });
@@ -58,7 +69,7 @@ vi.mock("../src/enrich-config.js", async (importOriginal) => {
   };
 });
 vi.mock("../src/job-progress.js", () => ({
-  XTapJobProgress: { create: () => Promise.resolve(mocks.progress) },
+  XTapJobProgress: { create: () => mocks.progressCreate() },
 }));
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
@@ -68,6 +79,7 @@ import {
   runPlannedEnrichmentCommand,
   successorContractForWorker,
 } from "../src/enrich-planned-command.js";
+import { prepareEnrichmentRevision } from "../src/enrich-revision-handoff.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
 import {
   createEmptyEnrichmentState,
@@ -159,7 +171,7 @@ describe("planned enrichment runtime", () => {
     });
   });
 
-  it("stops after activating a verified blocked-only successor", async () => {
+  it("validates handoff result claims before writers and stops after a blocked successor", async () => {
     const dataDir = join(
       tmpdir(),
       `xtap-planned-${process.pid.toString()}-${Date.now().toString()}`,
@@ -226,9 +238,11 @@ describe("planned enrichment runtime", () => {
         registry_baseline_scanned: 0,
       },
     });
+    const targetWorkerRevision = "d".repeat(40);
     const successor = createEnrichmentRunPlan({
       ...withoutRunId(current.plan),
       created_at: "2026-08-19T13:00:00.000Z",
+      contract: successorContractForWorker(current.plan, targetWorkerRevision),
       work: {
         ...current.plan.work,
         queue_total: 1,
@@ -346,6 +360,8 @@ describe("planned enrichment runtime", () => {
       activatedAt: CREATED_AT,
     });
     mocks.checkpointStore.mockReturnValue(store);
+    mocks.checkpointWriter.mockReturnValue(store);
+    mocks.progressCreate.mockResolvedValue(mocks.progress);
     mocks.config.mockReturnValue({
       enrichEnabled: true,
       inferenceToken: "inference",
@@ -357,19 +373,36 @@ describe("planned enrichment runtime", () => {
       llmModel: "model:provider",
     });
 
-    await runPlannedEnrichmentCommand(
-      {
-        JOB_ID: "attempt-2",
-        XTAP_SOURCE_REVISION: current.plan.contract.worker_revision,
+    const preparedRevision = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision,
+    });
+    const runtimeEnv = {
+      JOB_ID: "attempt-2",
+      XTAP_SOURCE_REVISION: targetWorkerRevision,
+    };
+    const runtimeOptions = {
+      deploymentManifest: {
+        source_revision: targetWorkerRevision,
+        enrichment_revision_handoff: preparedRevision.handoff,
       },
-      {
-        deploymentManifest: {
-          source_revision: current.plan.contract.worker_revision,
-          enrichment_revision_handoff: null,
-        },
-      },
-    );
+    };
+    const malformedResultKey =
+      `operations/enrichment/runs/${current.plan.run_id}/batches/queue/` +
+      `${"0".repeat(64)}/result.json`;
+    store.files.set(malformedResultKey, Buffer.from("{"));
 
+    await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow();
+    expect(mocks.rawWriter).not.toHaveBeenCalled();
+    expect(mocks.progressCreate).not.toHaveBeenCalled();
+    expect(mocks.checkpointWriter).not.toHaveBeenCalled();
+
+    store.files.delete(malformedResultKey);
+    await runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions);
+
+    expect(mocks.rawWriter).toHaveBeenCalledOnce();
+    expect(mocks.progressCreate).toHaveBeenCalledOnce();
+    expect(mocks.checkpointWriter).toHaveBeenCalledOnce();
     expect(mocks.progress.complete).toHaveBeenCalledOnce();
     const active: unknown = JSON.parse(
       Buffer.from(
