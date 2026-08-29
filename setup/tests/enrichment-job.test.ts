@@ -24,7 +24,9 @@ import {
   canaryHardCeilingUsd,
   desiredEnrichmentJob,
   desiredEnrichmentJobHash,
+  finalizeEnrichmentScheduleUpdate,
   inspectEnrichmentJob,
+  quiesceCanonicalEnrichmentSchedule,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
   resumeEnrichmentSchedule,
@@ -113,6 +115,71 @@ describe("Hugging Face enrichment Job", () => {
         variables: variables(),
       }),
     ).rejects.toThrow("zero active");
+  });
+
+  it("quiesces an active canonical schedule and restores an exact replacement", async () => {
+    const current = await desiredFixture();
+    const active = scheduleFixture(current, "active", false);
+    const suspended = { ...active, suspend: true };
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([suspended]);
+
+    await expect(
+      quiesceCanonicalEnrichmentSchedule(
+        {
+          client,
+          spaceRepo: current.spaceRepo,
+          rawBucket: current.environment["RAW_BUCKET"] ?? "",
+          variables: variables(),
+        },
+        { pollIntervalMs: 0, timeoutMs: 100 },
+      ),
+    ).resolves.toBe(true);
+    expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "active" }),
+    );
+
+    const updatedRevision = "b".repeat(40);
+    const updated = {
+      ...current,
+      sourceRevision: updatedRevision,
+      environment: { ...current.environment, XTAP_SOURCE_REVISION: updatedRevision },
+      labels: { ...current.labels, source_revision: updatedRevision },
+    };
+    const replacement = scheduleFixture(updated, "replacement", true);
+    hubMocks.listScheduledJobs
+      .mockReset()
+      .mockResolvedValueOnce([suspended])
+      .mockResolvedValueOnce([suspended])
+      .mockResolvedValueOnce([suspended])
+      .mockResolvedValueOnce([replacement]);
+    hubMocks.createScheduledJob.mockResolvedValue(replacement);
+    hubMocks.getScheduledJob.mockResolvedValue(replacement);
+
+    await expect(
+      finalizeEnrichmentScheduleUpdate(client, updated, {
+        resumeAfterMaintenance: true,
+        secrets: { storageToken: "hf_dataset", inferenceToken: "hf_inference" },
+      }),
+    ).resolves.toEqual({ suspendedStale: 0, resumed: true });
+    expect(hubMocks.deleteScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "active" }),
+    );
+    expect(hubMocks.resumeScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "replacement" }),
+    );
+  });
+
+  it("keeps a schedule suspended when maintenance started suspended", async () => {
+    const desired = await desiredFixture();
+    const exact = scheduleFixture(desired, "exact", true);
+    hubMocks.listScheduledJobs.mockResolvedValue([exact]);
+
+    await expect(
+      finalizeEnrichmentScheduleUpdate(client, desired, {
+        resumeAfterMaintenance: false,
+      }),
+    ).resolves.toEqual({ suspendedStale: 0, resumed: false });
+    expect(hubMocks.resumeScheduledJob).not.toHaveBeenCalled();
   });
 
   it("binds the index Bucket into the schedule contract", async () => {

@@ -339,6 +339,70 @@ export async function assertEnrichmentWritersQuiescent(options: {
     .digest("hex");
 }
 
+// eslint-disable-next-line complexity -- Maintenance admission validates the exact schedule before and after quiescing it.
+export async function quiesceCanonicalEnrichmentSchedule(
+  options: {
+    client: HubClient;
+    spaceRepo: string;
+    rawBucket: string;
+    variables: ReadonlyMap<string, string>;
+  },
+  wait: { pollIntervalMs?: number; timeoutMs?: number } = {},
+): Promise<boolean> {
+  const namespace = options.spaceRepo.split("/")[0];
+  if (namespace === undefined || namespace.length === 0) {
+    throw new Error(`Invalid Space repository: ${options.spaceRepo}.`);
+  }
+  const before = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
+  if (before.schedules.length !== 1) {
+    throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
+  }
+  const schedule = before.schedules[0];
+  if (schedule === undefined) {
+    throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
+  }
+  const sourceRevision = schedule.jobSpec.labels?.["source_revision"];
+  if (sourceRevision === undefined) {
+    throw new Error("Canonical enrichment schedule does not declare its source revision.");
+  }
+  const desired = desiredEnrichmentJobForRevision(
+    options.spaceRepo,
+    options.rawBucket,
+    options.variables,
+    sourceRevision,
+  );
+  if (!scheduleMatches(schedule, desired) || schedule.concurrency) {
+    throw new Error("Revision handoff requires the exact non-concurrent enrichment schedule.");
+  }
+  const wasActive = !schedule.suspend;
+  if (wasActive) {
+    await suspendScheduledJob({
+      namespace,
+      jobId: schedule.id,
+      ...hubOptions(options.client),
+    });
+  }
+  const deadline = Date.now() + (wait.timeoutMs ?? (desired.timeoutSeconds + 300) * 1_000);
+  for (;;) {
+    const current = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
+    const currentSchedule = current.schedules[0];
+    if (
+      current.schedules.length === 1 &&
+      currentSchedule?.id === schedule.id &&
+      currentSchedule.suspend &&
+      !currentSchedule.concurrency &&
+      scheduleMatches(currentSchedule, desired) &&
+      current.activeJobs.length === 0
+    ) {
+      return wasActive;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("Enrichment writers did not quiesce before the deployment deadline.");
+    }
+    await delay(wait.pollIntervalMs ?? 2_000);
+  }
+}
+
 async function readOwnedEnrichmentJobs(
   client: HubClient,
   namespace: string,
@@ -454,6 +518,30 @@ export async function suspendMismatchedEnrichmentSchedules(
     suspended += 1;
   }
   return suspended;
+}
+
+export async function finalizeEnrichmentScheduleUpdate(
+  client: HubClient,
+  desired: DesiredEnrichmentJob,
+  options: {
+    resumeAfterMaintenance: boolean;
+    secrets?: EnrichmentJobSecrets;
+  },
+): Promise<{ suspendedStale: number; resumed: boolean }> {
+  if (!options.resumeAfterMaintenance) {
+    return {
+      suspendedStale: await suspendMismatchedEnrichmentSchedules(client, desired),
+      resumed: false,
+    };
+  }
+  const inspection = await inspectEnrichmentJob(client, desired);
+  const schedule = await reconcileEnrichmentJob(
+    client,
+    desired,
+    inspection.exactSchedules.length === 0 ? options.secrets : undefined,
+  );
+  await resumeEnrichmentSchedule(client, desired, schedule.id);
+  return { suspendedStale: 0, resumed: true };
 }
 
 /** Suspend every owned schedule and wait for already-running writers to finish. */
