@@ -2,6 +2,7 @@
 title: Add small worker checkpoints
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-19
+updated: 2026-08-29
 tags: [enrichment, sqlite, checkpoints, hugging-face, resume]
 ---
 
@@ -33,6 +34,11 @@ process only missing units or registry candidates. It will not open the public
 index. The large index will be restored and updated once, during final
 publication for the logical run.
 
+When a physical Job completes that logical run, it will activate the verified
+successor and continue it in the same physical Job while useful work and the
+original physical-attempt time and cost budgets remain. It will not leave unused
+budget only because one frozen plan finished.
+
 ## Requirements
 
 The implementation must:
@@ -53,6 +59,9 @@ The implementation must:
 - Treat the mutable active-run pointer as a startup shortcut only.
 - Resolve the active run from that claim chain so the recurring schedule never pins one completed run forever.
 - Prepare the next compact work database from the already open final publication database, advance that local copy to the latest raw snapshot, carry the completed registry baseline forward while retaining candidates first observed after the frozen plan time, and activate the successor only after its plan and bootstrap checkpoint verify.
+- Continue the verified successor in the same physical Job when it has unresolved queue or registry work and the original physical-attempt budgets still admit work.
+- Carry one command start time and one cumulative $10 inference ceiling across every logical run processed by one physical Job. Successor activation must not reset either ceiling.
+- Stop at a durable boundary without polling or spinning when the active successor has no unresolved work or when the 40-minute worker or $10 inference ceiling is reached.
 - Repeat no more than one in-flight concurrency batch after interruption.
 - Keep progress monotonic across attempts in one logical run.
 - Build and fully verify the public SQLite index only after work completes.
@@ -66,7 +75,10 @@ The implementation must:
 
 This work does not change enrichment prompts, model selection, provider,
 taxonomy meaning, queue fairness, public routes, or capture storage. It does not
-create another Bucket, Dataset, service, scheduler, or credential.
+create another Bucket, Dataset, service, scheduler, or credential. It also does
+not change the `cpu-upgrade` hardware, six-hour cadence, secret names or
+destinations, quality limits, $0.25 per-call limit, $10 physical-attempt
+inference ceiling, 40-minute worker ceiling, or 45-minute platform timeout.
 
 The current immutable recovery Jobs and their saved data remain untouched. New
 code is implemented and tested on a feature branch. Production deployment waits
@@ -88,6 +100,15 @@ replays only the raw output segments claimed by that checkpoint into the compact
 worker database so queue results, registry statuses, and registry revisions are
 exact before new work starts. It does not restore the public database. The Job
 builds that database once after queue and registry work is complete.
+
+The physical-attempt coordinator records the command start time once. It adds
+settled inference cost and active reservations from each logical run before it
+admits work in a successor. A logical-run receipt remains tied to its immutable
+plan, but moving to a successor does not create a new physical-attempt budget.
+After publication activates a successor, the coordinator verifies that plan and
+its bootstrap checkpoint, checks whether queue or registry work remains, and
+continues it only when both physical-attempt ceilings still admit work. A
+zero-work successor ends the physical Job cleanly.
 
 ## Logical run plan
 
@@ -270,7 +291,10 @@ segment is durable and the verified checkpoint marks its ordinal complete.
 Retries retain attempts, error class, next retry time, and input identity.
 Blocked records retain the deterministic reason and evidence needed by the
 existing completion contract. Queue completion requires no pending or retrying
-records and only explicitly validated blocked records.
+records and only explicitly validated blocked records. Completion of one frozen
+queue is not a reason to end the physical Job: after verified publication and
+successor activation, the same Job continues the successor when it contains
+unresolved work and the shared physical-attempt budget remains.
 
 Leases remain physical-attempt state. They are not restored. The deterministic
 batch identity and result reconciliation prevent a cleared lease from losing a
@@ -557,7 +581,9 @@ Run:
 
 ```bash
 npm run check
+npm run coverage
 npm run mutate
+npx slophammer-ts check .
 npm run doctor
 npm run storage:verify
 npx -y @simpledoc/simpledoc check
@@ -566,6 +592,18 @@ npx -y @simpledoc/simpledoc check
 Add tests for plan determinism, production import, checkpoint round trips,
 missing-only queue work, registry cursor continuity, deterministic batch replay,
 publication recovery, and resumed-versus-uninterrupted equivalence.
+
+The backlog-drain change also needs direct tests for:
+
+- Continuing a verified successor in the same physical Job.
+- Carrying the original command start time and cumulative inference cost into
+  every successor.
+- Refusing successor work when the remaining physical-attempt time or cost does
+  not admit it.
+- Stopping once when the newest successor has no queue or registry work.
+- Interruption and resume at successor activation and first successor output.
+- No duplicate logical run, result batch, checkpoint, receipt, schedule, or
+  physical Job.
 
 The bootstrap repair also needs tests for:
 
@@ -722,6 +760,39 @@ disabled before schedule repair.
     Read back exactly one active canonical schedule. Remove the legacy schedule
     and source revision. Leave no physical xTap Job active at handoff.
 
+## Backlog-drain rollout
+
+The same-attempt successor change uses the existing production contract. Do not
+deploy it while physical Job `6a92b7ae45686a1580c14a67` or another matching
+Job is active. First wait for the Job to become terminal, then validate its
+receipt, result batches, checkpoint, public index, manifest, and active
+successor. Do not discard or repeat its durable work.
+
+Use this order:
+
+1. Run the complete repository checks and recovery tests on the final branch.
+2. Review and merge one narrow pull request.
+3. Wait for the xTap Space to report `RUNNING` at the exact merged revision.
+4. Use setup doctor to reconcile one exact suspended schedule. Run the required
+   sequential canary before activation. Keep the schedule non-concurrent at
+   `17 */6 * * *` on `cpu-upgrade` with the existing secrets and limits.
+5. Trigger or resume only one physical Job at a time. After each terminal
+   attempt, validate its cumulative physical-attempt cost, receipts, checkpoint
+   chain, result batches, index read-back, manifest, active successor, and zero
+   overlap before another attempt.
+6. Continue until one captured enrichment status reports `pending=0`,
+   `running=0`, `retrying=0`, and `blocked=0`. Record that source revision and
+   cutoff with the verified active successor and public index.
+7. Use the existing OurModels publication tooling only after that empty xTap
+   revision verifies. Reconcile its exact producer, generate and verify one
+   fresh publication from the captured revision, and leave one active
+   non-concurrent six-hour OurModels schedule.
+
+This rollout does not add a cross-service trigger or a new runtime contract.
+The recurring xTap Job drains successors within its existing physical-attempt
+bounds. The recurring OurModels Job keeps its own frozen-plan and cost
+contracts.
+
 ## Failure handling
 
 Fail closed before new provider calls or pointer writes when an identity, hash,
@@ -774,8 +845,14 @@ The work is complete when:
 - At most one in-flight concurrency batch repeats after interruption.
 - Progress stays monotonic across physical attempts.
 - Registry work never resets because queue work or new source data appeared.
-- A completed run activates exactly one verified successor, and the next
-  scheduled Job uses it without schedule replacement.
+- A completed run activates exactly one verified successor. The same physical
+  Job uses it while unresolved work and the original time and cost budgets
+  remain; otherwise the next scheduled Job resumes it without schedule
+  replacement.
+- One physical Job uses one command start time and one cumulative $10 inference
+  ceiling across every successor it processes.
+- A zero-work successor stops the physical Job without polling, spinning, or
+  creating duplicate work.
 - Interrupted final publication resumes from its last claimed state and reuses
   uploaded or verified immutable artifacts.
 - Resumed and uninterrupted runs produce the same logical database and manifest.
