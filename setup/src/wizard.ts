@@ -36,9 +36,10 @@ import {
 import {
   desiredEnrichmentJob,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
+  finalizeEnrichmentScheduleUpdate,
+  quiesceCanonicalEnrichmentSchedule,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
-  suspendMismatchedEnrichmentSchedules,
 } from "./enrichment-job.js";
 import {
   getSpaceVariables,
@@ -133,6 +134,15 @@ async function finishUpdate(
     await setSpaceSecret(client, config.spaceRepo, "HF_TOKEN", storageToken);
   }
   storageToken ??= await promptExistingStorageToken();
+  const scheduleWasActive = await quiesceCanonicalEnrichmentSchedule({
+    client,
+    spaceRepo: config.spaceRepo,
+    rawBucket: config.rawBucket,
+    variables,
+  });
+  const scheduleSecrets = scheduleWasActive
+    ? { storageToken, inferenceToken: await promptInferenceToken() }
+    : undefined;
   await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
   const prepareDeploymentManifest = createEnrichmentDeploymentManifestPreparer(
     productionEnrichmentHandoffPreparation({
@@ -160,13 +170,24 @@ async function finishUpdate(
     config.rawBucket,
     refreshedVariables,
   );
-  const suspended = await suspendMismatchedEnrichmentSchedules(client, desired);
+  const scheduleResult = await finalizeEnrichmentScheduleUpdate(client, desired, {
+    resumeAfterMaintenance: scheduleWasActive,
+    ...(scheduleSecrets === undefined ? {} : { secrets: scheduleSecrets }),
+  });
   task.stop("Space updated");
-  outro(
-    suspended === 0
-      ? `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}`
-      : `Done. Explorer: ${spacePublicUrl(config.spaceRepo)}\nSuspended ${String(suspended)} stale enrichment schedule(s). Run doctor --fix to replace them.`,
-  );
+  outro(updateCompletionMessage(config.spaceRepo, scheduleResult));
+}
+
+function updateCompletionMessage(
+  spaceRepo: string,
+  scheduleResult: { resumed: boolean; suspendedStale: number },
+): string {
+  const done = `Done. Explorer: ${spacePublicUrl(spaceRepo)}`;
+  if (scheduleResult.resumed) {
+    return `${done}\nRestored the validated canonical enrichment schedule.`;
+  }
+  if (scheduleResult.suspendedStale === 0) return done;
+  return `${done}\nSuspended ${String(scheduleResult.suspendedStale)} stale enrichment schedule(s). Run doctor --fix to replace them.`;
 }
 
 async function beginLegacyCutover(
