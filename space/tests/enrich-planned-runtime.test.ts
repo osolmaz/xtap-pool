@@ -66,7 +66,11 @@ import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
 import { runPlannedEnrichmentCommand } from "../src/enrich-planned-command.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
-import { createEmptyEnrichmentState, setPublicationState } from "../src/enrich-state.js";
+import {
+  createEmptyEnrichmentState,
+  recordQueueAttempt,
+  setPublicationState,
+} from "../src/enrich-state.js";
 import { contractHashFor } from "../src/enrich-worker.js";
 import { TweetStore } from "../src/store.js";
 
@@ -110,7 +114,7 @@ afterEach(async () => {
 });
 
 describe("planned enrichment runtime", () => {
-  it("finishes a published run and activates its verified successor without the public database", async () => {
+  it("stops after activating a verified blocked-only successor", async () => {
     const dataDir = join(
       tmpdir(),
       `xtap-planned-${process.pid.toString()}-${Date.now().toString()}`,
@@ -180,6 +184,11 @@ describe("planned enrichment runtime", () => {
     const successor = createEnrichmentRunPlan({
       ...withoutRunId(current.plan),
       created_at: "2026-08-19T13:00:00.000Z",
+      work: {
+        ...current.plan.work,
+        queue_total: 1,
+        queue_baseline_done: 0,
+      },
     });
     await Promise.all([
       store.writeImmutable(
@@ -236,6 +245,43 @@ describe("planned enrichment runtime", () => {
     await coordinator.commit(
       { name: "published", sequence: 1, reached_at: CREATED_AT, metadata: {} },
       adapter,
+    );
+    const successorState = recordQueueAttempt(
+      createEmptyEnrichmentState({
+        runId: successor.plan.run_id,
+        planSha256: successor.sha256,
+        queueTotal: 1,
+        queueBaselineDone: 0,
+        registryTotal: 0,
+        registryBaselineScanned: 0,
+      }),
+      {
+        status: "blocked",
+        value: {
+          ordinal: 0,
+          attempts: 1,
+          reason: "permanent",
+          evidence_sha256: "d".repeat(64),
+        },
+      },
+    );
+    const successorAdapter = new EnrichmentCheckpointAdapter({ ...successorState, sequence: 1 });
+    const successorCoordinator = CheckpointCoordinator.create({
+      runId: successor.plan.run_id,
+      attemptId: "bootstrap",
+      planSha256: successor.sha256,
+      store,
+      prefix: "operations/enrichment/runs",
+      clock: () => new Date("2026-08-19T13:00:00.000Z"),
+    });
+    await successorCoordinator.commit(
+      {
+        name: "bootstrap",
+        sequence: 1,
+        reached_at: "2026-08-19T13:00:00.000Z",
+        metadata: { imported: true },
+      },
+      successorAdapter,
     );
     await store.writeImmutable(
       `operations/enrichment/runs/${current.plan.run_id}/successor.json`,
