@@ -170,7 +170,14 @@ async function acceptsAdvancedHandoff(
 ): Promise<boolean> {
   if (handoff === null || prepared.handoff === null) return false;
   if (!sameHandoffPlanIdentity(handoff, prepared.handoff)) return false;
-  if (handoff.checkpoint_sequence >= prepared.checkpoint.manifest.boundary.sequence) return false;
+  const currentSequence = prepared.checkpoint.manifest.boundary.sequence;
+  if (handoff.checkpoint_sequence > currentSequence) return false;
+  if (
+    handoff.checkpoint_sequence === currentSequence &&
+    !sameHandoffCheckpointReference(handoff, prepared.checkpoint.checkpoint)
+  ) {
+    return false;
+  }
   await verifyRevisionHandoffAnchor(store, handoff);
   return true;
 }
@@ -257,6 +264,17 @@ async function restoreLatestCheckpointReadOnly(
   }
   const evidence = await adapter.restore(verified.manifest, verified.payloads);
   return { checkpoint: head.checkpoint, manifest: verified.manifest, evidence };
+}
+
+function sameHandoffCheckpointReference(
+  handoff: EnrichmentRevisionHandoff,
+  checkpoint: CheckpointReference,
+): boolean {
+  return (
+    handoff.checkpoint_key === checkpoint.key &&
+    handoff.checkpoint_sha256 === checkpoint.sha256 &&
+    handoff.checkpoint_bytes === checkpoint.bytes
+  );
 }
 
 function sameHandoffPlanIdentity(
