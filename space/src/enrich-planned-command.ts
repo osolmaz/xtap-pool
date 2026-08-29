@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import Database from "better-sqlite3";
 import { z } from "zod";
-import { CheckpointCoordinator } from "@osolmaz/hf-job-control";
+import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-job-control";
 import {
   attemptEventSchema,
   freeLabelEventSchema,
@@ -46,6 +46,7 @@ import type { EnrichmentRunPlan } from "./enrich-run-plan.js";
 import {
   prepareEnrichmentRevision,
   verifyPreparedEnrichmentRevision,
+  type PreparedEnrichmentRevision,
 } from "./enrich-revision-handoff.js";
 import type { EnrichmentCheckpointState, OutputKind } from "./enrich-state.js";
 import {
@@ -188,6 +189,118 @@ export async function runPlannedEnrichmentCommand(
       : { maxCostPerCallUsd: config.enrichMaxCostPerCallUsd }),
     run: (budget) => runSinglePlannedEnrichmentRun(env, budget, options.deploymentManifest),
   });
+}
+
+// eslint-disable-next-line complexity -- Deployment preflight verifies each frozen input and output boundary independently.
+export async function validatePreparedEnrichmentWorkerOutputs(options: {
+  preparedRevision: PreparedEnrichmentRevision;
+  checkpointStore: CheckpointObjectStore;
+  rawBucket: string;
+  accessToken: string;
+  dataDir: string;
+}): Promise<{ claimedSegments: number; orphanSegments: 0 }> {
+  const plan = options.preparedRevision.plan;
+  if (plan.source.bucket !== options.rawBucket) {
+    throw new Error("active enrichment plan raw Bucket mismatch");
+  }
+  const workPath = join(options.dataDir, "handoff-work.sqlite");
+  await mkdir(dirname(workPath), { recursive: true });
+  await rm(workPath, { force: true });
+  const workBytes = await requiredObject(options.checkpointStore, plan.work.key);
+  verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
+  await writeFile(workPath, workBytes);
+
+  const sourceSegmentsBytes = await requiredObject(
+    options.checkpointStore,
+    plan.source.ordered_segments.key,
+  );
+  verifyObject(
+    sourceSegmentsBytes,
+    plan.source.ordered_segments.bytes,
+    plan.source.ordered_segments.sha256,
+    "ordered source segments",
+  );
+  const sourceSegments = parseSourceSegments(sourceSegmentsBytes);
+  const sourceSnapshot = bucketSnapshotSchema.parse({
+    schema_version: 1,
+    bucket: plan.source.bucket,
+    files: sourceSegments,
+  });
+  if (sha256(canonicalBytes(sourceSnapshot)) !== plan.source.snapshot_revision) {
+    throw new Error("ordered source segments do not match the plan snapshot");
+  }
+
+  const log = new BucketLog(
+    options.rawBucket,
+    createRawBucketReader(options.rawBucket, options.accessToken),
+    join(options.dataDir, "handoff-raw-cache"),
+  );
+  const { taxonomy, contractHash } = await resolveEnrichmentTaxonomyForContract({
+    log,
+    snapshot: sourceSnapshot,
+    taxonomyVersion: plan.contract.taxonomy_version,
+    llmModel: plan.contract.model,
+    expectedContractHash: plan.contract.contract_sha256,
+    concurrency: 16,
+  });
+  const tweetStore = new TweetStore(workPath);
+  const enrichStore = new EnrichStore(
+    tweetStore.database,
+    taxonomy.version,
+    () => new Date(),
+    contractHash,
+  );
+  try {
+    const quickCheck = tweetStore.database.pragma("quick_check") as { quick_check: string }[];
+    if (quickCheck.length !== 1 || quickCheck[0]?.quick_check !== "ok") {
+      throw new Error("planned work database SQLite quick_check failed");
+    }
+    const ordinals = readQueueOrdinals(tweetStore.database);
+    const queueBaselineOrdinals = readQueueBaselineOrdinals(tweetStore.database);
+    const queueIdentities = readQueueIdentities(tweetStore.database, contractHash);
+    const registryNames = readRegistryNames(tweetStore.database);
+    if (ordinals.size !== plan.work.queue_total || queueIdentities.size !== plan.work.queue_total) {
+      throw new Error("planned work queue count does not match the plan");
+    }
+    if (queueBaselineOrdinals.size !== plan.work.queue_baseline_done) {
+      throw new Error("planned work queue baseline does not match the plan");
+    }
+    if (registryNames.length + plan.work.registry_baseline_scanned !== plan.work.registry_total) {
+      throw new Error("planned work registry count does not match the plan");
+    }
+
+    const state = options.preparedRevision.adapter.state;
+    const replayEvidence = await restoreAndReconcileWorkerOutputs({
+      log,
+      sourceSegments,
+      checkpointStore: options.checkpointStore,
+      rejectUncheckpointedResults: true,
+      runId: plan.run_id,
+      state: () => state,
+      registryNames,
+      registryBaselineOrdinal: plan.work.registry_baseline_scanned,
+      queueBaselineOrdinals,
+      queueIdentities,
+      contractHash,
+      tweetStore,
+      enrichStore,
+      outputClaimsProgress: () => Promise.resolve(),
+      replayProgress: () => Promise.resolve(),
+    });
+    applyCheckpointToWorkerDatabase(tweetStore.database, state);
+    const restoredQuickCheck = tweetStore.database.pragma("quick_check") as {
+      quick_check: string;
+    }[];
+    if (restoredQuickCheck.length !== 1 || restoredQuickCheck[0]?.quick_check !== "ok") {
+      throw new Error("restored work database SQLite quick_check failed");
+    }
+    if (replayEvidence.orphanSegments !== 0) {
+      throw new Error("enrichment handoff preparation found orphan worker output segments");
+    }
+    return { claimedSegments: replayEvidence.claimedSegments, orphanSegments: 0 };
+  } finally {
+    tweetStore.close();
+  }
 }
 
 // eslint-disable-next-line complexity -- One logical run owns ordered restore, work, checkpoint, and publication stages.
@@ -1127,7 +1240,8 @@ function applyAttemptEvents(
 async function restoreAndReconcileWorkerOutputs(options: {
   log: BucketLog;
   sourceSegments: readonly BucketSnapshotFile[];
-  checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
+  checkpointStore: CheckpointObjectStore;
+  rejectUncheckpointedResults?: boolean;
   runId: string;
   state: () => EnrichmentCheckpointState;
   commitOutputs?: (outputs: readonly DurableWorkerOutput[]) => Promise<void>;
@@ -1149,7 +1263,11 @@ async function restoreAndReconcileWorkerOutputs(options: {
       queue: options.queueBaselineOrdinals,
       registry: options.registryBaselineOrdinal,
     },
-    { concurrency: 16, progress: options.outputClaimsProgress },
+    {
+      concurrency: 16,
+      progress: options.outputClaimsProgress,
+      rejectUncheckpointedResults: options.rejectUncheckpointedResults ?? false,
+    },
   );
   const claimed = new Set(claimedKeys);
   const seen = new Set<string>();
@@ -1295,13 +1413,14 @@ export function parseSourceSegments(bytes: Uint8Array): BucketSnapshotFile[] {
 
 // eslint-disable-next-line complexity -- Publication verifies every claimed result chain before applying raw segments.
 export async function readRunOutputKeys(
-  store: ReturnType<typeof createEnrichmentCheckpointStore>,
+  store: CheckpointObjectStore,
   runId: string,
   state: EnrichmentCheckpointState,
   baseline: { queue: ReadonlySet<number>; registry: number },
   options: {
     concurrency: number;
     progress?: (completed: number, total: number) => Promise<void>;
+    rejectUncheckpointedResults?: boolean;
   } = { concurrency: 1 },
 ): Promise<readonly string[]> {
   validateOutputBaselines(state, baseline);
@@ -1327,7 +1446,12 @@ export async function readRunOutputKeys(
   for (const { result, sha256: resultSha256 } of results) {
     if (result.run_id !== runId) throw new Error("batch result run ID mismatch");
     const frontierKind: OutputKind = result.phase === "queue" ? "enrichment" : result.phase;
-    if (result.sequence > state.outputs[frontierKind].sequence) continue;
+    if (result.sequence > state.outputs[frontierKind].sequence) {
+      if (options.rejectUncheckpointedResults === true) {
+        throw new Error(`uncheckpointed ${frontierKind} result manifest`);
+      }
+      continue;
+    }
     const previous = chains.get(frontierKind) ?? { sequence: 0, sha256: null };
     if (
       result.sequence !== previous.sequence + 1 ||
@@ -1517,10 +1641,7 @@ function isBitmapCompleted(bitmap: Uint8Array, ordinal: number): boolean {
   return ((bitmap[Math.floor(ordinal / 8)] ?? 0) & (1 << (ordinal % 8))) !== 0;
 }
 
-async function requiredObject(
-  store: ReturnType<typeof createEnrichmentCheckpointStore>,
-  key: string,
-): Promise<Uint8Array> {
+async function requiredObject(store: CheckpointObjectStore, key: string): Promise<Uint8Array> {
   const value = await store.read(key);
   if (value === null) throw new Error(`required enrichment object is missing: ${key}`);
   return value;

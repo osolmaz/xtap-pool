@@ -45,14 +45,21 @@ export type PreparedEnrichmentRevision = {
   adapter: EnrichmentCheckpointAdapter;
 };
 
+export async function prepareOptionalEnrichmentRevision(options: {
+  store: CheckpointObjectStore;
+  targetWorkerRevision: string;
+}): Promise<PreparedEnrichmentRevision | null> {
+  requireTargetRevision(options.targetWorkerRevision);
+  const activationKeys = await options.store.list(ACTIVATION_PREFIX);
+  if (activationKeys.length === 0) return null;
+  return prepareEnrichmentRevision(options);
+}
+
 export async function prepareOptionalEnrichmentRevisionHandoff(options: {
   store: CheckpointObjectStore;
   targetWorkerRevision: string;
 }): Promise<EnrichmentRevisionHandoff | null> {
-  requireTargetRevision(options.targetWorkerRevision);
-  const activationKeys = await options.store.list(ACTIVATION_PREFIX);
-  if (activationKeys.length === 0) return null;
-  return (await prepareEnrichmentRevision(options)).handoff;
+  return (await prepareOptionalEnrichmentRevision(options))?.handoff ?? null;
 }
 
 export async function prepareEnrichmentRevision(options: {

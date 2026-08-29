@@ -84,6 +84,7 @@ describe("enrichment deployment handoff preparation", () => {
             "space",
           ]);
           expect(options?.env).toMatchObject({
+            RAW_BUCKET: "alice/raw",
             INDEX_BUCKET: "alice/index",
             HF_TOKEN: "storage-token",
             XTAP_TARGET_SOURCE_REVISION: TARGET,
