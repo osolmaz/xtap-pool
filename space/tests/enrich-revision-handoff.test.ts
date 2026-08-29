@@ -272,6 +272,23 @@ describe("immutable enrichment revision handoff", () => {
     await expect(
       verifyPreparedEnrichmentRevision(manifest, prepared, TARGET_REVISION, store),
     ).resolves.toEqual(manifest);
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, prepared, "d".repeat(40), store),
+    ).rejects.toThrow("deployment manifest source does not match the running worker revision");
+    await expect(
+      verifyPreparedEnrichmentRevision(
+        {
+          ...manifest,
+          enrichment_revision_handoff: {
+            ...enrichmentRevisionHandoffSchema.parse(prepared.handoff),
+            checkpoint_sequence: 808,
+          },
+        },
+        prepared,
+        TARGET_REVISION,
+        store,
+      ),
+    ).rejects.toThrow("checkpoint chain");
     expect(store.writes).toBe(writesBefore);
 
     const restoredAgain = await prepareEnrichmentRevision({
