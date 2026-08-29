@@ -131,6 +131,45 @@ describe("bounded successor drain", () => {
     ).rejects.toThrow("exceeded the remaining physical-attempt cost");
   });
 
+  it.each([Number.NaN, -0.01])("rejects invalid reported provider cost %s", async (cost) => {
+    await expect(
+      runBoundedSuccessorDrain({
+        maxCostUsd: 1,
+        now: () => 0,
+        run: () => Promise.resolve({ providerCostUsd: cost, successorHasWork: true }),
+      }),
+    ).rejects.toThrow("reported invalid provider cost");
+  });
+
+  it("continues without a configured cost ceiling or per-call reservation", async () => {
+    let calls = 0;
+    const result = await runBoundedSuccessorDrain({
+      now: () => 0,
+      run: (budget) => {
+        calls += 1;
+        expect(budget).toEqual({ commandStartedAtMs: 0 });
+        return Promise.resolve({ providerCostUsd: 0, successorHasWork: calls === 1 });
+      },
+    });
+
+    expect(result).toEqual({ logicalRuns: 2, providerCostUsd: 0 });
+  });
+
+  it("stops when a completed run consumes the exact cost ceiling", async () => {
+    let calls = 0;
+    const result = await runBoundedSuccessorDrain({
+      maxCostUsd: 1,
+      now: () => 0,
+      run: () => {
+        calls += 1;
+        return Promise.resolve({ providerCostUsd: 1, successorHasWork: true });
+      },
+    });
+
+    expect(result).toEqual({ logicalRuns: 1, providerCostUsd: 1 });
+    expect(calls).toBe(1);
+  });
+
   it("computes remaining physical-attempt cost without going negative", () => {
     expect(remainingWorkerCostUsd(undefined, 4)).toBeUndefined();
     expect(remainingWorkerCostUsd(10, 4)).toBe(6);
