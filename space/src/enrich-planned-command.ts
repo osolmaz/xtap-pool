@@ -11,7 +11,7 @@ import {
   parseEnrichReceipt,
   parseEnrichmentRow,
 } from "@xtap-pool/shared";
-import type { AttemptEvent, FreeLabelEvent } from "@xtap-pool/shared";
+import type { AttemptEvent, EnrichReceipt, FreeLabelEvent } from "@xtap-pool/shared";
 
 import { activateEnrichmentRun, resolveActiveEnrichmentRun } from "./enrich-active-run.js";
 import { mapBatchesInOrder } from "./bounded-concurrency.js";
@@ -90,11 +90,102 @@ const sourceSegmentSchema = z
   })
   .strict();
 
-// eslint-disable-next-line complexity -- The command owns ordered restore, work, checkpoint, and publication stages.
+export type PlannedEnrichmentBudget = {
+  commandStartedAtMs: number;
+  maxElapsedMs?: number;
+  maxCostUsd?: number;
+};
+
+export type PlannedEnrichmentRunResult = {
+  providerCostUsd: number;
+  successorHasWork: boolean;
+};
+
+// eslint-disable-next-line complexity -- The loop must gate optional time, cost, reservation, and reported-cost bounds together.
+export async function runBoundedSuccessorDrain(options: {
+  maxElapsedMs?: number;
+  maxCostUsd?: number;
+  maxCostPerCallUsd?: number;
+  now?: () => number;
+  run: (budget: PlannedEnrichmentBudget) => Promise<PlannedEnrichmentRunResult>;
+}): Promise<{ logicalRuns: number; providerCostUsd: number }> {
+  const now = options.now ?? Date.now;
+  const commandStartedAtMs = now();
+  let logicalRuns = 0;
+  let providerCostUsd = 0;
+  let successorHasWork = true;
+  while (successorHasWork) {
+    const remainingElapsedMs = remainingWorkerElapsedMs(
+      options.maxElapsedMs,
+      commandStartedAtMs,
+      now(),
+    );
+    const maxCostUsd = remainingWorkerCostUsd(options.maxCostUsd, providerCostUsd);
+    if (
+      logicalRuns > 0 &&
+      !successorBudgetAdmitsWork(remainingElapsedMs, maxCostUsd, options.maxCostPerCallUsd)
+    ) {
+      break;
+    }
+    const result = await options.run({
+      commandStartedAtMs,
+      ...(options.maxElapsedMs === undefined ? {} : { maxElapsedMs: options.maxElapsedMs }),
+      ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
+    });
+    if (!Number.isFinite(result.providerCostUsd) || result.providerCostUsd < 0) {
+      throw new Error("planned enrichment reported invalid provider cost");
+    }
+    if (maxCostUsd !== undefined && result.providerCostUsd > maxCostUsd) {
+      throw new Error("planned enrichment exceeded the remaining physical-attempt cost");
+    }
+    providerCostUsd += result.providerCostUsd;
+    logicalRuns += 1;
+    successorHasWork = result.successorHasWork;
+  }
+  return { logicalRuns, providerCostUsd };
+}
+
+export function remainingWorkerCostUsd(
+  configuredUsd: number | undefined,
+  consumedUsd: number,
+): number | undefined {
+  return configuredUsd === undefined ? undefined : Math.max(0, configuredUsd - consumedUsd);
+}
+
+function successorBudgetAdmitsWork(
+  remainingElapsedMs: number | undefined,
+  remainingCostUsd: number | undefined,
+  maxCostPerCallUsd: number | undefined,
+): boolean {
+  if (remainingElapsedMs !== undefined && remainingElapsedMs <= 0) return false;
+  if (remainingCostUsd === undefined) return true;
+  if (remainingCostUsd <= 0) return false;
+  return maxCostPerCallUsd === undefined || remainingCostUsd >= maxCostPerCallUsd;
+}
+
 export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
 ): Promise<void> {
-  const commandStartedAtMs = Date.now();
+  const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
+  const config = loadConfig(
+    restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
+  );
+  await runBoundedSuccessorDrain({
+    ...(config.enrichMaxElapsedMs === undefined ? {} : { maxElapsedMs: config.enrichMaxElapsedMs }),
+    ...(config.enrichMaxCostUsd === undefined ? {} : { maxCostUsd: config.enrichMaxCostUsd }),
+    ...(config.enrichMaxCostPerCallUsd === undefined
+      ? {}
+      : { maxCostPerCallUsd: config.enrichMaxCostPerCallUsd }),
+    run: (budget) => runSinglePlannedEnrichmentRun(env, budget),
+  });
+}
+
+// eslint-disable-next-line complexity -- One logical run owns ordered restore, work, checkpoint, and publication stages.
+async function runSinglePlannedEnrichmentRun(
+  env: Record<string, string | undefined>,
+  budget: PlannedEnrichmentBudget,
+): Promise<PlannedEnrichmentRunResult> {
+  const commandStartedAtMs = budget.commandStartedAtMs;
   const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
   const config = loadConfig(
     restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
@@ -366,7 +457,7 @@ export async function runPlannedEnrichmentCommand(
       }),
     );
     tweetStore.close();
-    return;
+    return { providerCostUsd: 0, successorHasWork: false };
   }
   if (progress === null) throw new Error("planned enrichment progress is unavailable");
 
@@ -415,7 +506,7 @@ export async function runPlannedEnrichmentCommand(
         databaseBytes,
         publicationBoundary: commitPublicationBoundary,
       });
-      await ensureSuccessorRun({
+      const successor = await ensureSuccessorRun({
         config,
         log,
         checkpointStore,
@@ -426,7 +517,7 @@ export async function runPlannedEnrichmentCommand(
         databasePath: resumePath,
       });
       await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
-      return;
+      return { providerCostUsd: 0, successorHasWork: successor.hasWork };
     }
     if (state.publication.state === "published") {
       const manifest = state.publication.manifest;
@@ -434,7 +525,7 @@ export async function runPlannedEnrichmentCommand(
       if (manifest === null || databaseBytes === null) {
         throw new Error("published database reference is incomplete");
       }
-      await ensureSuccessorRun({
+      const successor = await ensureSuccessorRun({
         config,
         log,
         checkpointStore,
@@ -445,7 +536,7 @@ export async function runPlannedEnrichmentCommand(
         databasePath: join(config.dataDir, "planned", `${runId}-published.sqlite`),
       });
       await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
-      return;
+      return { providerCostUsd: 0, successorHasWork: successor.hasWork };
     }
 
     const inferenceToken = config.inferenceToken;
@@ -464,18 +555,14 @@ export async function runPlannedEnrichmentCommand(
           }),
     });
     const ceilings: WorkerCeilings = {
-      maxElapsedMs: remainingWorkerElapsedMs(
-        config.enrichMaxElapsedMs,
-        commandStartedAtMs,
-        Date.now(),
-      ),
+      maxElapsedMs: remainingWorkerElapsedMs(budget.maxElapsedMs, commandStartedAtMs, Date.now()),
       maxErrorRate: config.enrichMaxErrorRate,
-      maxCostUsd: config.enrichMaxCostUsd,
+      maxCostUsd: budget.maxCostUsd,
       maxCostPerCallUsd: config.enrichMaxCostPerCallUsd,
       maxDiscardedAssignmentsPerUnit: config.enrichMaxDiscardedAssignmentsPerUnit,
       discardedAssignmentRateMinUnits: config.enrichDiscardedAssignmentRateMinUnits,
     };
-    await runEnrichTick({
+    const receipt = await runEnrichTick({
       enrichStore,
       log,
       taxonomy,
@@ -560,7 +647,7 @@ export async function runPlannedEnrichmentCommand(
         const manifest = await publication.publish();
         const databaseBytes = state.publication.database_bytes;
         if (databaseBytes === null) throw new Error("published database byte count is missing");
-        await ensureSuccessorRun({
+        const successor = await ensureSuccessorRun({
           config,
           log,
           checkpointStore,
@@ -572,16 +659,42 @@ export async function runPlannedEnrichmentCommand(
           publication,
         });
         await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
+        return {
+          providerCostUsd: receiptProviderCostUsd(receipt, budget.maxCostUsd),
+          successorHasWork: successor.hasWork,
+        };
       } finally {
         publication.close();
       }
     }
+    return {
+      providerCostUsd: receiptProviderCostUsd(receipt, budget.maxCostUsd),
+      successorHasWork: false,
+    };
   } catch (error) {
     await progress.blocked();
     throw error;
   } finally {
     tweetStore.close();
   }
+}
+
+type VerifiedSuccessor = {
+  runId: string;
+  planSha256: string;
+  hasWork: boolean;
+};
+
+function receiptProviderCostUsd(
+  receipt: EnrichReceipt,
+  enforcedCostCeilingUsd: number | undefined,
+): number {
+  if (receipt.cost_usd !== undefined) return receipt.cost_usd;
+  if (receipt.calls === 0) return 0;
+  if (enforcedCostCeilingUsd !== undefined) {
+    throw new Error("planned enrichment receipt is missing provider cost");
+  }
+  return 0;
 }
 
 async function ensureSuccessorRun(options: {
@@ -594,7 +707,7 @@ async function ensureSuccessorRun(options: {
   databaseBytes: number;
   databasePath: string;
   publication?: DurableIndex;
-}): Promise<void> {
+}): Promise<VerifiedSuccessor> {
   const predecessorPlanSha256 = parseEnrichmentRunPlan(options.plan).sha256;
   const referenceKey = `${RUN_PREFIX}/${options.plan.run_id}/successor.json`;
   const existing = await options.checkpointStore.read(referenceKey);
@@ -615,7 +728,7 @@ async function ensureSuccessorRun(options: {
       activatedAt: reference.created_at,
       expectedCurrentPlanSha256: predecessorPlanSha256,
     });
-    return;
+    return readVerifiedSuccessor(options.checkpointStore, reference.run_id, reference.plan_sha256);
   }
 
   let publication = options.publication;
@@ -705,10 +818,33 @@ async function ensureSuccessorRun(options: {
       activatedAt: createdAt,
       expectedCurrentPlanSha256: predecessorPlanSha256,
     });
+    return await readVerifiedSuccessor(
+      options.checkpointStore,
+      successor.runId,
+      successor.planSha256,
+    );
   } finally {
     if (successorSourcePath !== null) await rm(successorSourcePath, { force: true });
     if (closePublication) publication.close();
   }
+}
+
+async function readVerifiedSuccessor(
+  store: ReturnType<typeof createEnrichmentCheckpointStore>,
+  runId: string,
+  planSha256: string,
+): Promise<VerifiedSuccessor> {
+  const bytes = await requiredObject(store, `${RUN_PREFIX}/${runId}/plan.json`);
+  const parsed: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
+  const { plan } = parseEnrichmentRunPlan(parsed, planSha256);
+  if (plan.run_id !== runId) throw new Error("enrichment successor plan ID mismatch");
+  return {
+    runId,
+    planSha256,
+    hasWork:
+      plan.work.queue_baseline_done < plan.work.queue_total ||
+      plan.work.registry_baseline_scanned < plan.work.registry_total,
+  };
 }
 
 function countRows(database: Database.Database, table: string): number {
