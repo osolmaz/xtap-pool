@@ -728,7 +728,12 @@ async function ensureSuccessorRun(options: {
       activatedAt: reference.created_at,
       expectedCurrentPlanSha256: predecessorPlanSha256,
     });
-    return readVerifiedSuccessor(options.checkpointStore, reference.run_id, reference.plan_sha256);
+    return readVerifiedSuccessor(
+      options.checkpointStore,
+      reference.run_id,
+      reference.plan_sha256,
+      options.attemptId,
+    );
   }
 
   let publication = options.publication;
@@ -822,6 +827,7 @@ async function ensureSuccessorRun(options: {
       options.checkpointStore,
       successor.runId,
       successor.planSha256,
+      options.attemptId,
     );
   } finally {
     if (successorSourcePath !== null) await rm(successorSourcePath, { force: true });
@@ -833,18 +839,32 @@ async function readVerifiedSuccessor(
   store: ReturnType<typeof createEnrichmentCheckpointStore>,
   runId: string,
   planSha256: string,
+  attemptId: string,
 ): Promise<VerifiedSuccessor> {
   const bytes = await requiredObject(store, `${RUN_PREFIX}/${runId}/plan.json`);
   const parsed: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
   const { plan } = parseEnrichmentRunPlan(parsed, planSha256);
   if (plan.run_id !== runId) throw new Error("enrichment successor plan ID mismatch");
-  return {
+  const adapter = new EnrichmentCheckpointAdapter(
+    createEmptyEnrichmentState({
+      runId,
+      planSha256,
+      queueTotal: plan.work.queue_total,
+      queueBaselineDone: plan.work.queue_baseline_done,
+      registryTotal: plan.work.registry_total,
+      registryBaselineScanned: plan.work.registry_baseline_scanned,
+    }),
+  );
+  const coordinator = CheckpointCoordinator.create({
     runId,
+    attemptId,
     planSha256,
-    hasWork:
-      plan.work.queue_baseline_done < plan.work.queue_total ||
-      plan.work.registry_baseline_scanned < plan.work.registry_total,
-  };
+    store,
+    prefix: RUN_PREFIX,
+  });
+  const restored = await coordinator.restoreLatest(adapter);
+  if (restored === null) throw new Error("enrichment successor has no bootstrap checkpoint");
+  return { runId, planSha256, hasWork: !runIsComplete(adapter.state) };
 }
 
 function countRows(database: Database.Database, table: string): number {
