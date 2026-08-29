@@ -985,7 +985,14 @@ function mockDownloads(
   hubMocks.downloadFile.mockImplementation(
     (options: { repo?: { type?: string; name?: string }; path?: string }) => {
       if (options.repo?.type === "space") {
-        return Promise.resolve(new Blob([JSON.stringify({ source_revision: SOURCE_REVISION })]));
+        return Promise.resolve(
+          new Blob([
+            JSON.stringify({
+              source_revision: SOURCE_REVISION,
+              enrichment_revision_handoff: null,
+            }),
+          ]),
+        );
       }
       if (options.repo?.name === "alice/xtap-pool-bucket") {
         return Promise.resolve(new Blob(["{}"]));

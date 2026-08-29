@@ -95,6 +95,32 @@ secrets, uploads the current Space code, and reconciles missing variables. It
 removes the retired `DATASET_REPO` variable. It does not create or rotate
 signing or session secrets.
 
+A reviewed deployment can continue an unfinished enrichment plan from an older
+worker revision only through one exact immutable revision handoff. The updater
+must first prove that the canonical schedule is suspended, no enrichment Job is
+active, and the active plan and checkpoint fully verify. It records the
+secret-free handoff in `.xtap-deployment.json` in the Space commit. It does not
+change any plan, checkpoint, result, claim, receipt, pointer, index, database,
+or manifest in either Bucket.
+
+The worker normally requires the plan worker revision to equal the deployed
+source revision. A mismatch is valid only when the deployment manifest pins the
+exact active generation, activation, run, plan, contract, source snapshot,
+predecessor and target worker revisions, checkpoint pointer, sequence, object,
+digest, and size. The worker verifies the complete handoff and restores the
+pinned checkpoint before it creates a provider or any write-capable runtime
+object. Missing, stale, conflicting, malformed, or forked identities fail
+closed. There is no revision list, wildcard, fallback, or environment override.
+
+Keep the schedule suspended and do not run a paid Job while preparing,
+reviewing, deploying, or restore-testing this handoff. After deployment, verify
+the exact Space repository and runtime revisions, manifest, health, one
+suspended non-concurrent schedule, zero active Jobs, exact restore, zero orphan
+segments, zero provider calls, and unchanged pointers and object listings. A
+later paid retry needs its own cost and non-overlap gate. See
+[Add small worker checkpoints](docs/2026-08-19-small-worker-checkpoints-plan.md#reviewed-worker-revision-handoff)
+for the complete contract and repair plan.
+
 The lower-level deployment script is also available. Supplying
 `XTAP_STORAGE_TOKEN` authorizes the script to bootstrap the index and install
 that value as the Space `HF_TOKEN` secret. An existing pool also requires the

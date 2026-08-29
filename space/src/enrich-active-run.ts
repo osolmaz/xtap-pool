@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
 import { z } from "zod";
@@ -25,13 +26,28 @@ const activeRunSchema = z
 
 export type ActiveEnrichmentRun = z.infer<typeof activeRunSchema>;
 
-// eslint-disable-next-line complexity -- Every activation identity and chain edge is verified independently.
+export type ActiveEnrichmentRunEvidence = {
+  activeRun: ActiveEnrichmentRun;
+  key: string;
+  bytes: Uint8Array;
+  sha256: string;
+};
+
 export async function resolveActiveEnrichmentRun(
   store: CheckpointObjectStore,
 ): Promise<ActiveEnrichmentRun> {
+  return (await resolveActiveEnrichmentRunEvidence(store)).activeRun;
+}
+
+// eslint-disable-next-line complexity -- Every activation identity and chain edge is verified independently.
+export async function resolveActiveEnrichmentRunEvidence(
+  store: CheckpointObjectStore,
+): Promise<ActiveEnrichmentRunEvidence> {
   const keys = (await store.list(ACTIVATION_PREFIX)).filter((key) => CLAIM_KEY.test(key)).sort();
   if (keys.length === 0) throw new Error("enrichment run activation history is empty");
   let previous: ActiveEnrichmentRun | null = null;
+  let currentKey: string | null = null;
+  let currentBytes: Uint8Array | null = null;
   for (const [index, key] of keys.entries()) {
     const generation = index + 1;
     if (key !== activationKey(generation)) {
@@ -50,9 +66,18 @@ export async function resolveActiveEnrichmentRun(
     }
     await verifyPlan(store, claim);
     previous = claim;
+    currentKey = key;
+    currentBytes = Uint8Array.from(value);
   }
-  if (previous === null) throw new Error("enrichment run activation history is empty");
-  return previous;
+  if (previous === null || currentKey === null || currentBytes === null) {
+    throw new Error("enrichment run activation history is empty");
+  }
+  return {
+    activeRun: previous,
+    key: currentKey,
+    bytes: currentBytes,
+    sha256: createHash("sha256").update(currentBytes).digest("hex"),
+  };
 }
 
 // eslint-disable-next-line complexity -- Activation handles first-run, idempotent, and fenced successor writes.

@@ -229,10 +229,18 @@ describe("planned enrichment restore-only runtime", () => {
       llmModel: "model:provider",
     });
 
-    await runPlannedEnrichmentCommand({
-      XTAP_RESTORE_ONLY: "true",
-      XTAP_SOURCE_REVISION: created.plan.contract.worker_revision,
-    });
+    await runPlannedEnrichmentCommand(
+      {
+        XTAP_RESTORE_ONLY: "true",
+        XTAP_SOURCE_REVISION: created.plan.contract.worker_revision,
+      },
+      {
+        deploymentManifest: {
+          source_revision: created.plan.contract.worker_revision,
+          enrichment_revision_handoff: null,
+        },
+      },
+    );
 
     expect(store.writes).toBe(writesBeforeRestore);
     expect(mocks.rawList).toHaveBeenCalledTimes(1);

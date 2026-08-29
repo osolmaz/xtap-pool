@@ -70,7 +70,11 @@ describe("space staging helpers", () => {
         await captureCommand("git", ["rev-parse", "HEAD"], { cwd: repo })
       ).stdout.trim();
       await expect(readFile(join(stage, ".xtap-deployment.json"), "utf8")).resolves.toBe(
-        `${JSON.stringify({ source_revision: sourceRevision }, null, 2)}\n`,
+        `${JSON.stringify(
+          { source_revision: sourceRevision, enrichment_revision_handoff: null },
+          null,
+          2,
+        )}\n`,
       );
       await expect(readdir(join(stage, "docs"))).rejects.toThrow();
       await expect(readdir(join(stage, "extension"))).rejects.toThrow();

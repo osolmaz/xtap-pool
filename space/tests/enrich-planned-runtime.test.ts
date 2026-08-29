@@ -312,10 +312,18 @@ describe("planned enrichment runtime", () => {
       llmModel: "model:provider",
     });
 
-    await runPlannedEnrichmentCommand({
-      JOB_ID: "attempt-2",
-      XTAP_SOURCE_REVISION: current.plan.contract.worker_revision,
-    });
+    await runPlannedEnrichmentCommand(
+      {
+        JOB_ID: "attempt-2",
+        XTAP_SOURCE_REVISION: current.plan.contract.worker_revision,
+      },
+      {
+        deploymentManifest: {
+          source_revision: current.plan.contract.worker_revision,
+          enrichment_revision_handoff: null,
+        },
+      },
+    );
 
     expect(mocks.progress.complete).toHaveBeenCalledOnce();
     const active: unknown = JSON.parse(

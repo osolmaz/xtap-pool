@@ -11,9 +11,14 @@ import {
   parseEnrichReceipt,
   parseEnrichmentRow,
 } from "@xtap-pool/shared";
-import type { AttemptEvent, EnrichReceipt, FreeLabelEvent } from "@xtap-pool/shared";
+import type {
+  AttemptEvent,
+  DeploymentManifest,
+  EnrichReceipt,
+  FreeLabelEvent,
+} from "@xtap-pool/shared";
 
-import { activateEnrichmentRun, resolveActiveEnrichmentRun } from "./enrich-active-run.js";
+import { activateEnrichmentRun } from "./enrich-active-run.js";
 import { mapBatchesInOrder } from "./bounded-concurrency.js";
 import { bootstrapEnrichmentRun } from "./bootstrap-enrichment-run.js";
 import {
@@ -38,6 +43,10 @@ import {
 import { enrichmentBatchResultSchema, publishEnrichmentBatchResult } from "./enrich-batch.js";
 import { canonicalPlanBytes, parseEnrichmentRunPlan } from "./enrich-run-plan.js";
 import type { EnrichmentRunPlan } from "./enrich-run-plan.js";
+import {
+  prepareEnrichmentRevision,
+  verifyPreparedEnrichmentRevision,
+} from "./enrich-revision-handoff.js";
 import type { EnrichmentCheckpointState, OutputKind } from "./enrich-state.js";
 import {
   advanceOutputFrontier,
@@ -165,6 +174,7 @@ function successorBudgetAdmitsWork(
 
 export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
+  options: { deploymentManifest: DeploymentManifest },
 ): Promise<void> {
   const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
   const config = loadConfig(
@@ -176,7 +186,7 @@ export async function runPlannedEnrichmentCommand(
     ...(config.enrichMaxCostPerCallUsd === undefined
       ? {}
       : { maxCostPerCallUsd: config.enrichMaxCostPerCallUsd }),
-    run: (budget) => runSinglePlannedEnrichmentRun(env, budget),
+    run: (budget) => runSinglePlannedEnrichmentRun(env, budget, options.deploymentManifest),
   });
 }
 
@@ -184,6 +194,7 @@ export async function runPlannedEnrichmentCommand(
 async function runSinglePlannedEnrichmentRun(
   env: Record<string, string | undefined>,
   budget: PlannedEnrichmentBudget,
+  deploymentManifest: DeploymentManifest,
 ): Promise<PlannedEnrichmentRunResult> {
   const commandStartedAtMs = budget.commandStartedAtMs;
   const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
@@ -215,33 +226,37 @@ async function runSinglePlannedEnrichmentRun(
       }),
     );
   };
-  const baseCheckpointStore = restoreOnly
-    ? createReadOnlyEnrichmentCheckpointStore({
-        bucket: config.indexBucket,
-        accessToken: config.hfToken,
-      })
-    : createEnrichmentCheckpointStore({
-        bucket: config.indexBucket,
-        accessToken: config.hfToken,
-      });
-  const activeRun = await resolveActiveEnrichmentRun(baseCheckpointStore);
+  const preflightStore = createReadOnlyEnrichmentCheckpointStore({
+    bucket: config.indexBucket,
+    accessToken: config.hfToken,
+  });
+  const targetWorkerRevision = requireEnvironment(env, "XTAP_SOURCE_REVISION");
+  const preparedRevision = await prepareEnrichmentRevision({
+    store: preflightStore,
+    targetWorkerRevision,
+  });
+  await verifyPreparedEnrichmentRevision(
+    deploymentManifest,
+    preparedRevision,
+    targetWorkerRevision,
+    preflightStore,
+  );
+  const activeRun = preparedRevision.active.activeRun;
   emitRestoreProgress("active-run", 1, 1);
   const runId = activeRun.run_id;
   const planSha256 = activeRun.plan_sha256;
-  const planPath = `${RUN_PREFIX}/${runId}/plan.json`;
-  const planBytes = await requiredObject(baseCheckpointStore, planPath);
-  const parsedPlan: unknown = JSON.parse(Buffer.from(planBytes).toString("utf8"));
-  const { plan } = parseEnrichmentRunPlan(parsedPlan, planSha256);
-  if (plan.run_id !== runId) throw new Error("active enrichment run ID mismatch");
+  const plan = preparedRevision.plan;
   emitRestoreProgress("plan", 1, 1);
-  if (plan.contract.worker_revision !== requireEnvironment(env, "XTAP_SOURCE_REVISION")) {
-    throw new Error("planned enrichment worker revision does not match running code");
-  }
+  emitRestoreProgress(
+    "checkpoint",
+    preparedRevision.checkpoint.evidence.sequence,
+    preparedRevision.checkpoint.evidence.sequence,
+  );
   const workPath = join(config.dataDir, "planned", `${runId}.sqlite`);
   await mkdir(dirname(workPath), { recursive: true });
   await rm(workPath, { force: true });
   {
-    const workBytes = await requiredObject(baseCheckpointStore, plan.work.key);
+    const workBytes = await requiredObject(preflightStore, plan.work.key);
     verifyObject(workBytes, plan.work.bytes, plan.work.sha256, "enrichment work plan");
     emitRestoreProgress("work-plan", workBytes.byteLength, plan.work.bytes, "bytes");
     await writeFile(workPath, workBytes);
@@ -249,7 +264,7 @@ async function runSinglePlannedEnrichmentRun(
   let sourceSegments: BucketSnapshotFile[];
   {
     const sourceSegmentsBytes = await requiredObject(
-      baseCheckpointStore,
+      preflightStore,
       plan.source.ordered_segments.key,
     );
     verifyObject(
@@ -270,15 +285,13 @@ async function runSinglePlannedEnrichmentRun(
   }
   emitRestoreProgress("source", sourceSegments.length, sourceSegments.length);
 
-  const log = new BucketLog(
+  const preflightLog = new BucketLog(
     config.rawBucket,
-    restoreOnly
-      ? createRawBucketReader(config.rawBucket, config.hfToken)
-      : createRawBucketClient(config.rawBucket, config.hfToken),
+    createRawBucketReader(config.rawBucket, config.hfToken),
     join(config.dataDir, "planned-raw-cache"),
   );
   const { taxonomy, contractHash } = await resolveEnrichmentTaxonomyForContract({
-    log,
+    log: preflightLog,
     snapshot: sourceSnapshot,
     taxonomyVersion: config.taxonomyVersion,
     llmModel: config.llmModel,
@@ -290,6 +303,13 @@ async function runSinglePlannedEnrichmentRun(
     },
   });
   emitRestoreProgress("contract", 1, 1);
+  const log = restoreOnly
+    ? preflightLog
+    : new BucketLog(
+        config.rawBucket,
+        createRawBucketClient(config.rawBucket, config.hfToken),
+        join(config.dataDir, "planned-raw-cache"),
+      );
   const progress = restoreOnly
     ? null
     : await XTapJobProgress.create({
@@ -298,6 +318,12 @@ async function runSinglePlannedEnrichmentRun(
         sourceRevision: plan.source.snapshot_revision,
         contractHash,
         env: { ...env, XTAP_PROGRESS_RUN_ID: runId },
+      });
+  const baseCheckpointStore = restoreOnly
+    ? preflightStore
+    : createEnrichmentCheckpointStore({
+        bucket: config.indexBucket,
+        accessToken: config.hfToken,
       });
   const checkpointStore = withCheckpointClaimPrefetch(baseCheckpointStore, {
     runId,
@@ -315,15 +341,18 @@ async function runSinglePlannedEnrichmentRun(
     () => new Date(),
     contractHash,
   );
-  const initialState = createEmptyEnrichmentState({
-    runId,
-    planSha256,
-    queueTotal: plan.work.queue_total,
-    queueBaselineDone: plan.work.queue_baseline_done,
-    registryTotal: plan.work.registry_total,
-    registryBaselineScanned: plan.work.registry_baseline_scanned,
-  });
-  const adapter = new EnrichmentCheckpointAdapter(initialState);
+  const adapter = restoreOnly
+    ? preparedRevision.adapter
+    : new EnrichmentCheckpointAdapter(
+        createEmptyEnrichmentState({
+          runId,
+          planSha256,
+          queueTotal: plan.work.queue_total,
+          queueBaselineDone: plan.work.queue_baseline_done,
+          registryTotal: plan.work.registry_total,
+          registryBaselineScanned: plan.work.registry_baseline_scanned,
+        }),
+      );
   const attemptId = env["JOB_ID"] ?? `local-${process.pid.toString()}`;
   const coordinator = CheckpointCoordinator.create({
     runId,
@@ -333,9 +362,17 @@ async function runSinglePlannedEnrichmentRun(
     store: checkpointStore,
     prefix: RUN_PREFIX,
   });
-  const restored = await coordinator.restoreLatest(adapter);
-  if (restored === null) throw new Error("planned enrichment has no bootstrap checkpoint");
-  emitRestoreProgress("checkpoint", restored.evidence.sequence, restored.evidence.sequence);
+  if (!restoreOnly) {
+    const restored = await coordinator.restoreLatest(adapter);
+    if (restored === null) throw new Error("planned enrichment has no bootstrap checkpoint");
+    if (
+      restored.checkpoint.key !== preparedRevision.checkpoint.checkpoint.key ||
+      restored.checkpoint.sha256 !== preparedRevision.checkpoint.checkpoint.sha256 ||
+      restored.checkpoint.bytes !== preparedRevision.checkpoint.checkpoint.bytes
+    ) {
+      throw new Error("enrichment checkpoint changed after revision handoff preflight");
+    }
+  }
   let state = adapter.state;
   if (state.publication.state === "pending" || state.publication.state === "building") {
     const currentIndexBytes = await requiredObject(checkpointStore, "index/current.json");

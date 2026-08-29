@@ -1,11 +1,15 @@
 import { readFile } from "node:fs/promises";
 
-import { DEPLOYMENT_MANIFEST_PATH, deploymentManifestSchema } from "@xtap-pool/shared";
+import {
+  DEPLOYMENT_MANIFEST_PATH,
+  deploymentManifestSchema,
+  type DeploymentManifest,
+} from "@xtap-pool/shared";
 
 export async function verifyEnrichmentJobRevision(
   env: Readonly<Record<string, string | undefined>>,
   readText: (path: string) => Promise<string> = (path) => readFile(path, "utf8"),
-): Promise<void> {
+): Promise<DeploymentManifest> {
   const expected = env["XTAP_SOURCE_REVISION"];
   if (expected === undefined || expected.length === 0) {
     throw new Error("XTAP_SOURCE_REVISION is required for Hugging Face Job execution.");
@@ -17,4 +21,5 @@ export async function verifyEnrichmentJobRevision(
       `Job source revision mismatch: expected ${expected}, image contains ${manifest.source_revision}.`,
     );
   }
+  return manifest;
 }

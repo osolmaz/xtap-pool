@@ -60,7 +60,10 @@ export {
 export {
   DEPLOYMENT_MANIFEST_PATH,
   deploymentManifestSchema,
+  enrichmentRevisionHandoffSchema,
+  serializeDeploymentManifest,
   type DeploymentManifest,
+  type EnrichmentRevisionHandoff,
 } from "./deployment.js";
 export {
   canonicalJson,

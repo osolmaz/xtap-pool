@@ -186,6 +186,11 @@ export type EnrichmentJobInspection = {
   activeJobs: readonly PhysicalEnrichmentJob[];
 };
 
+type OwnedEnrichmentJobs = {
+  schedules: readonly ScheduledEnrichmentJob[];
+  activeJobs: readonly PhysicalEnrichmentJob[];
+};
+
 export async function desiredEnrichmentJob(
   client: HubClient,
   spaceRepo: string,
@@ -193,6 +198,23 @@ export async function desiredEnrichmentJob(
   variables: ReadonlyMap<string, string>,
 ): Promise<DesiredEnrichmentJob> {
   const deployment = await readDeploymentManifest(client, spaceRepo);
+  return desiredEnrichmentJobForRevision(
+    spaceRepo,
+    rawBucket,
+    variables,
+    deployment.source_revision,
+  );
+}
+
+export function desiredEnrichmentJobForRevision(
+  spaceRepo: string,
+  rawBucket: string,
+  variables: ReadonlyMap<string, string>,
+  sourceRevision: string,
+): DesiredEnrichmentJob {
+  if (!/^[0-9a-f]{40}$/u.test(sourceRevision)) {
+    throw new Error("Enrichment Job source revision must be a 40-character lowercase Git SHA.");
+  }
   const configured = jobVariablesSchema.parse(
     Object.fromEntries(
       Object.keys(jobVariablesSchema.shape).map((key) => [key, variables.get(key)]),
@@ -222,7 +244,7 @@ export async function desiredEnrichmentJob(
       configured.ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS,
     LLM_MODEL: configured.LLM_MODEL,
     TAXONOMY_VERSION: configured.TAXONOMY_VERSION,
-    XTAP_SOURCE_REVISION: deployment.source_revision,
+    XTAP_SOURCE_REVISION: sourceRevision,
     POOL_SIGNING_SECRET: "job-not-used-0000000000000000000000000",
     SESSION_SECRET: "job-not-used-00000000000000000000000000",
     ALLOWED_USERS: "worker",
@@ -234,7 +256,7 @@ export async function desiredEnrichmentJob(
   return {
     namespace,
     spaceRepo,
-    sourceRevision: deployment.source_revision,
+    sourceRevision,
     schedule: configured.ENRICH_JOB_SCHEDULE,
     timeoutSeconds: Number(configured.ENRICH_JOB_TIMEOUT_SECONDS),
     environment,
@@ -242,7 +264,7 @@ export async function desiredEnrichmentJob(
       ...ENRICHMENT_JOB_LABELS,
       name: "xtap-pool-enrichment",
       space_repo: jobSpaceRepoLabel(spaceRepo),
-      source_revision: deployment.source_revision,
+      source_revision: sourceRevision,
       secret_names: JOB_SECRET_NAMES_LABEL,
     },
   };
@@ -252,20 +274,11 @@ export async function inspectEnrichmentJob(
   client: HubClient,
   desired: DesiredEnrichmentJob,
 ): Promise<EnrichmentJobInspection> {
-  const [scheduledPayload, jobsPayload] = await Promise.all([
-    listScheduledJobs({ namespace: desired.namespace, ...hubOptions(client) }),
-    listJobs({ namespace: desired.namespace, ...hubOptions(client) }),
-  ]);
-  const schedules = z
-    .array(scheduledJobSchema)
-    .parse(scheduledPayload)
-    .filter((job) => ownsJob(job.jobSpec.labels, desired.spaceRepo));
-  const activeJobs = z
-    .array(physicalJobSchema)
-    .parse(jobsPayload)
-    .filter(
-      (job) => ownsJob(job.labels, desired.spaceRepo) && ACTIVE_JOB_STAGES.has(job.status.stage),
-    );
+  const { schedules, activeJobs } = await readOwnedEnrichmentJobs(
+    client,
+    desired.namespace,
+    desired.spaceRepo,
+  );
   const exactSchedules = schedules.filter((job) => scheduleMatches(job, desired));
   return {
     desired,
@@ -273,6 +286,77 @@ export async function inspectEnrichmentJob(
     exactSchedules,
     mismatchedSchedules: schedules.filter((job) => !scheduleMatches(job, desired)),
     activeJobs,
+  };
+}
+
+// eslint-disable-next-line complexity -- Handoff admission checks each independent schedule and writer identity.
+export async function assertEnrichmentWritersQuiescent(options: {
+  client: HubClient;
+  spaceRepo: string;
+  rawBucket: string;
+  variables: ReadonlyMap<string, string>;
+}): Promise<string> {
+  const namespace = options.spaceRepo.split("/")[0];
+  if (namespace === undefined || namespace.length === 0) {
+    throw new Error(`Invalid Space repository: ${options.spaceRepo}.`);
+  }
+  const owned = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
+  if (owned.activeJobs.length > 0) {
+    throw new Error("Revision handoff requires zero active enrichment Jobs.");
+  }
+  if (owned.schedules.length !== 1) {
+    throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
+  }
+  const schedule = owned.schedules[0];
+  if (schedule === undefined) {
+    throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
+  }
+  const sourceRevision = schedule.jobSpec.labels?.["source_revision"];
+  if (sourceRevision === undefined) {
+    throw new Error("Canonical enrichment schedule does not declare its source revision.");
+  }
+  const desired = desiredEnrichmentJobForRevision(
+    options.spaceRepo,
+    options.rawBucket,
+    options.variables,
+    sourceRevision,
+  );
+  if (!scheduleMatches(schedule, desired)) {
+    throw new Error("Revision handoff requires the exact canonical enrichment schedule.");
+  }
+  if (!schedule.suspend || schedule.concurrency) {
+    throw new Error("Revision handoff requires a suspended non-concurrent enrichment schedule.");
+  }
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        desired_sha256: desiredEnrichmentJobHash(desired),
+        schedule_id: schedule.id,
+        suspended: schedule.suspend,
+        concurrency: schedule.concurrency,
+      }),
+    )
+    .digest("hex");
+}
+
+async function readOwnedEnrichmentJobs(
+  client: HubClient,
+  namespace: string,
+  spaceRepo: string,
+): Promise<OwnedEnrichmentJobs> {
+  const [scheduledPayload, jobsPayload] = await Promise.all([
+    listScheduledJobs({ namespace, ...hubOptions(client) }),
+    listJobs({ namespace, ...hubOptions(client) }),
+  ]);
+  return {
+    schedules: z
+      .array(scheduledJobSchema)
+      .parse(scheduledPayload)
+      .filter((job) => ownsJob(job.jobSpec.labels, spaceRepo)),
+    activeJobs: z
+      .array(physicalJobSchema)
+      .parse(jobsPayload)
+      .filter((job) => ownsJob(job.labels, spaceRepo) && ACTIVE_JOB_STAGES.has(job.status.stage)),
   };
 }
 

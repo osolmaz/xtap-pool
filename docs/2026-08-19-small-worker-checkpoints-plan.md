@@ -89,6 +89,254 @@ will not retain the old full-index startup path. Existing immutable databases,
 segments, and receipts remain available for audit and operator-directed
 rollback.
 
+## Reviewed worker revision handoff
+
+An unfinished frozen plan can outlive the worker revision that created it. A
+new worker revision must not edit that plan, ignore its worker identity, or use
+a list of accepted predecessor revisions. It can continue the same logical run
+only through one exact handoff in the immutable Space deployment commit.
+
+The handoff is part of `.xtap-deployment.json`. The file remains strict and
+secret-free. It retains `source_revision` and gains one required nullable field:
+
+```ts
+export type DeploymentManifest = {
+  source_revision: string;
+  enrichment_revision_handoff: null | {
+    active_generation: number;
+    activation_sha256: string;
+    run_id: string;
+    plan_sha256: string;
+    plan_worker_revision: string;
+    target_worker_revision: string;
+    contract_sha256: string;
+    source_snapshot_revision: string;
+    checkpoint_pointer_sha256: string;
+    checkpoint_sequence: number;
+    checkpoint_key: string;
+    checkpoint_sha256: string;
+    checkpoint_bytes: number;
+  };
+};
+```
+
+A null handoff means the active plan already names the deployed worker revision.
+A non-null handoff permits only the exact target revision in the same manifest.
+It binds that target to one active generation, activation chain, run, immutable
+plan, contract, source snapshot, and checkpoint boundary. It contains no time,
+secret, mutable URL, revision list, wildcard, fallback, environment override,
+or predecessor alias. The existing deployment manifest contract changes in
+place before the first public release. There is no second manifest version and
+no old-manifest reader.
+
+Canonical JSON makes the handoff and complete manifest deterministic. The
+schema rejects unknown fields, malformed hashes and IDs, self-handoffs,
+target/source disagreement, missing checkpoint identity, and extra predecessor
+revisions. The immutable Space Git commit is the handoff record. The repair does
+not add a handoff object, service, store, or coordination path to either Bucket.
+
+### Read-only preparation
+
+The checked-in updater prepares the handoff before it stages the Space upload.
+It must:
+
+1. Require a clean local Git revision and use it as the requested target.
+2. Read the current Space variables only to identify the existing index Bucket.
+3. Require one canonical schedule, require it to be suspended and
+   non-concurrent, and require no active enrichment Job.
+4. Resolve and hash the contiguous active-run activation chain.
+5. Parse and hash the exact immutable plan and verify its run, source, contract,
+   work order, and predecessor worker revision.
+6. Read the current checkpoint pointer, retain its exact bytes and digest, and
+   restore the referenced checkpoint bundle and result claims.
+7. Verify the checkpoint sequence, key, bytes, digest, plan identity, output
+   frontiers, queue bitmap, registry cursor, claims, and absence of orphan
+   output.
+8. Return deterministic handoff bytes without creating a provider, updating
+   progress, or exposing a write method.
+9. Re-read the activation, checkpoint pointer, schedule, and Job list
+   immediately before staging and again before upload. Stop on any drift.
+10. Embed the handoff in `.xtap-deployment.json`, upload the Space commit, and
+    make no Bucket write.
+
+If the active plan already names the target revision, the updater records null.
+If any identity is missing, stale, forked, corrupt, conflicting, or different,
+the updater stops before upload. A failed preflight must not change the Space,
+schedule, Jobs, Buckets, secrets, progress, or durable run state.
+
+### Worker preflight
+
+Direct equality between `plan.contract.worker_revision` and
+`XTAP_SOURCE_REVISION` remains the normal path. When they differ, the worker
+must read the deployment manifest from its image and require one exact handoff.
+It verifies:
+
+- The manifest source and handoff target equal `XTAP_SOURCE_REVISION`.
+- The current active generation and activation digest equal the handoff.
+- The run ID, plan digest, plan worker revision, contract digest, and source
+  snapshot equal the unchanged plan.
+- The current checkpoint pointer bytes and digest equal the pinned pointer.
+- The referenced checkpoint sequence, key, byte count, and digest equal the
+  handoff.
+- The complete checkpoint bundle, immutable sequence claims, result claims,
+  bitmap, registry cursor, and output frontiers restore without a gap, fork,
+  conflict, duplicate ordinal, or orphan output.
+
+The worker performs this verification before it creates progress, an inference
+provider, a raw writer, or any other write-capable runtime object. A pointer
+that advanced after deployment makes the handoff stale and stops the worker.
+Every missing, malformed, stale, mismatched, or conflicting identity also stops
+before a provider call or remote write.
+
+After verification, the worker continues the same run, checkpoint chain, result
+claims, bitmap, queue ordinals, and registry ordinals. It processes only missing
+work. Checkpoint sequences stay monotonic. Existing immutable objects do not
+change. Successor activation stays fenced. One physical attempt keeps one
+command start time and one inference budget across successors. The existing
+elapsed and cost ceilings, blocked-only stop, zero-work stop, and interruption
+recovery do not change.
+
+Restore-only mode uses the same manifest, handoff, activation, plan, pointer,
+and checkpoint verification. It receives no `INFERENCE_TOKEN`, creates no
+provider, writes nothing, and makes zero provider calls.
+
+### Bounded cutover repair
+
+The current repair starts from active run
+`xtap-1321e3a40c38f32c0c210d8859622379`. Its frozen plan records worker revision
+`aa7ccee986b7c96b494cc16e17a483740f3afb3d`. The healthy Space repository and
+runtime revision is `1ac51e39c73e871cfd5335cab8e5e3bbcc58fa76`, with deployment
+source `c6d07950b31eda8e0ecf74022fa72733a3bc87f8`. Canonical schedule
+`6a92f66145686a1580c1543c` is suspended and non-concurrent, and no enrichment
+Job is active. The first exact deployment probe stopped at the worker identity
+gate before execution. The preserved boundary has active generation 29,
+checkpoint sequence 807, checkpoint SHA-256
+`5ca69ab4853b0e0e462d49a6f69954867f4343fa8e71655a6715d4859425171f`,
+and progress sequence 834. The failed probe made zero provider calls, spent
+$0 on the provider, used $0.000125 of CPU, produced no receipt, and left zero
+active reservation exposure.
+
+Implement the repair in this order:
+
+1. Create a clean repair branch from the accepted `main` revision. Recheck the
+   exact Space revision and health, suspended schedule, empty active Job list,
+   active generation, plan digest, and checkpoint sequence, key, digest, and
+   size. Stop on drift.
+2. Update the strict deployment schema and canonical serializer in
+   `shared/src/deployment.ts`. Add schema round-trip and rejection tests.
+3. Add a focused read-only handoff preparation and verification module under
+   `space/src/`. Export only protocol helpers that the setup package needs. Do
+   not expose write methods or provider construction.
+4. Extend `setup/src/stage.ts` and the existing updater boundary to prepare,
+   revalidate, and embed the claim before upload. Keep upload as its only remote
+   mutation. Add setup process tests for ordering, drift, no upload after a
+   failed preflight, no Bucket writes, and no secrets in staged bytes.
+5. Refactor `space/src/enrich-planned-command.ts` so deployment, activation,
+   plan, handoff, pointer, and full checkpoint verification finishes before
+   progress, provider, raw writer, or another write-capable client exists.
+6. Add the production regression with the predecessor revision, active
+   generation 29, and checkpoint sequence 807 identity shape. It must fail
+   without the claim, accept only the exact claim, call no provider before all
+   identities verify, preserve claimed work, avoid duplicate queue and registry
+   ordinals, and resume safely after interruption.
+7. Extend the drain, runtime, and restore tests to prove exact result replay,
+   monotonic checkpoints, unchanged immutable objects, bounded repeated
+   in-flight work, successor fencing, cumulative elapsed and cost accounting,
+   blocked-only termination, zero-work termination, and a second clean restore.
+8. Run `npm run check`, `npm run mutate`, `npm run build`,
+   `npx slophammer-ts check .`, and
+   `npx -y @simpledoc/simpledoc check`. Review the complete diff. Run
+   pi-reviewer against `main` until no P0 or P1 finding remains, and address
+   proportionate P2 findings. Push one narrow branch, require green CI, and
+   rebase-merge the reviewed pull request.
+9. Deploy the exact merged revision only through
+   `npm run update -- osolmaz/xtap-pool`. Wait for the exact Space repository
+   and runtime revisions, manifest read-back, and healthy application. Replace
+   the canonical schedule only if its source differs. Keep exactly one schedule
+   suspended and non-concurrent, and require zero active Jobs.
+10. Run restore-only verification against the preserved production run with no
+    inference token. Require exact replay, zero provider calls, zero orphan
+    segments, and unchanged public pointer and complete run-object listing.
+    Do not trigger a paid Job during this repair.
+
+### Regression matrix
+
+Tests must cover:
+
+- Deterministic manifest and handoff bytes, strict field validation, and unknown
+  field rejection.
+- The exact predecessor-plan/current-worker mismatch before provider creation.
+- A valid sequence-807 handoff and failures for a missing claim, wrong target,
+  wrong plan, wrong contract, wrong source snapshot, wrong activation digest,
+  stale pointer, wrong checkpoint sequence, key, size, bytes, or digest,
+  malformed claim, activation fork, or active writer.
+- Read-only preparation with zero object-store writes, zero progress updates,
+  and zero provider construction.
+- Complete checkpoint and result-claim replay with no gaps, hash differences,
+  duplicate ordinals, or orphan output.
+- No duplicate queue or registry work across the handoff and an interrupted
+  first post-handoff checkpoint.
+- Successor fencing, one physical-attempt start time, cumulative provider cost,
+  active-reservation admission, cost-overrun rejection, elapsed ceiling,
+  blocked-only stop, and finite zero-work stop.
+- A clean second restore with zero provider calls and unchanged pointer and
+  object listing.
+- Post-merge Space source and runtime identity, manifest, health, suspended
+  schedule, zero active Jobs, and production restore-only verification.
+
+### Risks and stop rules
+
+A stale handoff could bind an old checkpoint. The updater prevents this by
+requiring writer exclusion, hashing the exact pointer bytes, and re-reading the
+activation, pointer, schedule, and Job list before staging and upload. The
+worker performs the same comparison at startup and rejects later drift.
+
+Moving revision verification later could permit an early provider call or
+write. The worker must instead move the complete identity and checkpoint
+verification earlier than every progress, provider, writer, and write-capable
+client construction.
+
+A handoff could become a compatibility path. The schema therefore permits one
+exact target for one exact active plan and checkpoint. It has no list, fallback,
+wildcard, environment override, predecessor alias, old-manifest path, or second
+format version.
+
+A bad Space commit cannot be edited in place. The updater prepares deterministic
+bytes locally, verifies all identities, rechecks writer exclusion, and requires
+exact deployment read-back. Any correction is another reviewed deployment, not
+a history rewrite.
+
+Existing results could repeat after the handoff. The worker must continue the
+same restored bitmap, result claims, checkpoint chain, queue ordinals, and
+registry ordinals. Tests cover interruption at the first post-handoff
+checkpoint and reject duplicate work.
+
+A full restore can make startup slower. Use the existing bounded restore and
+prefetch interfaces and require a cold restore below five minutes. Keep provider
+and writer initialization deferred until restore finishes.
+
+Credentials must not enter the handoff or logs. The schema accepts only IDs,
+hashes, revisions, keys, and counts. Approved credentials remain in the
+short-lived updater process and the existing approved Space and schedule secret
+destinations.
+
+Stop the repair if a paid Job becomes active, an immutable production identity
+drifts, history would need to change, the identity gate would need to weaken, a
+protected provider or runtime contract would need to change, review or CI leaves
+a material defect, deployment provenance is not exact, or restore-only
+verification writes or calls a provider. If the same worker-plan mismatch
+repeats after the exact repaired deployment, preserve the evidence and stop.
+
+This repair does not run a production probe, recovery canary, recurring Job, or
+OurModels publication. It does not change an existing plan, checkpoint, output,
+claim, receipt, activation, pointer, index, database, manifest, or other
+historical object. It does not change OurModels, publication locks, the pinned
+HF Job Control dependency, Hugging Face or Fireworks behavior, runtime images,
+provider, model, hardware, cadence, concurrency, timeout, elapsed or cost
+limits, taxonomy, quality rules, secret names, or credential destinations. It
+does not add a migration reader, dual path, compatibility alias or allowlist,
+new dependency, service, repository, store, Endpoint, or extra schedule.
+
 ## Resume model
 
 Each completed batch is saved once. A small claimed checkpoint records the
