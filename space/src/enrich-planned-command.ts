@@ -440,13 +440,15 @@ async function runSinglePlannedEnrichmentRun(
   }
   emitRestoreProgress("database", 1, 1);
 
+  const requireExactOutputFrontier = preparedRevision.handoff !== null || restoreOnly;
   if (!restoreOnly) {
     try {
       const preflightState = preparedRevision.adapter.state;
-      await restoreAndReconcileWorkerOutputs({
+      const preflightReplayEvidence = await restoreAndReconcileWorkerOutputs({
         log: preflightLog,
         sourceSegments,
         checkpointStore: preflightStore,
+        rejectUncheckpointedResults: requireExactOutputFrontier,
         runId,
         state: () => preflightState,
         registryNames,
@@ -459,6 +461,9 @@ async function runSinglePlannedEnrichmentRun(
         outputClaimsProgress: () => Promise.resolve(),
         replayProgress: () => Promise.resolve(),
       });
+      if (requireExactOutputFrontier && preflightReplayEvidence.orphanSegments !== 0) {
+        throw new Error("verified output frontier has orphan worker output segments");
+      }
       applyCheckpointToWorkerDatabase(tweetStore.database, preflightState);
       const restoredQuickCheck = tweetStore.database.pragma("quick_check") as {
         quick_check: string;
@@ -601,9 +606,10 @@ async function runSinglePlannedEnrichmentRun(
     log,
     sourceSegments,
     checkpointStore,
+    rejectUncheckpointedResults: requireExactOutputFrontier,
     runId,
     state: () => state,
-    ...(restoreOnly ? {} : { commitOutputs }),
+    ...(restoreOnly || requireExactOutputFrontier ? {} : { commitOutputs }),
     registryNames,
     registryBaselineOrdinal: plan.work.registry_baseline_scanned,
     queueBaselineOrdinals,
@@ -620,6 +626,9 @@ async function runSinglePlannedEnrichmentRun(
       await progress?.checkpointReplay(completed, total);
     },
   });
+  if (requireExactOutputFrontier && replayEvidence.orphanSegments !== 0) {
+    throw new Error("verified output frontier has orphan worker output segments");
+  }
   applyCheckpointToWorkerDatabase(tweetStore.database, state);
   const restoredQuickCheck = tweetStore.database.pragma("quick_check") as {
     quick_check: string;

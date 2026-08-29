@@ -48,6 +48,7 @@ vi.mock("../src/job-progress.js", () => ({
 }));
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
+import { createEnrichmentBatchResult, enrichmentBatchResultKey } from "../src/enrich-batch.js";
 import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
 import { DEFAULT_TAXONOMY } from "../src/enrich-config.js";
@@ -229,22 +230,41 @@ describe("planned enrichment restore-only runtime", () => {
       llmModel: "model:provider",
     });
 
-    await runPlannedEnrichmentCommand(
-      {
-        XTAP_RESTORE_ONLY: "true",
-        XTAP_SOURCE_REVISION: created.plan.contract.worker_revision,
+    const runtimeEnv = {
+      XTAP_RESTORE_ONLY: "true",
+      XTAP_SOURCE_REVISION: created.plan.contract.worker_revision,
+    };
+    const runtimeOptions = {
+      deploymentManifest: {
+        source_revision: created.plan.contract.worker_revision,
+        enrichment_revision_handoff: null,
       },
-      {
-        deploymentManifest: {
-          source_revision: created.plan.contract.worker_revision,
-          enrichment_revision_handoff: null,
-        },
-      },
-    );
+    };
+    await runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions);
 
     expect(store.writes).toBe(writesBeforeRestore);
     expect(mocks.rawList).toHaveBeenCalledTimes(1);
     expect(mocks.rawDownload).not.toHaveBeenCalled();
+
+    const uncheckpointed = createEnrichmentBatchResult({
+      schema_version: 1,
+      run_id: created.plan.run_id,
+      phase: "receipt",
+      sequence: 1,
+      previous_result_sha256: null,
+      ordinals: [],
+      raw_segment_key: `v1/segments/receipt/2026/08/21/1-${"0".repeat(36)}-${"e".repeat(64)}.json.gz`,
+      raw_segment_sha256: "e".repeat(64),
+      created_at: CREATED_AT,
+    });
+    store.files.set(
+      enrichmentBatchResultKey("operations/enrichment/runs", uncheckpointed.result),
+      uncheckpointed.bytes,
+    );
+    await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow(
+      "uncheckpointed receipt result manifest",
+    );
+    expect(store.writes).toBe(writesBeforeRestore);
   });
 });
 
