@@ -175,26 +175,30 @@ It verifies:
 - The current active generation and activation digest equal the handoff.
 - The run ID, plan digest, plan worker revision, contract digest, and source
   snapshot equal the unchanged plan.
-- The current checkpoint pointer bytes and digest equal the pinned pointer.
-- The referenced checkpoint sequence, key, byte count, and digest equal the
-  handoff.
+- On the first start, the current checkpoint pointer bytes and digest equal the
+  pinned pointer, and the referenced checkpoint sequence, key, byte count, and
+  digest equal the handoff.
+- On a later attempt for the same plan, the current checkpoint is accepted only
+  when its sequence is higher and the complete verified claim chain descends
+  from the pinned handoff checkpoint without a gap, fork, or conflict.
 - The complete checkpoint bundle, immutable sequence claims, result claims,
   bitmap, registry cursor, and output frontiers restore without a gap, fork,
   conflict, duplicate ordinal, or orphan output.
 
 The worker performs this verification before it creates progress, an inference
 provider, a raw writer, or any other write-capable runtime object. A pointer
-that advanced after deployment makes the handoff stale and stops the worker.
-Every missing, malformed, stale, mismatched, or conflicting identity also stops
-before a provider call or remote write.
+that moves behind the handoff, changes plan identity, or does not descend from
+the pinned checkpoint stops the worker. Every missing, malformed, mismatched,
+or conflicting identity also stops before a provider call or remote write.
 
 After verification, the worker continues the same run, checkpoint chain, result
 claims, bitmap, queue ordinals, and registry ordinals. It processes only missing
 work. Checkpoint sequences stay monotonic. Existing immutable objects do not
-change. Successor activation stays fenced. One physical attempt keeps one
-command start time and one inference budget across successors. The existing
-elapsed and cost ceilings, blocked-only stop, zero-work stop, and interruption
-recovery do not change.
+change. A successor plan records the deployed worker revision and enters the
+normal direct-revision path. Successor activation stays fenced. One physical
+attempt keeps one command start time and one inference budget across
+successors. The existing elapsed and cost ceilings, blocked-only stop,
+zero-work stop, and interruption recovery do not change.
 
 Restore-only mode uses the same manifest, handoff, activation, plan, pointer,
 and checkpoint verification. It receives no `INFERENCE_TOKEN`, creates no
@@ -286,10 +290,12 @@ Tests must cover:
 
 ### Risks and stop rules
 
-A stale handoff could bind an old checkpoint. The updater prevents this by
-requiring writer exclusion, hashing the exact pointer bytes, and re-reading the
-activation, pointer, schedule, and Job list before staging and upload. The
-worker performs the same comparison at startup and rejects later drift.
+A stale handoff could bind an unrelated checkpoint. The updater prevents this
+by requiring writer exclusion, hashing the exact pointer bytes, and re-reading
+the activation, pointer, schedule, and Job list before staging and upload. The
+worker requires that exact pointer on the first start. On later attempts, it
+accepts only a higher checkpoint in the same fully verified claim chain whose
+immutable ancestry includes the handoff checkpoint.
 
 Moving revision verification later could permit an early provider call or
 write. The worker must instead move the complete identity and checkpoint

@@ -288,6 +288,63 @@ describe("immutable enrichment revision handoff", () => {
     expect(twice.queue.done).toBe(once.queue.done);
   }, 30_000);
 
+  it("accepts later checkpoints only when they descend from the reviewed handoff anchor", async () => {
+    const { store, active } = await productionBoundaryFixture();
+    const prepared = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+    const manifest = {
+      source_revision: TARGET_REVISION,
+      enrichment_revision_handoff: prepared.handoff,
+    };
+    const coordinator = CheckpointCoordinator.create({
+      runId: active.plan.run_id,
+      attemptId: "post-handoff-attempt",
+      planSha256: active.sha256,
+      store,
+      prefix: RUN_PREFIX,
+      clock: () => new Date("2026-08-29T13:00:00.000Z"),
+    });
+    await coordinator.restoreLatest(prepared.adapter);
+    prepared.adapter.replace(withCheckpointSequence(prepared.adapter.state, 808));
+    await coordinator.commit(
+      {
+        name: "post-handoff-work",
+        sequence: 808,
+        reached_at: "2026-08-29T13:00:00.000Z",
+        metadata: {},
+      },
+      prepared.adapter,
+    );
+
+    const advanced = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+    expect(advanced.handoff).toMatchObject({ checkpoint_sequence: 808 });
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, advanced, TARGET_REVISION, store),
+    ).resolves.toEqual(manifest);
+    await expect(
+      verifyPreparedEnrichmentRevision(
+        { source_revision: TARGET_REVISION, enrichment_revision_handoff: null },
+        advanced,
+        TARGET_REVISION,
+        store,
+      ),
+    ).rejects.toThrow("checkpoint chain");
+
+    const missingAnchor = cloneStore(store);
+    const anchorSequence = `sequence-${String(807).padStart(16, "0")}`;
+    const anchorClaim = [...missingAnchor.files.keys()].find((key) => key.includes(anchorSequence));
+    expect(anchorClaim).toBeDefined();
+    missingAnchor.files.delete(anchorClaim ?? "");
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, advanced, TARGET_REVISION, missingAnchor),
+    ).rejects.toThrow("checkpoint claim is missing");
+  }, 30_000);
+
   it("rejects stale pointers, checkpoint gaps, and corrupt checkpoint bytes read-only", async () => {
     const fixture = await productionBoundaryFixture();
     const pointerKey = checkpointPointerKey(RUN_PREFIX, fixture.active.plan.run_id);
@@ -412,7 +469,7 @@ describe("immutable enrichment revision handoff", () => {
           checkpoint_sequence: 806,
         },
       }),
-    ).rejects.toThrow("does not match the active plan and checkpoint");
+    ).rejects.toThrow("checkpoint claim identity mismatch");
     await expect(
       continueAfterVerification({
         source_revision: TARGET_REVISION,

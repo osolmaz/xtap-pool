@@ -146,19 +146,39 @@ export async function verifyPreparedEnrichmentRevision(
   if (canonicalJson(manifest.enrichment_revision_handoff) === canonicalJson(prepared.handoff)) {
     return manifest;
   }
-  if (
-    prepared.handoff === null &&
-    manifest.enrichment_revision_handoff !== null &&
-    prepared.plan.contract.worker_revision === targetWorkerRevision
-  ) {
-    await verifyCompletedRevisionHandoff(
-      store,
-      manifest.enrichment_revision_handoff,
-      prepared.active.activeRun.generation,
-    );
+  const handoff = manifest.enrichment_revision_handoff;
+  if (await acceptsAdvancedHandoff(store, prepared, handoff)) return manifest;
+  if (await acceptsCompletedHandoff(store, prepared, handoff, targetWorkerRevision)) {
     return manifest;
   }
-  throw new Error("deployment revision handoff does not match the active plan and checkpoint");
+  throw new Error(
+    "deployment revision handoff does not match the active plan and checkpoint chain",
+  );
+}
+
+async function acceptsAdvancedHandoff(
+  store: CheckpointObjectStore,
+  prepared: PreparedEnrichmentRevision,
+  handoff: EnrichmentRevisionHandoff | null,
+): Promise<boolean> {
+  if (handoff === null || prepared.handoff === null) return false;
+  if (!sameHandoffPlanIdentity(handoff, prepared.handoff)) return false;
+  if (handoff.checkpoint_sequence >= prepared.checkpoint.manifest.boundary.sequence) return false;
+  await verifyRevisionHandoffAnchor(store, handoff);
+  return true;
+}
+
+async function acceptsCompletedHandoff(
+  store: CheckpointObjectStore,
+  prepared: PreparedEnrichmentRevision,
+  handoff: EnrichmentRevisionHandoff | null,
+  targetWorkerRevision: string,
+): Promise<boolean> {
+  if (handoff === null || prepared.handoff !== null) return false;
+  if (prepared.plan.contract.worker_revision !== targetWorkerRevision) return false;
+  if (handoff.active_generation >= prepared.active.activeRun.generation) return false;
+  await verifyRevisionHandoffAnchor(store, handoff);
+  return true;
 }
 
 // eslint-disable-next-line complexity -- Read-only restore verifies every claim, chain, object, and adapter identity without repair writes.
@@ -232,15 +252,27 @@ async function restoreLatestCheckpointReadOnly(
   return { checkpoint: head.checkpoint, manifest: verified.manifest, evidence };
 }
 
-// eslint-disable-next-line complexity -- Completed handoff verification checks every immutable historical identity before direct-revision continuation.
-async function verifyCompletedRevisionHandoff(
+function sameHandoffPlanIdentity(
+  anchor: EnrichmentRevisionHandoff,
+  current: EnrichmentRevisionHandoff,
+): boolean {
+  return (
+    anchor.active_generation === current.active_generation &&
+    anchor.activation_sha256 === current.activation_sha256 &&
+    anchor.run_id === current.run_id &&
+    anchor.plan_sha256 === current.plan_sha256 &&
+    anchor.plan_worker_revision === current.plan_worker_revision &&
+    anchor.target_worker_revision === current.target_worker_revision &&
+    anchor.contract_sha256 === current.contract_sha256 &&
+    anchor.source_snapshot_revision === current.source_snapshot_revision
+  );
+}
+
+// eslint-disable-next-line complexity -- Handoff verification checks every immutable historical identity at the reviewed checkpoint anchor.
+async function verifyRevisionHandoffAnchor(
   store: CheckpointObjectStore,
   handoff: EnrichmentRevisionHandoff,
-  activeGeneration: number,
 ): Promise<void> {
-  if (handoff.active_generation >= activeGeneration) {
-    throw new Error("deployment revision handoff does not precede the current direct-revision run");
-  }
   const activationKey = `${ACTIVATION_PREFIX}/${String(handoff.active_generation).padStart(12, "0")}.json`;
   const activationBytes = await requiredObject(store, activationKey);
   if (sha256(activationBytes) !== handoff.activation_sha256) {
