@@ -1,4 +1,5 @@
 import { createDurableIndexBucketReader } from "./durable-index.js";
+import { verifyEnrichmentJobRevision } from "./enrich-job.js";
 import { runPlannedEnrichmentCommand } from "./enrich-planned-command.js";
 
 const CURRENT_MANIFEST_KEY = "index/current.json";
@@ -15,7 +16,11 @@ async function main(): Promise<void> {
   if (beforePointer === undefined) throw new Error("durable index manifest is missing");
   const beforeRuns = await reader.list(RUN_PREFIX);
 
-  await runPlannedEnrichmentCommand({ ...process.env, XTAP_RESTORE_ONLY: "true" });
+  const deploymentManifest = await verifyEnrichmentJobRevision(process.env);
+  await runPlannedEnrichmentCommand(
+    { ...process.env, XTAP_RESTORE_ONLY: "true" },
+    { deploymentManifest },
+  );
 
   const afterPointer = await reader.readText(CURRENT_MANIFEST_KEY);
   const afterRuns = await reader.list(RUN_PREFIX);

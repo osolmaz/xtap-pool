@@ -13,11 +13,15 @@ describe("Hugging Face enrichment Job entrypoint", () => {
   });
 
   it("accepts the exact embedded source revision", async () => {
-    const readText = vi.fn().mockResolvedValue(JSON.stringify({ source_revision: REVISION }));
+    const manifest = {
+      source_revision: REVISION,
+      enrichment_revision_handoff: null,
+    };
+    const readText = vi.fn().mockResolvedValue(JSON.stringify(manifest));
 
     await expect(
       verifyEnrichmentJobRevision({ XTAP_SOURCE_REVISION: REVISION }, readText),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(manifest);
     expect(readText).toHaveBeenCalledWith(".xtap-deployment.json");
   });
 
@@ -33,13 +37,20 @@ describe("Hugging Face enrichment Job entrypoint", () => {
   it("rejects stale images and malformed manifests", async () => {
     await expect(
       verifyEnrichmentJobRevision({ XTAP_SOURCE_REVISION: REVISION }, () =>
-        Promise.resolve(JSON.stringify({ source_revision: "b".repeat(40) })),
+        Promise.resolve(
+          JSON.stringify({
+            source_revision: "b".repeat(40),
+            enrichment_revision_handoff: null,
+          }),
+        ),
       ),
     ).rejects.toThrow("Job source revision mismatch");
 
     await expect(
       verifyEnrichmentJobRevision({ XTAP_SOURCE_REVISION: REVISION }, () =>
-        Promise.resolve(JSON.stringify({ source_revision: "main" })),
+        Promise.resolve(
+          JSON.stringify({ source_revision: "main", enrichment_revision_handoff: null }),
+        ),
       ),
     ).rejects.toThrow();
   });

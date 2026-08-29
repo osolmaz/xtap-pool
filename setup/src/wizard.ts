@@ -30,6 +30,10 @@ import {
 } from "./config.js";
 import { deployPool, ensureIndexBucket, updateExistingPool } from "./deploy.js";
 import {
+  createEnrichmentDeploymentManifestPreparer,
+  productionEnrichmentHandoffPreparation,
+} from "./enrichment-handoff.js";
+import {
   desiredEnrichmentJob,
   ENRICHMENT_JOB_DEFAULT_VARIABLES,
   quiesceEnrichmentWriters,
@@ -119,17 +123,32 @@ async function finishUpdate(
   legacy: boolean,
 ): Promise<void> {
   const indexBucketCreated = await ensureIndexBucket(client, config.indexBucket);
+  let storageToken: string | undefined;
   if (
     indexBucketCreated ||
     !(await durableIndexManifestExists(client.accessToken, config.indexBucket))
   ) {
-    const storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
+    storageToken = await promptStorageToken(config.rawBucket, config.indexBucket);
     await bootstrapIndex(root, config, storageToken, indexContractFromVariables(variables));
     await setSpaceSecret(client, config.spaceRepo, "HF_TOKEN", storageToken);
   }
+  storageToken ??= await promptExistingStorageToken();
+  await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+  const prepareDeploymentManifest = createEnrichmentDeploymentManifestPreparer(
+    productionEnrichmentHandoffPreparation({
+      root,
+      client,
+      config,
+      variables,
+      storageToken,
+    }),
+  );
   const task = spinner();
   task.start(`Updating ${config.spaceRepo}`);
-  await updateExistingPool(root, client, config, { allowLegacyDatasetRemoval: legacy });
+  await updateExistingPool(root, client, config, {
+    allowLegacyDatasetRemoval: legacy,
+    prepareDeploymentManifest,
+  });
   if (legacy) {
     await restartSpaceRuntime(client, config.spaceRepo);
     await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
@@ -362,6 +381,17 @@ export async function promptStorageToken(rawBucket: string, indexBucket: string)
     }
     note(report.errors.join("\n"), "Token refused");
   }
+}
+
+async function promptExistingStorageToken(): Promise<string> {
+  note(
+    [
+      "Use the existing storage token for read-only enrichment handoff verification.",
+      "The updater passes it only to the local verifier and does not store or rotate it.",
+    ].join("\n"),
+    "Existing storage token",
+  );
+  return promptPassword("Paste the existing storage-only HF_TOKEN");
 }
 
 async function promptInferenceToken(): Promise<string> {

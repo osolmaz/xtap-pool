@@ -20,6 +20,7 @@ const hubMocks = vi.hoisted(() => ({
 vi.mock("@huggingface/hub", () => hubMocks);
 
 import {
+  assertEnrichmentWritersQuiescent,
   canaryHardCeilingUsd,
   desiredEnrichmentJob,
   desiredEnrichmentJobHash,
@@ -40,7 +41,7 @@ const client = { accessToken: "hf_owner", hubUrl: "https://hub.test" };
 beforeEach(() => {
   vi.clearAllMocks();
   hubMocks.downloadFile.mockResolvedValue(
-    new Blob([JSON.stringify({ source_revision: REVISION })]),
+    new Blob([JSON.stringify({ source_revision: REVISION, enrichment_revision_handoff: null })]),
   );
   hubMocks.listFiles.mockReturnValue(asyncIterableOf([]));
   hubMocks.listJobs.mockResolvedValue([]);
@@ -88,6 +89,30 @@ describe("Hugging Face enrichment Job", () => {
     expect(Object.values(desired.labels).every((value) => /^[a-zA-Z0-9._-]*$/u.test(value))).toBe(
       true,
     );
+  });
+
+  it("requires one exact suspended schedule and zero active Jobs for a revision handoff", async () => {
+    const desired = await desiredFixture();
+    hubMocks.listScheduledJobs.mockResolvedValue([scheduleFixture(desired, "exact", true)]);
+
+    await expect(
+      assertEnrichmentWritersQuiescent({
+        client,
+        spaceRepo: desired.spaceRepo,
+        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+        variables: variables(),
+      }),
+    ).resolves.toMatch(/^[0-9a-f]{64}$/u);
+
+    hubMocks.listJobs.mockResolvedValue([physicalFixture(desired, "active", "RUNNING")]);
+    await expect(
+      assertEnrichmentWritersQuiescent({
+        client,
+        spaceRepo: desired.spaceRepo,
+        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+        variables: variables(),
+      }),
+    ).rejects.toThrow("zero active");
   });
 
   it("binds the index Bucket into the schedule contract", async () => {
@@ -391,7 +416,12 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.downloadFile.mockImplementation((options: { path?: string }) =>
       Promise.resolve(
         options.path === ".xtap-deployment.json"
-          ? new Blob([JSON.stringify({ source_revision: REVISION })])
+          ? new Blob([
+              JSON.stringify({
+                source_revision: REVISION,
+                enrichment_revision_handoff: null,
+              }),
+            ])
           : receipts,
       ),
     );
@@ -425,7 +455,12 @@ describe("Hugging Face enrichment Job", () => {
     hubMocks.downloadFile.mockImplementation((options: { path?: string }) =>
       Promise.resolve(
         options.path === ".xtap-deployment.json"
-          ? new Blob([JSON.stringify({ source_revision: REVISION })])
+          ? new Blob([
+              JSON.stringify({
+                source_revision: REVISION,
+                enrichment_revision_handoff: null,
+              }),
+            ])
           : receipts,
       ),
     );

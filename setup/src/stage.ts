@@ -2,7 +2,12 @@ import { Blob } from "node:buffer";
 import { promises as fs } from "node:fs";
 import { join, relative, sep } from "node:path";
 
-import { DEPLOYMENT_MANIFEST_PATH, deploymentManifestSchema } from "@xtap-pool/shared";
+import {
+  DEPLOYMENT_MANIFEST_PATH,
+  deploymentManifestSchema,
+  serializeDeploymentManifest,
+  type DeploymentManifest,
+} from "@xtap-pool/shared";
 
 import { captureCommand, inheritCommand } from "./process.js";
 
@@ -14,7 +19,11 @@ export type UploadFile = {
 const SPACE_EXCLUDED_ROOTS = new Set(["docs", "extension", "setup"]);
 const SPACE_ALLOWED_FILES = new Set(["setup/package.json"]);
 
-export async function createSpaceStage(root: string, stageDir: string): Promise<void> {
+export async function createSpaceStage(
+  root: string,
+  stageDir: string,
+  deploymentManifest?: DeploymentManifest,
+): Promise<void> {
   const archivePath = join(stageDir, "repo.tar");
   await captureCommand("git", ["-C", root, "archive", "--format=tar", "-o", archivePath, "HEAD"]);
   await inheritCommand("tar", ["-xf", archivePath, "-C", stageDir]);
@@ -22,10 +31,18 @@ export async function createSpaceStage(root: string, stageDir: string): Promise<
   const sourceRevision = (
     await captureCommand("git", ["-C", root, "rev-parse", "HEAD"])
   ).stdout.trim();
-  const deployment = deploymentManifestSchema.parse({ source_revision: sourceRevision });
+  const deployment = deploymentManifestSchema.parse(
+    deploymentManifest ?? {
+      source_revision: sourceRevision,
+      enrichment_revision_handoff: null,
+    },
+  );
+  if (deployment.source_revision !== sourceRevision) {
+    throw new Error("deployment manifest source revision does not match the staged Git commit");
+  }
   await fs.writeFile(
     join(stageDir, DEPLOYMENT_MANIFEST_PATH),
-    `${JSON.stringify(deployment, null, 2)}\n`,
+    serializeDeploymentManifest(deployment),
   );
   const setupPackageJson = await fs.readFile(join(stageDir, "setup", "package.json"));
   await fs.copyFile(join(root, "space", "hf-space-README.md"), join(stageDir, "README.md"));

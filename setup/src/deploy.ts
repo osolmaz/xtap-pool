@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { commit, createRepo, listFiles, repoExists } from "@huggingface/hub";
+import { serializeDeploymentManifest, type DeploymentManifest } from "@xtap-pool/shared";
 
 import type { SetupConfig } from "./config.js";
 import { usersValue } from "./config.js";
@@ -53,7 +54,10 @@ export async function updateExistingPool(
   root: string,
   client: HubClient,
   config: SetupConfig,
-  options: { allowLegacyDatasetRemoval?: boolean } = {},
+  options: {
+    allowLegacyDatasetRemoval?: boolean;
+    prepareDeploymentManifest?: () => Promise<DeploymentManifest>;
+  } = {},
 ): Promise<void> {
   await assertRepoVisibility(client, { type: "bucket", name: config.rawBucket }, "private");
   await assertRepoVisibility(client, { type: "bucket", name: config.indexBucket }, "private");
@@ -71,11 +75,11 @@ export async function updateExistingPool(
       allowLegacyDatasetRemoval: true,
       retainLegacyDataset: true,
     });
-    await uploadSpace(root, client, config.spaceRepo);
+    await uploadSpace(root, client, config.spaceRepo, options.prepareDeploymentManifest);
     await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
     return;
   }
-  await uploadSpace(root, client, config.spaceRepo);
+  await uploadSpace(root, client, config.spaceRepo, options.prepareDeploymentManifest);
   await configureSpace(client, config, { initializeGeneratedSecrets: false });
 }
 
@@ -151,16 +155,31 @@ async function assertRepoVisibility(
   );
 }
 
-async function uploadSpace(root: string, client: HubClient, spaceRepo: string): Promise<void> {
+async function uploadSpace(
+  root: string,
+  client: HubClient,
+  spaceRepo: string,
+  prepareDeploymentManifest?: () => Promise<DeploymentManifest>,
+): Promise<void> {
   const stageDir = await mkdtemp(join(tmpdir(), "xtap-pool-space-"));
   try {
-    await createSpaceStage(root, stageDir);
+    const deploymentManifest =
+      prepareDeploymentManifest === undefined ? undefined : await prepareDeploymentManifest();
+    await createSpaceStage(root, stageDir, deploymentManifest);
     const files = await collectUploadFiles(stageDir);
     const staleDeletes = await collectStaleSpaceDeletes(
       client,
       spaceRepo,
       files.map((file) => file.path),
     );
+    if (prepareDeploymentManifest !== undefined && deploymentManifest !== undefined) {
+      const revalidated = await prepareDeploymentManifest();
+      if (
+        serializeDeploymentManifest(revalidated) !== serializeDeploymentManifest(deploymentManifest)
+      ) {
+        throw new Error("enrichment revision handoff changed before Space upload");
+      }
+    }
     await commit({
       repo: { type: "space", name: spaceRepo },
       accessToken: client.accessToken,
