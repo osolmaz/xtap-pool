@@ -548,6 +548,7 @@ async function runSinglePlannedEnrichmentRun(
         log,
         checkpointStore,
         plan,
+        targetWorkerRevision,
         attemptId,
         manifest,
         databaseBytes,
@@ -567,6 +568,7 @@ async function runSinglePlannedEnrichmentRun(
         log,
         checkpointStore,
         plan,
+        targetWorkerRevision,
         attemptId,
         manifest,
         databaseBytes,
@@ -689,6 +691,7 @@ async function runSinglePlannedEnrichmentRun(
           log,
           checkpointStore,
           plan,
+          targetWorkerRevision,
           attemptId,
           manifest,
           databaseBytes,
@@ -739,6 +742,7 @@ async function ensureSuccessorRun(options: {
   log: BucketLog;
   checkpointStore: ReturnType<typeof createEnrichmentCheckpointStore>;
   plan: EnrichmentRunPlan;
+  targetWorkerRevision: string;
   attemptId: string;
   manifest: DurableIndexManifest;
   databaseBytes: number;
@@ -769,6 +773,7 @@ async function ensureSuccessorRun(options: {
       options.checkpointStore,
       reference.run_id,
       reference.plan_sha256,
+      options.targetWorkerRevision,
       options.attemptId,
     );
   }
@@ -832,7 +837,7 @@ async function ensureSuccessorRun(options: {
           snapshot_revision: advance.revision,
           ordered_segments: { key: "replaced", sha256: "0".repeat(64), bytes: 1 },
         },
-        contract: options.plan.contract,
+        contract: successorContractForWorker(options.plan, options.targetWorkerRevision),
         base_index: {
           key: options.manifest.database.key,
           sha256: options.manifest.database.sha256,
@@ -864,6 +869,7 @@ async function ensureSuccessorRun(options: {
       options.checkpointStore,
       successor.runId,
       successor.planSha256,
+      options.targetWorkerRevision,
       options.attemptId,
     );
   } finally {
@@ -872,16 +878,27 @@ async function ensureSuccessorRun(options: {
   }
 }
 
+export function successorContractForWorker(
+  plan: EnrichmentRunPlan,
+  targetWorkerRevision: string,
+): EnrichmentRunPlan["contract"] {
+  return { ...plan.contract, worker_revision: targetWorkerRevision };
+}
+
 async function readVerifiedSuccessor(
   store: ReturnType<typeof createEnrichmentCheckpointStore>,
   runId: string,
   planSha256: string,
+  expectedWorkerRevision: string,
   attemptId: string,
 ): Promise<VerifiedSuccessor> {
   const bytes = await requiredObject(store, `${RUN_PREFIX}/${runId}/plan.json`);
   const parsed: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
   const { plan } = parseEnrichmentRunPlan(parsed, planSha256);
   if (plan.run_id !== runId) throw new Error("enrichment successor plan ID mismatch");
+  if (plan.contract.worker_revision !== expectedWorkerRevision) {
+    throw new Error("enrichment successor worker revision mismatch");
+  }
   const adapter = new EnrichmentCheckpointAdapter(
     createEmptyEnrichmentState({
       runId,

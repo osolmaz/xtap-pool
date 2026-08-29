@@ -64,7 +64,10 @@ vi.mock("../src/job-progress.js", () => ({
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
 import { canonicalBytes, sha256 } from "../src/bucket-log.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
-import { runPlannedEnrichmentCommand } from "../src/enrich-planned-command.js";
+import {
+  runPlannedEnrichmentCommand,
+  successorContractForWorker,
+} from "../src/enrich-planned-command.js";
 import { canonicalPlanBytes, createEnrichmentRunPlan } from "../src/enrich-run-plan.js";
 import {
   createEmptyEnrichmentState,
@@ -114,6 +117,48 @@ afterEach(async () => {
 });
 
 describe("planned enrichment runtime", () => {
+  it("stamps successor contracts with the running worker revision", () => {
+    const predecessor = createEnrichmentRunPlan({
+      schema_version: 1,
+      created_at: CREATED_AT,
+      source: {
+        bucket: "owner/raw",
+        snapshot_revision: "1".repeat(64),
+        ordered_segments: { key: "segments.json", sha256: "2".repeat(64), bytes: 1 },
+      },
+      contract: {
+        worker_revision: "a".repeat(40),
+        contract_sha256: "3".repeat(64),
+        taxonomy_version: 1,
+        model: "model:provider",
+        provider: "provider",
+      },
+      base_index: {
+        key: "index.sqlite",
+        sha256: "4".repeat(64),
+        bytes: 1,
+        source_revision: "5".repeat(64),
+        source_segment_count: 0,
+        receipt_count: 0,
+        registry_revision: 0,
+      },
+      work: {
+        key: "work.sqlite",
+        sha256: "6".repeat(64),
+        bytes: 1,
+        queue_total: 1,
+        queue_baseline_done: 0,
+        registry_total: 0,
+        registry_baseline_scanned: 0,
+      },
+    });
+
+    expect(successorContractForWorker(predecessor.plan, "b".repeat(40))).toEqual({
+      ...predecessor.plan.contract,
+      worker_revision: "b".repeat(40),
+    });
+  });
+
   it("stops after activating a verified blocked-only successor", async () => {
     const dataDir = join(
       tmpdir(),
