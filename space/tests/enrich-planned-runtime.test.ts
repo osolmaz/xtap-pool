@@ -7,6 +7,14 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CheckpointCoordinator, type CheckpointObjectStore } from "@osolmaz/hf-job-control";
 
+import type { BucketSegment, BucketSnapshotFile } from "../src/bucket-log.js";
+
+type RawReplayOptions = {
+  progress?: (completed: number, total: number) => Promise<void>;
+  consume?: (file: BucketSnapshotFile, segment: BucketSegment) => Promise<void>;
+};
+type RawReplay = (options: RawReplayOptions) => Promise<void>;
+
 type ProgressMock = {
   checkpointClaims: (completed: number, total: number) => Promise<void>;
   outputClaims: (completed: number, total: number) => Promise<void>;
@@ -20,6 +28,9 @@ const mocks = vi.hoisted(() => ({
   checkpointWriter: vi.fn<() => CheckpointObjectStore>(),
   config: vi.fn<() => Readonly<Record<string, unknown>>>(),
   rawWriter: vi.fn(() => ({})),
+  rawReplay: vi.fn<RawReplay>(async (options) => {
+    await options.progress?.(0, 0);
+  }),
   progressCreate: vi.fn<() => Promise<ProgressMock>>(),
   progress: {
     checkpointClaims: vi.fn(() => Promise.resolve()),
@@ -50,11 +61,8 @@ vi.mock("../src/bucket-log.js", async (importOriginal) => {
         return Promise.resolve();
       }
 
-      replayVerifiedTail(
-        _known: readonly unknown[],
-        options: { progress?: (completed: number, total: number) => Promise<void> },
-      ) {
-        return options.progress?.(0, 0) ?? Promise.resolve();
+      replayVerifiedTail(_known: readonly unknown[], options: RawReplayOptions): Promise<void> {
+        return mocks.rawReplay(options);
       }
     },
     createRawBucketClient: () => mocks.rawWriter(),
@@ -426,8 +434,37 @@ describe("planned enrichment runtime", () => {
     );
     store.files.set(uncheckpointedKey, uncheckpointed.bytes);
     await expect(handoffValidation()).rejects.toThrow("uncheckpointed receipt result manifest");
+    await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow(
+      "uncheckpointed receipt result manifest",
+    );
+    expect(mocks.rawWriter).not.toHaveBeenCalled();
+    expect(mocks.progressCreate).not.toHaveBeenCalled();
+    expect(mocks.checkpointWriter).not.toHaveBeenCalled();
 
     store.files.delete(uncheckpointedKey);
+    const replayOrphan: RawReplay = async (options) => {
+      await options.consume?.(
+        {
+          key: `v1/segments/receipt/2026/08/19/1-${"0".repeat(36)}-${"e".repeat(64)}.json.gz`,
+          oid: "orphan-receipt",
+          size: 1,
+          content_sha256: "e".repeat(64),
+        },
+        orphanReceiptSegment(contractHash),
+      );
+      await options.progress?.(1, 1);
+    };
+    mocks.rawReplay.mockImplementationOnce(replayOrphan).mockImplementationOnce(replayOrphan);
+    await expect(handoffValidation()).rejects.toThrow(
+      "enrichment handoff preparation found orphan worker output segments",
+    );
+    await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow(
+      "verified output frontier has orphan worker output segments",
+    );
+    expect(mocks.rawWriter).not.toHaveBeenCalled();
+    expect(mocks.progressCreate).not.toHaveBeenCalled();
+    expect(mocks.checkpointWriter).not.toHaveBeenCalled();
+
     await expect(handoffValidation()).resolves.toEqual({ claimedSegments: 0, orphanSegments: 0 });
     await runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions);
 
@@ -447,6 +484,39 @@ describe("planned enrichment runtime", () => {
     });
   });
 });
+
+function orphanReceiptSegment(contractHash: string): BucketSegment {
+  return {
+    schema_version: 1,
+    transaction_id: "11111111-1111-4111-8111-111111111111",
+    created_at: CREATED_AT,
+    operations: [
+      {
+        mode: "append",
+        path: "enrichment/receipts/2026-08-19.jsonl",
+        lines: [
+          JSON.stringify({
+            started_at: CREATED_AT,
+            finished_at: CREATED_AT,
+            units: 0,
+            calls: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            failures: 0,
+            retries: 0,
+            blocked: 0,
+            contract_hash: contractHash,
+            worker_id: "orphan-worker",
+            discarded_assignments: 0,
+            new_candidates: 0,
+            new_approvals: 0,
+            new_rejections: 0,
+          }),
+        ],
+      },
+    ],
+  };
+}
 
 function withoutRunId(plan: ReturnType<typeof createEnrichmentRunPlan>["plan"]) {
   const { run_id: excluded, ...input } = plan;
