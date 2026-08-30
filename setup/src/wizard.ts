@@ -142,10 +142,7 @@ async function finishUpdate(
     variables,
   });
   try {
-    const scheduleSecrets = await updateScheduleSecrets(
-      scheduleMaintenance.wasActive,
-      storageToken,
-    );
+    const scheduleSecrets = await updateScheduleSecrets(storageToken);
     await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
     const prepareDeploymentManifest = createEnrichmentDeploymentManifestPreparer(
       productionEnrichmentHandoffPreparation({
@@ -175,7 +172,7 @@ async function finishUpdate(
     );
     const scheduleResult = await finalizeEnrichmentScheduleUpdate(client, desired, {
       resumeAfterMaintenance: scheduleMaintenance.wasActive,
-      ...(scheduleSecrets === undefined ? {} : { secrets: scheduleSecrets }),
+      secrets: scheduleSecrets,
     });
     task.stop("Space updated");
     outro(updateCompletionMessage(config.spaceRepo, scheduleResult));
@@ -193,10 +190,8 @@ async function finishUpdate(
 }
 
 async function updateScheduleSecrets(
-  scheduleWasActive: boolean,
   storageToken: string,
-): Promise<{ storageToken: string; inferenceToken: string } | undefined> {
-  if (!scheduleWasActive) return undefined;
+): Promise<{ storageToken: string; inferenceToken: string }> {
   return { storageToken, inferenceToken: await promptInferenceToken() };
 }
 

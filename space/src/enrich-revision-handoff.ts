@@ -333,6 +333,7 @@ async function verifyRevisionHandoffAnchor(
   if (claimKeys.length === 0) {
     throw new Error("completed revision handoff checkpoint claim is missing");
   }
+  let previousCheckpointSha256: string | null | undefined;
   for (const key of claimKeys) {
     const claimBytes = await requiredObject(store, key);
     const claim = parseCheckpointClaim(JSON.parse(Buffer.from(claimBytes).toString("utf8")));
@@ -347,6 +348,11 @@ async function verifyRevisionHandoffAnchor(
     ) {
       throw new Error("completed revision handoff checkpoint claim identity mismatch");
     }
+    if (previousCheckpointSha256 === undefined) {
+      previousCheckpointSha256 = claim.previous_checkpoint_sha256;
+    } else if (claim.previous_checkpoint_sha256 !== previousCheckpointSha256) {
+      throw new Error("completed revision handoff checkpoint predecessor mismatch");
+    }
   }
   const checkpointBytes = await requiredObject(store, handoff.checkpoint_key);
   if (
@@ -359,7 +365,8 @@ async function verifyRevisionHandoffAnchor(
   if (
     bundle.manifest.run_id !== handoff.run_id ||
     bundle.manifest.plan_sha256 !== handoff.plan_sha256 ||
-    bundle.manifest.boundary.sequence !== handoff.checkpoint_sequence
+    bundle.manifest.boundary.sequence !== handoff.checkpoint_sequence ||
+    bundle.manifest.previous_checkpoint_sha256 !== previousCheckpointSha256
   ) {
     throw new Error("completed revision handoff checkpoint bundle identity mismatch");
   }
