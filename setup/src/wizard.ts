@@ -40,6 +40,7 @@ import {
   quiesceCanonicalEnrichmentSchedule,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
+  restoreCanonicalEnrichmentSchedule,
 } from "./enrichment-job.js";
 import {
   getSpaceVariables,
@@ -134,48 +135,69 @@ async function finishUpdate(
     await setSpaceSecret(client, config.spaceRepo, "HF_TOKEN", storageToken);
   }
   storageToken ??= await promptExistingStorageToken();
-  const scheduleWasActive = await quiesceCanonicalEnrichmentSchedule({
+  const scheduleMaintenance = await quiesceCanonicalEnrichmentSchedule({
     client,
     spaceRepo: config.spaceRepo,
     rawBucket: config.rawBucket,
     variables,
   });
-  const scheduleSecrets = scheduleWasActive
-    ? { storageToken, inferenceToken: await promptInferenceToken() }
-    : undefined;
-  await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
-  const prepareDeploymentManifest = createEnrichmentDeploymentManifestPreparer(
-    productionEnrichmentHandoffPreparation({
-      root,
-      client,
-      config,
-      variables,
+  try {
+    const scheduleSecrets = await updateScheduleSecrets(
+      scheduleMaintenance.wasActive,
       storageToken,
-    }),
-  );
-  const task = spinner();
-  task.start(`Updating ${config.spaceRepo}`);
-  await updateExistingPool(root, client, config, {
-    allowLegacyDatasetRemoval: legacy,
-    prepareDeploymentManifest,
-  });
-  if (legacy) {
-    await restartSpaceRuntime(client, config.spaceRepo);
-    await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
+    );
+    await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+    const prepareDeploymentManifest = createEnrichmentDeploymentManifestPreparer(
+      productionEnrichmentHandoffPreparation({
+        root,
+        client,
+        config,
+        variables,
+        storageToken,
+      }),
+    );
+    const task = spinner();
+    task.start(`Updating ${config.spaceRepo}`);
+    await updateExistingPool(root, client, config, {
+      allowLegacyDatasetRemoval: legacy,
+      prepareDeploymentManifest,
+    });
+    if (legacy) {
+      await restartSpaceRuntime(client, config.spaceRepo);
+      await waitForSpaceStage(client, config.spaceRepo, "RUNNING");
+    }
+    const refreshedVariables = await getSpaceVariables(client, config.spaceRepo);
+    const desired = await desiredEnrichmentJob(
+      client,
+      config.spaceRepo,
+      config.rawBucket,
+      refreshedVariables,
+    );
+    const scheduleResult = await finalizeEnrichmentScheduleUpdate(client, desired, {
+      resumeAfterMaintenance: scheduleMaintenance.wasActive,
+      ...(scheduleSecrets === undefined ? {} : { secrets: scheduleSecrets }),
+    });
+    task.stop("Space updated");
+    outro(updateCompletionMessage(config.spaceRepo, scheduleResult));
+  } catch (updateError) {
+    try {
+      await restoreCanonicalEnrichmentSchedule(client, scheduleMaintenance);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [updateError, restoreError],
+        "Space update failed and the canonical enrichment schedule could not be restored.",
+      );
+    }
+    throw updateError;
   }
-  const refreshedVariables = await getSpaceVariables(client, config.spaceRepo);
-  const desired = await desiredEnrichmentJob(
-    client,
-    config.spaceRepo,
-    config.rawBucket,
-    refreshedVariables,
-  );
-  const scheduleResult = await finalizeEnrichmentScheduleUpdate(client, desired, {
-    resumeAfterMaintenance: scheduleWasActive,
-    ...(scheduleSecrets === undefined ? {} : { secrets: scheduleSecrets }),
-  });
-  task.stop("Space updated");
-  outro(updateCompletionMessage(config.spaceRepo, scheduleResult));
+}
+
+async function updateScheduleSecrets(
+  scheduleWasActive: boolean,
+  storageToken: string,
+): Promise<{ storageToken: string; inferenceToken: string } | undefined> {
+  if (!scheduleWasActive) return undefined;
+  return { storageToken, inferenceToken: await promptInferenceToken() };
 }
 
 function updateCompletionMessage(
