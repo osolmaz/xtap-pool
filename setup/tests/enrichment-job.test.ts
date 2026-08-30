@@ -29,6 +29,7 @@ import {
   quiesceCanonicalEnrichmentSchedule,
   quiesceEnrichmentWriters,
   reconcileEnrichmentJob,
+  restoreCanonicalEnrichmentSchedule,
   resumeEnrichmentSchedule,
   runEnrichmentCanary,
   suspendEnrichmentSchedule,
@@ -133,7 +134,7 @@ describe("Hugging Face enrichment Job", () => {
         },
         { pollIntervalMs: 0, timeoutMs: 100 },
       ),
-    ).resolves.toBe(true);
+    ).resolves.toMatchObject({ scheduleId: "active", wasActive: true });
     expect(hubMocks.suspendScheduledJob).toHaveBeenCalledWith(
       expect.objectContaining({ jobId: "active" }),
     );
@@ -169,16 +170,110 @@ describe("Hugging Face enrichment Job", () => {
     );
   });
 
+  it("rejects unsafe canonical schedule maintenance admission", async () => {
+    const desired = await desiredFixture();
+    const options = {
+      client,
+      spaceRepo: desired.spaceRepo,
+      rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+      variables: variables(),
+    };
+
+    await expect(
+      quiesceCanonicalEnrichmentSchedule({ ...options, spaceRepo: "/invalid" }),
+    ).rejects.toThrow("Invalid Space repository");
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([]);
+    await expect(quiesceCanonicalEnrichmentSchedule(options)).rejects.toThrow("exactly one");
+
+    const missingRevisionSchedule = scheduleFixture(desired, "missing-revision", true);
+    const missingRevision = {
+      ...missingRevisionSchedule,
+      jobSpec: {
+        ...missingRevisionSchedule.jobSpec,
+        labels: { ...missingRevisionSchedule.jobSpec.labels },
+      },
+    };
+    delete missingRevision.jobSpec.labels["source_revision"];
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([missingRevision]);
+    await expect(quiesceCanonicalEnrichmentSchedule(options)).rejects.toThrow(
+      "does not declare its source revision",
+    );
+
+    const mismatch = scheduleFixture({ ...desired, schedule: "0 0 * * *" }, "mismatch", true);
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([mismatch]);
+    await expect(quiesceCanonicalEnrichmentSchedule(options)).rejects.toThrow(
+      "exact non-concurrent",
+    );
+
+    const active = scheduleFixture(desired, "active", false);
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([active]);
+    await expect(
+      quiesceCanonicalEnrichmentSchedule(options, { pollIntervalMs: 0, timeoutMs: 0 }),
+    ).rejects.toThrow("did not quiesce");
+  });
+
+  it("restores the validated original schedule after an update failure", async () => {
+    const desired = await desiredFixture();
+    const active = scheduleFixture(desired, "original", false);
+    const suspended = { ...active, suspend: true };
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([suspended]);
+    const maintenance = await quiesceCanonicalEnrichmentSchedule(
+      {
+        client,
+        spaceRepo: desired.spaceRepo,
+        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+        variables: variables(),
+      },
+      { pollIntervalMs: 0, timeoutMs: 100 },
+    );
+    hubMocks.listScheduledJobs.mockReset().mockResolvedValue([suspended]);
+
+    await expect(restoreCanonicalEnrichmentSchedule(client, maintenance)).resolves.toBeUndefined();
+    expect(hubMocks.resumeScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "original" }),
+    );
+  });
+
   it("keeps a schedule suspended when maintenance started suspended", async () => {
     const desired = await desiredFixture();
     const exact = scheduleFixture(desired, "exact", true);
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
+    const maintenance = await quiesceCanonicalEnrichmentSchedule({
+      client,
+      spaceRepo: desired.spaceRepo,
+      rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+      variables: variables(),
+    });
 
+    await expect(restoreCanonicalEnrichmentSchedule(client, maintenance)).resolves.toBeUndefined();
     await expect(
       finalizeEnrichmentScheduleUpdate(client, desired, {
         resumeAfterMaintenance: false,
       }),
     ).resolves.toEqual({ suspendedStale: 0, resumed: false });
+    expect(hubMocks.resumeScheduledJob).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restore an original schedule after its maintenance state drifts", async () => {
+    const desired = await desiredFixture();
+    const maintenance = { desired, scheduleId: "original", wasActive: true };
+    const suspended = scheduleFixture(desired, "original", true);
+    const active = scheduleFixture(desired, "original", false);
+    const replacement = scheduleFixture(desired, "replacement", true);
+    const unsafeStates = [
+      { schedules: [], jobs: [] },
+      { schedules: [suspended], jobs: [physicalFixture(desired, "active", "RUNNING")] },
+      { schedules: [replacement], jobs: [] },
+      { schedules: [active], jobs: [] },
+    ];
+
+    for (const state of unsafeStates) {
+      hubMocks.listScheduledJobs.mockResolvedValueOnce(state.schedules);
+      hubMocks.listJobs.mockResolvedValueOnce(state.jobs);
+      await expect(restoreCanonicalEnrichmentSchedule(client, maintenance)).rejects.toThrow(
+        "Cannot safely restore",
+      );
+    }
     expect(hubMocks.resumeScheduledJob).not.toHaveBeenCalled();
   });
 

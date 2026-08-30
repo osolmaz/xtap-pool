@@ -191,6 +191,12 @@ type OwnedEnrichmentJobs = {
   activeJobs: readonly PhysicalEnrichmentJob[];
 };
 
+export type EnrichmentScheduleMaintenance = {
+  desired: DesiredEnrichmentJob;
+  scheduleId: string;
+  wasActive: boolean;
+};
+
 export async function desiredEnrichmentJob(
   client: HubClient,
   spaceRepo: string,
@@ -348,7 +354,7 @@ export async function quiesceCanonicalEnrichmentSchedule(
     variables: ReadonlyMap<string, string>;
   },
   wait: { pollIntervalMs?: number; timeoutMs?: number } = {},
-): Promise<boolean> {
+): Promise<EnrichmentScheduleMaintenance> {
   const namespace = options.spaceRepo.split("/")[0];
   if (namespace === undefined || namespace.length === 0) {
     throw new Error(`Invalid Space repository: ${options.spaceRepo}.`);
@@ -394,13 +400,28 @@ export async function quiesceCanonicalEnrichmentSchedule(
       scheduleMatches(currentSchedule, desired) &&
       current.activeJobs.length === 0
     ) {
-      return wasActive;
+      return { desired, scheduleId: schedule.id, wasActive };
     }
     if (Date.now() >= deadline) {
       throw new Error("Enrichment writers did not quiesce before the deployment deadline.");
     }
     await delay(wait.pollIntervalMs ?? 2_000);
   }
+}
+
+export async function restoreCanonicalEnrichmentSchedule(
+  client: HubClient,
+  maintenance: EnrichmentScheduleMaintenance,
+): Promise<void> {
+  if (!maintenance.wasActive) return;
+  const inspection = await inspectEnrichmentJob(client, maintenance.desired);
+  const original = inspection.exactSchedules.find(
+    (schedule) => schedule.id === maintenance.scheduleId,
+  );
+  if (inspection.schedules.length !== 1 || inspection.activeJobs.length > 0 || !original?.suspend) {
+    throw new Error("Cannot safely restore the original canonical enrichment schedule.");
+  }
+  await resumeEnrichmentSchedule(client, maintenance.desired, maintenance.scheduleId);
 }
 
 async function readOwnedEnrichmentJobs(
