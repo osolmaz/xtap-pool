@@ -24,7 +24,7 @@ vanilla JS — keep upstream style, record changes in `extension/VENDORED.md`).
 
 ## Background enrichment Jobs
 
-- The repository's checked-in scheduled enrichment contract is standing production work. Keep the canonical Hugging Face schedule active and let it run in the background.
+- The repository's checked-in scheduled enrichment contract is standing, always-on production work. Keep the canonical Hugging Face schedule active and let it run in the background. Treat a suspended canonical schedule as an incident unless the same maintenance or recovery task is actively preventing overlap.
 - Launch, resume, or retry Jobs from that unchanged contract without asking for per-run cost approval. Its checked-in schedule and hard limits are the approved bounds.
 - Keep Space-side enrichment disabled and keep only one physical enrichment Job active at a time. Preserve durable checkpoints, receipts, manifests, segments, and referenced indexes across retries.
 - Suspend the schedule only as long as needed to prevent overlap during maintenance, recovery, or the required sequential canary. Restore the validated canonical schedule immediately afterward.
