@@ -359,6 +359,9 @@ async function runSinglePlannedEnrichmentRun(
   const runId = activeRun.run_id;
   const planSha256 = activeRun.plan_sha256;
   const plan = preparedRevision.plan;
+  if (plan.source.bucket !== config.rawBucket) {
+    throw new Error("active enrichment plan raw Bucket mismatch");
+  }
   emitRestoreProgress("plan", 1, 1);
   emitRestoreProgress(
     "checkpoint",

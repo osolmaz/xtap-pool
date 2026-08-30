@@ -372,7 +372,7 @@ describe("planned enrichment runtime", () => {
     mocks.checkpointStore.mockReturnValue(store);
     mocks.checkpointWriter.mockReturnValue(store);
     mocks.progressCreate.mockResolvedValue(mocks.progress);
-    mocks.config.mockReturnValue({
+    const runtimeConfig = {
       enrichEnabled: true,
       inferenceToken: "inference",
       indexBucket: "owner/index",
@@ -381,7 +381,8 @@ describe("planned enrichment runtime", () => {
       dataDir,
       taxonomyVersion: 1,
       llmModel: "model:provider",
-    });
+    };
+    mocks.config.mockReturnValue(runtimeConfig);
 
     const preparedRevision = await prepareEnrichmentRevision({
       store,
@@ -397,6 +398,15 @@ describe("planned enrichment runtime", () => {
         enrichment_revision_handoff: preparedRevision.handoff,
       },
     };
+    mocks.config.mockReturnValue({ ...runtimeConfig, rawBucket: "owner/other-raw" });
+    await expect(runPlannedEnrichmentCommand(runtimeEnv, runtimeOptions)).rejects.toThrow(
+      "active enrichment plan raw Bucket mismatch",
+    );
+    expect(mocks.rawWriter).not.toHaveBeenCalled();
+    expect(mocks.progressCreate).not.toHaveBeenCalled();
+    expect(mocks.checkpointWriter).not.toHaveBeenCalled();
+    mocks.config.mockReturnValue(runtimeConfig);
+
     const malformedResultKey =
       `operations/enrichment/runs/${current.plan.run_id}/batches/queue/` +
       `${"0".repeat(64)}/result.json`;

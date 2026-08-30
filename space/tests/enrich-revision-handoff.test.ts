@@ -396,11 +396,61 @@ describe("immutable enrichment revision handoff", () => {
       ),
     ).rejects.toThrow("checkpoint chain");
 
-    const missingAnchor = cloneStore(store);
+    const forkedAnchor = cloneStore(store);
     const anchorSequence = `sequence-${String(807).padStart(16, "0")}`;
-    const anchorClaim = [...missingAnchor.files.keys()].find((key) => key.includes(anchorSequence));
-    expect(anchorClaim).toBeDefined();
-    missingAnchor.files.delete(anchorClaim ?? "");
+    const anchorClaimKey = [...forkedAnchor.files.keys()].find((key) =>
+      key.includes(anchorSequence),
+    );
+    expect(anchorClaimKey).toBeDefined();
+    const anchorClaim = parseCheckpointClaim(
+      JSON.parse(
+        Buffer.from(forkedAnchor.files.get(anchorClaimKey ?? "") ?? new Uint8Array()).toString(
+          "utf8",
+        ),
+      ),
+    );
+    const forkedClaim = parseCheckpointClaim({
+      ...anchorClaim,
+      attempt_id: "forked-anchor-attempt",
+      previous_checkpoint_sha256: "9".repeat(64),
+    });
+    forkedAnchor.files.set(
+      checkpointClaimKey(RUN_PREFIX, forkedClaim),
+      stableCheckpointJsonBytes(forkedClaim),
+    );
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, advanced, TARGET_REVISION, forkedAnchor),
+    ).rejects.toThrow("checkpoint predecessor mismatch");
+
+    const mismatchedAnchor = cloneStore(store);
+    const mismatchedClaimKey = [...mismatchedAnchor.files.keys()].find((key) =>
+      key.includes(anchorSequence),
+    );
+    expect(mismatchedClaimKey).toBeDefined();
+    const mismatchedClaim = parseCheckpointClaim(
+      JSON.parse(
+        Buffer.from(
+          mismatchedAnchor.files.get(mismatchedClaimKey ?? "") ?? new Uint8Array(),
+        ).toString("utf8"),
+      ),
+    );
+    mismatchedAnchor.files.set(
+      mismatchedClaimKey ?? "",
+      stableCheckpointJsonBytes({
+        ...mismatchedClaim,
+        previous_checkpoint_sha256: "9".repeat(64),
+      }),
+    );
+    await expect(
+      verifyPreparedEnrichmentRevision(manifest, advanced, TARGET_REVISION, mismatchedAnchor),
+    ).rejects.toThrow("checkpoint bundle identity mismatch");
+
+    const missingAnchor = cloneStore(store);
+    const missingAnchorClaim = [...missingAnchor.files.keys()].find((key) =>
+      key.includes(anchorSequence),
+    );
+    expect(missingAnchorClaim).toBeDefined();
+    missingAnchor.files.delete(missingAnchorClaim ?? "");
     await expect(
       verifyPreparedEnrichmentRevision(manifest, advanced, TARGET_REVISION, missingAnchor),
     ).rejects.toThrow("checkpoint claim is missing");

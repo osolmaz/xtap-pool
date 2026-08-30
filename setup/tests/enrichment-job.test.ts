@@ -234,23 +234,43 @@ describe("Hugging Face enrichment Job", () => {
     );
   });
 
-  it("keeps a schedule suspended when maintenance started suspended", async () => {
-    const desired = await desiredFixture();
-    const exact = scheduleFixture(desired, "exact", true);
+  it("replaces an outdated schedule but keeps it suspended after suspended maintenance", async () => {
+    const current = await desiredFixture();
+    const exact = scheduleFixture(current, "exact", true);
     hubMocks.listScheduledJobs.mockResolvedValue([exact]);
     const maintenance = await quiesceCanonicalEnrichmentSchedule({
       client,
-      spaceRepo: desired.spaceRepo,
-      rawBucket: desired.environment["RAW_BUCKET"] ?? "",
+      spaceRepo: current.spaceRepo,
+      rawBucket: current.environment["RAW_BUCKET"] ?? "",
       variables: variables(),
     });
 
     await expect(restoreCanonicalEnrichmentSchedule(client, maintenance)).resolves.toBeUndefined();
+    const updatedRevision = "b".repeat(40);
+    const updated = {
+      ...current,
+      sourceRevision: updatedRevision,
+      environment: { ...current.environment, XTAP_SOURCE_REVISION: updatedRevision },
+      labels: { ...current.labels, source_revision: updatedRevision },
+    };
+    const replacement = scheduleFixture(updated, "replacement", true);
+    hubMocks.listScheduledJobs
+      .mockReset()
+      .mockResolvedValueOnce([exact])
+      .mockResolvedValueOnce([exact])
+      .mockResolvedValueOnce([exact]);
+    hubMocks.createScheduledJob.mockResolvedValue(replacement);
+    hubMocks.getScheduledJob.mockResolvedValue(replacement);
+
     await expect(
-      finalizeEnrichmentScheduleUpdate(client, desired, {
+      finalizeEnrichmentScheduleUpdate(client, updated, {
         resumeAfterMaintenance: false,
+        secrets: { storageToken: "hf_dataset", inferenceToken: "hf_inference" },
       }),
     ).resolves.toEqual({ suspendedStale: 0, resumed: false });
+    expect(hubMocks.deleteScheduledJob).toHaveBeenCalledWith(
+      expect.objectContaining({ jobId: "exact" }),
+    );
     expect(hubMocks.resumeScheduledJob).not.toHaveBeenCalled();
   });
 

@@ -549,18 +549,15 @@ export async function finalizeEnrichmentScheduleUpdate(
     secrets?: EnrichmentJobSecrets;
   },
 ): Promise<{ suspendedStale: number; resumed: boolean }> {
-  if (!options.resumeAfterMaintenance) {
-    return {
-      suspendedStale: await suspendMismatchedEnrichmentSchedules(client, desired),
-      resumed: false,
-    };
-  }
   const inspection = await inspectEnrichmentJob(client, desired);
   const schedule = await reconcileEnrichmentJob(
     client,
     desired,
     inspection.exactSchedules.length === 0 ? options.secrets : undefined,
   );
+  if (!options.resumeAfterMaintenance) {
+    return { suspendedStale: 0, resumed: false };
+  }
   await resumeEnrichmentSchedule(client, desired, schedule.id);
   return { suspendedStale: 0, resumed: true };
 }
