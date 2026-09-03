@@ -69,7 +69,7 @@ import {
 } from "./enrich-worker.js";
 import type { DurableWorkerOutput, WorkerCeilings } from "./enrich-worker.js";
 import { remainingWorkerElapsedMs } from "./enrich-command.js";
-import { XTapJobProgress } from "./job-progress.js";
+import { reportBlockedBestEffort, XTapJobProgress } from "./job-progress.js";
 import { TweetStore } from "./store.js";
 
 const RUN_PREFIX = "operations/enrichment/runs";
@@ -875,7 +875,7 @@ async function runSinglePlannedEnrichmentRun(
       successorHasWork: false,
     };
   } catch (error) {
-    await progress.blocked();
+    await reportBlockedBestEffort(progress);
     throw error;
   } finally {
     tweetStore.close();

@@ -363,6 +363,17 @@ function labelFor(key: TrackKey): string {
     .join(" ");
 }
 
+export async function reportBlockedBestEffort(
+  progress: Pick<XTapJobProgress, "blocked">,
+  report: (message: string) => void = console.error,
+): Promise<void> {
+  try {
+    await progress.blocked();
+  } catch {
+    report("[xtap-pool job] failed to report blocked progress");
+  }
+}
+
 export function isMissingProgressPath(error: unknown): boolean {
   return error instanceof HubApiError && error.statusCode === 404;
 }

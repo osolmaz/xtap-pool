@@ -5,7 +5,11 @@ import type { ProgressObjectStore } from "@osolmaz/hf-job-control";
 import { HubApiError } from "@huggingface/hub";
 import { describe, expect, it } from "vitest";
 
-import { isMissingProgressPath, XTapJobProgress } from "../src/job-progress.js";
+import {
+  isMissingProgressPath,
+  reportBlockedBestEffort,
+  XTapJobProgress,
+} from "../src/job-progress.js";
 
 class MemoryObjects implements ProgressObjectStore {
   readonly bucketId = "owner/index";
@@ -133,6 +137,26 @@ describe("XTapJobProgress", () => {
     expect(
       stored?.snapshot.tracks.find((track) => track.key === "checkpoint-replay"),
     ).toMatchObject({ status: "completed", completed: 1, total: 1 });
+  });
+
+  it("does not let a blocked-status failure replace the work failure", async () => {
+    const workError = new Error("checkpoint pointer write failed");
+    const messages: string[] = [];
+
+    await expect(
+      (async () => {
+        try {
+          throw workError;
+        } catch (error) {
+          await reportBlockedBestEffort(
+            { blocked: () => Promise.reject(new Error("progress sequence conflict")) },
+            (message) => messages.push(message),
+          );
+          throw error;
+        }
+      })(),
+    ).rejects.toBe(workError);
+    expect(messages).toEqual(["[xtap-pool job] failed to report blocked progress"]);
   });
 
   it("publishes active, waiting, blocked, and resumed phase transitions", async () => {
