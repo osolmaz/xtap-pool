@@ -103,13 +103,8 @@ export async function prepareEnrichmentRevision(options: {
     runId,
     planSha256,
     adapter,
+    pointer,
   );
-  if (
-    pointer.sequence !== checkpoint.manifest.boundary.sequence ||
-    !sameCheckpointReference(pointer.checkpoint, checkpoint.checkpoint)
-  ) {
-    throw new Error("enrichment checkpoint pointer does not match the verified chain head");
-  }
 
   const handoff =
     plan.contract.worker_revision === options.targetWorkerRevision
@@ -201,6 +196,7 @@ async function restoreLatestCheckpointReadOnly(
   runId: string,
   planSha256: string,
   adapter: EnrichmentCheckpointAdapter,
+  pointer: { sequence: number; checkpoint: CheckpointReference },
 ): Promise<RestoreResult<EnrichmentRestoreEvidence>> {
   const claimPrefix = checkpointClaimPrefix(RUN_PREFIX, runId);
   const claimKeys = (await store.list(claimPrefix)).filter((key) =>
@@ -249,6 +245,15 @@ async function restoreLatestCheckpointReadOnly(
     previousSha256 = candidate.checkpoint.sha256;
   }
   if (head === null) throw new Error("planned enrichment has no bootstrap checkpoint");
+  const pointerClaim = bySequence.get(pointer.sequence)?.[0];
+  if (
+    pointerClaim === undefined ||
+    !sameCheckpointReference(pointer.checkpoint, pointerClaim.checkpoint)
+  ) {
+    throw new Error(
+      "enrichment checkpoint pointer does not reference the verified checkpoint chain",
+    );
+  }
   const checkpointBytes = await readCheckpointReference(store, head.checkpoint);
   const verified = verifyCheckpointBundle(checkpointBytes);
   if (

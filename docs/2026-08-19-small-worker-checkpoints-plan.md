@@ -147,11 +147,12 @@ It must:
 4. Resolve and hash the contiguous active-run activation chain.
 5. Parse and hash the exact immutable plan and verify its run, source, contract,
    work order, and predecessor worker revision.
-6. Read the current checkpoint pointer, retain its exact bytes and digest, and
-   restore the referenced checkpoint bundle and result claims.
-7. Verify the checkpoint sequence, key, bytes, digest, plan identity, output
-   frontiers, queue bitmap, registry cursor, claims, and absence of orphan
-   output.
+6. Read the current checkpoint pointer and retain its exact bytes and digest.
+   Restore the newest checkpoint from the complete immutable claim chain.
+7. Require the pointer to name one checkpoint in that verified chain. A pointer
+   may lag the chain head after an interrupted write. Verify the checkpoint
+   sequence, key, bytes, digest, plan identity, output frontiers, queue bitmap,
+   registry cursor, claims, and absence of orphan output.
 8. Return deterministic handoff bytes without creating a provider, updating
    progress, or exposing a write method.
 9. Re-read the activation, checkpoint pointer, schedule, and Job list
@@ -175,9 +176,10 @@ It verifies:
 - The current active generation and activation digest equal the handoff.
 - The run ID, plan digest, plan worker revision, contract digest, and source
   snapshot equal the unchanged plan.
-- On the first start, the current checkpoint pointer bytes and digest equal the
-  pinned pointer, and the referenced checkpoint sequence, key, byte count, and
-  digest equal the handoff.
+- On the first start, the current checkpoint pointer either equals the pinned
+  pointer or names an older checkpoint in the same complete verified chain. The
+  worker restores the chain head and then repairs a lagging pointer before it
+  processes more work.
 - On a later attempt for the same plan, the current checkpoint is accepted only
   when its sequence is higher and the complete verified claim chain descends
   from the pinned handoff checkpoint without a gap, fork, or conflict.
@@ -270,9 +272,10 @@ Tests must cover:
 - Deterministic manifest and handoff bytes, strict field validation, and unknown
   field rejection.
 - The exact predecessor-plan/current-worker mismatch before provider creation.
-- A valid sequence-807 handoff and failures for a missing claim, wrong target,
-  wrong plan, wrong contract, wrong source snapshot, wrong activation digest,
-  stale pointer, wrong checkpoint sequence, key, size, bytes, or digest,
+- A valid sequence-807 handoff, safe recovery from a pointer that lags a unique
+  verified chain, and failures for a missing claim, wrong target, wrong plan,
+  wrong contract, wrong source snapshot, wrong activation digest, a pointer
+  outside the chain, wrong checkpoint sequence, key, size, bytes, or digest,
   malformed claim, activation fork, or active writer.
 - Read-only preparation with zero object-store writes, zero progress updates,
   and zero provider construction.
@@ -826,8 +829,10 @@ and produce the same final output as an uninterrupted reference.
 Corruption tests cover wrong run and plan identities, wrong hashes or sizes,
 missing predecessors, multiple roots, different claims for one sequence,
 malformed bitmaps, inconsistent counters, changed source snapshots, missing
-result segments, broken output chains, invalid SQLite files, stale pointer
-hints, and conflicting public publication claims.
+result segments, broken output chains, invalid SQLite files, pointers outside
+the verified chain, and conflicting public publication claims. A separate crash
+test leaves the pointer one checkpoint behind and proves that the next worker
+repairs it without repeating completed work.
 
 ## Verification
 

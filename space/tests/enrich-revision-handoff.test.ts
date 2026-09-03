@@ -349,6 +349,63 @@ describe("immutable enrichment revision handoff", () => {
     ).resolves.toEqual(manifest);
   }, 30_000);
 
+  it("accepts a stale pointer on the verified chain so normal restore can repair it", async () => {
+    const { store, active } = await productionBoundaryFixture();
+    const pointerKey = checkpointPointerKey(RUN_PREFIX, active.plan.run_id);
+    const stalePointer = Uint8Array.from(store.files.get(pointerKey) ?? new Uint8Array());
+    const prepared = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+    const coordinator = CheckpointCoordinator.create({
+      runId: active.plan.run_id,
+      attemptId: "interrupted-pointer-attempt",
+      planSha256: active.sha256,
+      store,
+      prefix: RUN_PREFIX,
+      clock: () => new Date("2026-08-29T13:00:00.000Z"),
+    });
+    await coordinator.restoreLatest(prepared.adapter);
+    prepared.adapter.replace(withCheckpointSequence(prepared.adapter.state, 808));
+    await coordinator.commit(
+      {
+        name: "interrupted-pointer-publication",
+        sequence: 808,
+        reached_at: "2026-08-29T13:00:00.000Z",
+        metadata: {},
+      },
+      prepared.adapter,
+    );
+    store.files.set(pointerKey, stalePointer);
+    const writesBeforePreparation = store.writes;
+
+    const recovered = await prepareEnrichmentRevision({
+      store,
+      targetWorkerRevision: TARGET_REVISION,
+    });
+
+    expect(recovered.checkpoint.manifest.boundary.sequence).toBe(808);
+    expect(
+      parseCheckpointPointer(JSON.parse(Buffer.from(stalePointer).toString("utf8"))).sequence,
+    ).toBe(807);
+    expect(store.writes).toBe(writesBeforePreparation);
+
+    const repair = CheckpointCoordinator.create({
+      runId: active.plan.run_id,
+      attemptId: "repair-pointer-attempt",
+      planSha256: active.sha256,
+      store,
+      prefix: RUN_PREFIX,
+      clock: () => new Date("2026-08-29T14:00:00.000Z"),
+    });
+    await repair.restoreLatest(recovered.adapter);
+    expect(
+      parseCheckpointPointer(
+        JSON.parse(Buffer.from(store.files.get(pointerKey) ?? new Uint8Array()).toString("utf8")),
+      ).sequence,
+    ).toBe(808);
+  }, 30_000);
+
   it("accepts later checkpoints only when they descend from the reviewed handoff anchor", async () => {
     const { store, active } = await productionBoundaryFixture();
     const prepared = await prepareEnrichmentRevision({
@@ -456,7 +513,7 @@ describe("immutable enrichment revision handoff", () => {
     ).rejects.toThrow("checkpoint claim is missing");
   }, 30_000);
 
-  it("rejects stale pointers, checkpoint gaps, and corrupt checkpoint bytes read-only", async () => {
+  it("rejects pointers outside the chain, checkpoint gaps, and corrupt checkpoint bytes read-only", async () => {
     const fixture = await productionBoundaryFixture();
     const pointerKey = checkpointPointerKey(RUN_PREFIX, fixture.active.plan.run_id);
 
@@ -482,6 +539,25 @@ describe("immutable enrichment revision handoff", () => {
     await expect(
       prepareEnrichmentRevision({ store: wrongPointer, targetWorkerRevision: TARGET_REVISION }),
     ).rejects.toThrow("pointer identity mismatch");
+
+    const pointerOutsideChain = cloneStore(fixture.store);
+    pointerOutsideChain.files.set(
+      pointerKey,
+      stableCheckpointJsonBytes({
+        ...pointer,
+        checkpoint: {
+          ...pointer.checkpoint,
+          key: checkpointBundleKey(RUN_PREFIX, fixture.active.plan.run_id, "9".repeat(64)),
+          sha256: "9".repeat(64),
+        },
+      }),
+    );
+    await expect(
+      prepareEnrichmentRevision({
+        store: pointerOutsideChain,
+        targetWorkerRevision: TARGET_REVISION,
+      }),
+    ).rejects.toThrow("pointer does not reference the verified checkpoint chain");
 
     const gap = cloneStore(fixture.store);
     const firstClaim = [...gap.files.keys()].find((key) =>
