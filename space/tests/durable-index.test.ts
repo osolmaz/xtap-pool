@@ -387,6 +387,72 @@ describe("DurableIndex", () => {
     index.close();
   });
 
+  it("restores the exact consumer boundary without relying on process state", async () => {
+    await appendTweet("1");
+    const first = await DurableIndex.bootstrap(options("consumer-boundary"));
+    const boundary = first.consumerBoundary();
+    await first.publish();
+    first.close();
+    const restored = await DurableIndex.restore(options("consumer-restored"));
+    expect(restored.consumerBoundary()).toEqual(boundary);
+    await appendTweet("2");
+    await restored.advanceToLatest();
+    expect(restored.consumerBoundary().source).not.toBe(boundary.source);
+    expect(restored.consumerBoundary().registry).toEqual(boundary.registry);
+    restored.close();
+  });
+
+  it("does not present empty new tables on an old index as complete history", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("missing-consumer-state"));
+    await index.publish();
+    const before = bucket.files.get("index/current.json");
+    index.store.database.prepare("DELETE FROM consumer_index_state").run();
+    await appendTweet("2");
+    await index.advanceToLatest();
+    expect(() => index.consumerBoundary()).toThrow(/explicit index bootstrap/);
+    await expect(index.publish()).rejects.toThrow(/explicit index bootstrap/);
+    expect(bucket.files.get("index/current.json")).toEqual(before);
+    index.close();
+  });
+
+  it("rolls back source inventory and consumer state after an incomplete segment projection", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("consumer-rollback"));
+    const before = index.consumerBoundary();
+    const omit = vi.spyOn(index.store.sourceEffects, "recordPost").mockImplementation(() => {
+      // Simulate a skipped projection write after durable source delivery.
+    });
+    await appendTweet("2");
+    await expect(index.advanceToLatest()).rejects.toThrow(
+      /consumer segment projection is incomplete/,
+    );
+    expect(index.consumerBoundary()).toEqual(before);
+    expect(index.stats().tweetRows).toBe(1);
+    omit.mockRestore();
+    await index.advanceToLatest();
+    expect(index.stats().tweetRows).toBe(2);
+    index.close();
+  });
+
+  it("does not acknowledge output source rows before the snapshot is durable", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("output-atomic"));
+    const before = index.consumerBoundary();
+    const key = await log.appendTweets([makePooled({ id: "2" })]);
+    const save = vi
+      .spyOn(log, "storeSnapshot")
+      .mockRejectedValueOnce(new Error("storage unavailable"));
+    await expect(index.applyOutputSegments([key])).rejects.toThrow("storage unavailable");
+    expect(index.stats().tweetRows).toBe(1);
+    expect(index.consumerBoundary()).toEqual(before);
+    save.mockRestore();
+    const advanced = await index.applyOutputSegments([key]);
+    expect(index.consumerBoundary().source).toBe(advanced.revision);
+    expect(index.stats().tweetRows).toBe(2);
+    index.close();
+  });
+
   it("binds the manifest to the raw Bucket and enrichment contract", async () => {
     await appendTweet("1");
     const index = await DurableIndex.bootstrap(options("provenance"));

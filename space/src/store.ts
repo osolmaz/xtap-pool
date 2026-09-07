@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
 
-import { normalizeObservation, type PooledTweet } from "@xtap-pool/shared";
+import { contentHash, normalizeObservation, type PooledTweet } from "@xtap-pool/shared";
 import { ObservationStore } from "./observation-store.js";
 import { SourceEffectStore } from "./source-effect-store.js";
+import { ensureContentColumns, POST_ORDER } from "./post-state.js";
 
 import { ensureEnrichmentTables } from "./enrich-store.js";
 
@@ -126,6 +127,7 @@ export class TweetStore {
       END;
     `);
     ensureEnrichmentTables(this.db);
+    ensureContentColumns(this.db);
     this.observations = new ObservationStore(this.db);
     this.sourceEffects = new SourceEffectStore(this.db);
   }
@@ -164,10 +166,10 @@ export class TweetStore {
     const stmt = this.db.prepare(`
       INSERT INTO tweets
         (id, contributed_by, captured_at, pooled_at, sort_ts, author_username, text,
-         has_media, is_article, json)
+         has_media, is_article, json, content_hash)
       VALUES
         (@id, @contributedBy, @capturedAt, @pooledAt, @sortTs, @authorUsername, @text,
-         @hasMedia, @isArticle, @json)
+         @hasMedia, @isArticle, @json, @contentHash)
       ON CONFLICT (id, contributed_by) DO UPDATE SET
         captured_at = excluded.captured_at,
         pooled_at = excluded.pooled_at,
@@ -176,8 +178,13 @@ export class TweetStore {
         text = excluded.text,
         has_media = excluded.has_media,
         is_article = excluded.is_article,
-        json = excluded.json
+        json = excluded.json,
+        content_hash = excluded.content_hash
       WHERE excluded.captured_at > tweets.captured_at
+        OR (excluded.captured_at = tweets.captured_at AND (
+          COALESCE(json_extract(excluded.json, '$.is_subscriber_only'), 0) > COALESCE(json_extract(tweets.json, '$.is_subscriber_only'), 0)
+          OR (COALESCE(json_extract(excluded.json, '$.is_subscriber_only'), 0) = COALESCE(json_extract(tweets.json, '$.is_subscriber_only'), 0)
+              AND excluded.content_hash > tweets.content_hash)))
     `);
     const insertAll = this.db.transaction((batch: readonly PooledTweet[]) => {
       for (const tweet of batch) {
@@ -237,7 +244,7 @@ export class TweetStore {
       FROM (
         SELECT
           json, sort_ts, id,
-          ROW_NUMBER() OVER (PARTITION BY id ORDER BY captured_at DESC) AS rn,
+          ROW_NUMBER() OVER (PARTITION BY id ORDER BY ${POST_ORDER}) AS rn,
           GROUP_CONCAT(contributed_by) OVER (PARTITION BY id) AS contributors
         FROM tweets
         WHERE ${whereSql}
@@ -284,6 +291,7 @@ function toParams(tweet: PooledTweet): Record<string, unknown> {
     hasMedia: Array.isArray(media) && media.length > 0 ? 1 : 0,
     isArticle: tweet["is_article"] === true ? 1 : 0,
     json: JSON.stringify(tweet),
+    contentHash: contentHash(tweet),
   };
 }
 

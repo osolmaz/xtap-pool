@@ -5,6 +5,7 @@ import { TweetStore } from "../src/store.js";
 import { EnrichStore } from "../src/enrich-store.js";
 import { HistoricalUnitReader } from "../src/historical-unit-reader.js";
 import { consumerUnitHash } from "../src/consumer-content.js";
+import { UnitStore } from "../src/unit-store.js";
 import { consumerRegistry, changedApprovals } from "../src/consumer-registry.js";
 import type { ConsumerRegistry } from "../src/consumer-registry.js";
 import { makePooled } from "./helpers.js";
@@ -38,7 +39,7 @@ function addPost(tweet: PooledTweet, key: string): void {
     enrich.registerTweets([tweet]);
   })();
 }
-function addResult(tweet: PooledTweet, key: string): void {
+function addResult(tweet: PooledTweet, key: string): EnrichmentRow {
   const unit = unitIdFor(tweet);
   const members = enrich.unitSemanticMembers(unit);
   const row: EnrichmentRow = {
@@ -54,6 +55,7 @@ function addResult(tweet: PooledTweet, key: string): void {
   };
   store.sourceEffects.recordResult(row, source(key));
   enrich.applyEnrichment(row);
+  return row;
 }
 function addRegistry(status: FreeLabelEvent["status"], revision: number): void {
   const event: FreeLabelEvent = {
@@ -99,6 +101,31 @@ describe("bounded historical unit reconstruction", () => {
     expect(read([...initialKeys, "edit", "edited-result"])[0]?.posts[0]?.text).toBe(
       "GLM model updated.",
     );
+  });
+
+  it("uses the same deterministic result winner as the current view for equal-time conflicts", () => {
+    const one = addResult(initial(), "retry");
+    const two: EnrichmentRow = {
+      ...one,
+      enriched_at: "2026-07-07T03:00:00+03:00",
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "model" }] }],
+    };
+    store.sourceEffects.recordResult(two, source("conflict"));
+    const target = [...initialKeys, "retry", "conflict"];
+    const historical = read(target).map(consumerUnitHash);
+    for (const rows of [
+      [one, two],
+      [two, one],
+    ]) {
+      enrich.clearForRebuild();
+      enrich.registerTweets([initial()]);
+      for (const row of rows) enrich.applyEnrichment(row);
+      addRegistry("candidate", 2);
+      addRegistry("approved", 3);
+      expect(new UnitStore(store.database, 1).query(selection).units.map(consumerUnitHash)).toEqual(
+        historical,
+      );
+    }
   });
 
   it("keeps the same content digest for a later metric-only observation", () => {

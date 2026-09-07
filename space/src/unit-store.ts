@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import type { EnrichedUnit, LabelAssignment, PooledTweet, UnitPage } from "@xtap-pool/shared";
 
 import { readVisibleAssignments } from "./label-visibility.js";
+import { POST_ORDER } from "./post-state.js";
 
 export type UnitQuery = {
   /** Internal bounded lookup; public query parsing does not grant a new filter. */
@@ -23,7 +24,7 @@ export type UnitQuery = {
   unlabeled?: boolean;
   publication?: "public-original";
   /**
-   * Shared activity cutoff: only units whose latest capture is at or before
+   * Shared content cutoff: only units whose latest content change is at or before
    * this timestamp participate. Consumers pass `complete_through` here so
    * the whole snapshot describes one closed window.
    */
@@ -150,7 +151,7 @@ export class UnitStore {
         `WITH ranked AS (
            SELECT um.unit_id, tweets.json, tweets.sort_ts, tweets.id,
                   ROW_NUMBER() OVER (
-                    PARTITION BY tweets.id ORDER BY tweets.captured_at DESC, tweets.contributed_by
+                    PARTITION BY tweets.id ORDER BY ${POST_ORDER}
                   ) AS rn
            FROM unit_members um
            JOIN tweets ON tweets.id = um.tweet_id
@@ -338,9 +339,7 @@ function rangeFilters(query: UnitQuery): Filter[] {
   }
   if (query.cutoff !== undefined) {
     filters.push({
-      sql: `(SELECT MAX(t.captured_at) FROM tweets t
-             JOIN unit_members u ON u.tweet_id = t.id
-             WHERE u.unit_id = um.unit_id) <= ?`,
+      sql: `(SELECT MAX(u.content_at) FROM unit_members u WHERE u.unit_id = um.unit_id) <= ?`,
       values: [query.cutoff],
     });
   }

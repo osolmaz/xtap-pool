@@ -985,6 +985,7 @@ function applyLines(
           store.sourceEffects.recordResult(row, source);
           enrich.applyEnrichment(row);
         })();
+      else store.sourceEffects.recordLegacyResult(source);
     } else if (kind === "attempt") {
       enrich.replayAttemptEvent(attemptEventSchema.parse(candidate));
     } else if (kind === "registry") {
