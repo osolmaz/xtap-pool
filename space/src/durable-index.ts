@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, openAsBlob } from "node:fs";
-import { copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, open as openFile, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -338,15 +338,45 @@ export class DurableIndex {
     }
   }
 
-  static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
+  /** A new working index never replaces an existing database or its checkpoints. */
+  static async createEmpty(options: DurableIndexOptions): Promise<DurableIndex> {
     const bucket =
       options.bucketClient ??
       createDurableIndexBucketClient(options.indexBucket, options.accessToken);
     await mkdir(dirname(options.databasePath), { recursive: true });
-    await removeDatabaseFiles(options.databasePath);
-    const index = open(options, bucket, []);
-    await index.advanceToLatest();
+    const file = await openFile(options.databasePath, "wx", 0o600);
+    await file.close();
+    const index = open(options, bucket, [...(options.predecessorKeys ?? [])]);
+    const empty = index.sourceSnapshot();
+    const revision = sha256(canonicalBytes(empty));
+    index.store.database.transaction(() => {
+      writeMetadata(index.store.database, {
+        schema_version: INDEX_SCHEMA_VERSION,
+        raw_bucket: options.rawBucket,
+        raw_snapshot_revision: revision,
+        contract_hash: options.contractHash,
+      });
+      index.consumerState.commit(revision, index.enrichStore, true);
+    })();
     return index;
+  }
+
+  static async bootstrap(options: DurableIndexOptions): Promise<DurableIndex> {
+    const index = await DurableIndex.createEmpty(options);
+    try {
+      await index.advanceToLatest();
+      index.verify();
+      return index;
+    } catch (error) {
+      index.close();
+      throw error;
+    }
+  }
+
+  /** Full verification belongs at restore, explicit checks, and publication, not every tail. */
+  verify(): void {
+    assertDatabaseIntegrity(this.store.database);
+    this.consumerBoundary();
   }
 
   static openLocal(options: DurableIndexOptions): DurableIndex {
@@ -438,7 +468,6 @@ export class DurableIndex {
         completed: snapshot.files.length,
         total: snapshot.files.length,
       });
-      assertDatabaseIntegrity(this.store.database);
       return {
         revision,
         snapshot,
@@ -526,7 +555,6 @@ export class DurableIndex {
       this.consumerState.commit(revision, this.enrichStore, consumerReady);
     });
     apply();
-    assertDatabaseIntegrity(this.store.database);
     return {
       revision,
       snapshot,

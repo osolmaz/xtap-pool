@@ -1038,7 +1038,7 @@ function compareTextEntries(
   return transaction !== 0 ? transaction : left.file.key.localeCompare(right.file.key);
 }
 
-function compareSegmentKeys(left: string, right: string): number {
+export function compareSegmentKeys(left: string, right: string): number {
   const leftMatch = SEGMENT_KEY.exec(left);
   const rightMatch = SEGMENT_KEY.exec(right);
   if (leftMatch === null || rightMatch === null) throw new Error("invalid Bucket segment key");

@@ -494,9 +494,16 @@ export async function bootstrapIndex(
     taxonomyVersion: ENRICHMENT_JOB_DEFAULT_VARIABLES["TAXONOMY_VERSION"] ?? "",
   },
 ): Promise<void> {
-  const dataDir = await mkdtemp(join(tmpdir(), "xtap-pool-index-bootstrap-"));
-  try {
-    await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+  // Keep partial SQLite work through a failed setup. The source target is frozen on first use.
+  const dataDir = join(
+    root,
+    "space",
+    ".data",
+    "index-bootstrap",
+    encodeURIComponent(config.indexBucket),
+  );
+  await inheritCommand("npm", ["run", "build", "--workspace", "space"], { cwd: root });
+  for (const mode of ["prepare", "publish"]) {
     await inheritCommand("npm", ["run", "index:bootstrap", "--workspace", "space"], {
       cwd: root,
       env: {
@@ -507,10 +514,9 @@ export async function bootstrapIndex(
         HF_TOKEN: storageToken,
         LLM_MODEL: contract.llmModel,
         TAXONOMY_VERSION: contract.taxonomyVersion,
+        INDEX_BOOTSTRAP_MODE: mode,
       },
     });
-  } finally {
-    await rm(dataDir, { recursive: true, force: true });
   }
 }
 
