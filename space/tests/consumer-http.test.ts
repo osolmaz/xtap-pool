@@ -4,6 +4,7 @@ import {
   consumerHistoryEnvelopeSchema,
 } from "../src/consumer-http-contract.js";
 import { ConsumerRuntime } from "../src/consumer-runtime.js";
+import { ConsumerContractChanged } from "../src/consumer-cursor.js";
 import { ConsumerHttpError } from "../src/consumer-errors.js";
 import { BOOTSTRAP, consumerFixture, consumerTweet } from "./consumer-http-fixture.js";
 import type { ConsumerFixture } from "./consumer-http-fixture.js";
@@ -327,5 +328,43 @@ describe("incremental consumer HTTP", () => {
         )
       ).status,
     ).toBe(410);
+  });
+  it("stops an unfinished changes sequence after privacy withdrawal, including newly accepted bodies", async () => {
+    const source = await bootstrap();
+    await f.post(consumerTweet());
+    await f.post(consumerTweet("200"));
+    const unfinished = await page(`/api/changes?after=${source.cursor}&limit=1`);
+    expect(unfinished.changes[0]?.type).toBe("unit_upsert");
+    expect(unfinished.has_more).toBe(true);
+    await f.post(
+      consumerTweet("100", { is_subscriber_only: true, captured_at: "2026-09-06T10:00:00.000Z" }),
+      false,
+    );
+    const response = await f.request(`/api/changes?after=${unfinished.cursor}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "privacy_changed",
+        recovery: { action: "discard_selection", discard: ["units", "observations"] },
+      },
+    });
+  });
+
+  it("reports a changed semantic contract as explicit 409 recovery", async () => {
+    const source = await bootstrap();
+    vi.spyOn(f.options().contexts, "read").mockRejectedValue(new ConsumerContractChanged());
+    const response = await f.request(`/api/changes?after=${source.cursor}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { code: "contract_changed", recovery: { action: "explicit_bootstrap" } },
+    });
+  });
+
+  it("does not keep adding mutex waiters after deadlines expire", async () => {
+    const locked = vi.fn(() => new Promise<never>(() => undefined));
+    f.setRuntime(new ConsumerRuntime({ ...f.options(), deadlineMs: 10, locked }));
+    await Promise.all([f.request(BOOTSTRAP), f.request(BOOTSTRAP)]);
+    expect((await f.request(BOOTSTRAP)).status).toBe(429);
+    expect(locked).toHaveBeenCalledTimes(2);
   });
 });

@@ -35,7 +35,7 @@ const accounts = {
   ],
 };
 
-function stubApi(): ReturnType<typeof vi.fn> {
+function stubApi() {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input).split("?")[0] ?? "";
     if (path === "/api/admin/pool") return Response.json({ pool, viewer: { username: "root" } });
@@ -106,6 +106,26 @@ describe("AdminPanel", () => {
     fireEvent.click(firstRemove);
     fireEvent.click(screen.getByText("Demote"));
     expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it.each([false, true])("requires an explicit observation grant: %s", async (grant) => {
+    const fetchMock = stubApi();
+    render(<AdminPanel />);
+    const checkbox = await screen.findByLabelText("Grant observation history access");
+    expect((checkbox as HTMLInputElement).checked).toBe(false);
+    if (grant) fireEvent.click(checkbox);
+    fireEvent.change(screen.getByLabelText("Service account name"), {
+      target: { value: "scoped-reader" },
+    });
+    fireEvent.click(screen.getByText("Issue reader"));
+    await screen.findByLabelText("Issued service credential");
+    const request = fetchMock.mock.calls.find(
+      ([path, init]) => String(path) === "/api/admin/service-accounts" && init?.method === "POST",
+    );
+    expect(JSON.parse(String(request?.[1]?.body))).toEqual({
+      name: "scoped-reader",
+      scopes: ["units:read", "taxonomy:read", ...(grant ? ["observations:read"] : [])],
+    });
   });
 
   it("shows repair controls for invalid durable configuration", async () => {

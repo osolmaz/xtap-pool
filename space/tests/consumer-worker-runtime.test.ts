@@ -44,6 +44,11 @@ describe("readonly consumer processes", () => {
     const exec = vi.spyOn(database, "exec");
     try {
       expect(readConsumerTask(database, input).kind).toBe("changes");
+      expect(readConsumerTask(database, { ...input, operation: "privacy" }).kind).toBe("privacy");
+      expect(readConsumerTask(database, { ...input, operation: "coverage" })).toMatchObject({
+        kind: "coverage",
+        observationsThrough: "2026-09-06T00:00:00.000Z",
+      });
       expect(exec).not.toHaveBeenCalled();
       expect(() => database.exec("CREATE TABLE forbidden (id INTEGER)")).toThrow(/readonly/);
       expect((await f.workers.run(input, new AbortController().signal)).kind).toBe("changes");
@@ -87,6 +92,42 @@ describe("readonly consumer processes", () => {
     const stat = statSync(input.path);
     const renewed = { ...input, identity: `${String(stat.dev)}:${String(stat.ino)}` };
     expect((await f.workers.run(renewed, new AbortController().signal)).kind).toBe("changes");
+  });
+
+  it("does not report private, pending, or unselected samples as selected observation coverage", async () => {
+    await f.post(consumerTweet());
+    await f.post(consumerTweet("200", { captured_at: "2026-09-06T06:00:00.000Z" }), false);
+    await f.post(
+      consumerTweet("300", {
+        author: { id: "22", username: "b" },
+        captured_at: "2026-09-06T07:00:00.000Z",
+      }),
+    );
+    await f.post(
+      consumerTweet("400", { is_subscriber_only: true, captured_at: "2026-09-06T08:00:00.000Z" }),
+    );
+    const input = await task();
+    const database = new Database(input.path, { readonly: true, fileMustExist: true });
+    try {
+      expect(readConsumerTask(database, { ...input, operation: "coverage" })).toMatchObject({
+        observationsThrough: "2026-09-06T00:00:00.000Z",
+      });
+      const filtered = {
+        ...input,
+        target: {
+          ...input.target,
+          context: {
+            ...input.target.context,
+            selection: { ...input.target.context.selection, free_label: "unapproved" },
+          },
+        },
+      };
+      expect(readConsumerTask(database, { ...filtered, operation: "coverage" })).toMatchObject({
+        observationsThrough: null,
+      });
+    } finally {
+      database.close();
+    }
   });
 
   it("kills a child inside synchronous native SQLite and enforces process capacity", async () => {

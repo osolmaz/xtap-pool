@@ -7,7 +7,11 @@ import { CONSUMER_PROJECTION_HASH } from "./consumer-index-state.js";
 import type { ConsumerIndexBoundary } from "./consumer-index-state.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import { ConsumerSourceStore, consumerSourceSchema } from "./consumer-source.js";
-import { CURSOR_RECOVERY_MS, ExpiredConsumerCursor } from "./consumer-cursor.js";
+import {
+  ConsumerContractChanged,
+  CURSOR_RECOVERY_MS,
+  ExpiredConsumerCursor,
+} from "./consumer-cursor.js";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
 const names = z.array(z.string().trim().min(1).max(128)).max(100);
@@ -132,8 +136,7 @@ export class ConsumerContextStore {
     if (Buffer.byteLength(text) > MAX_CONTEXT_BYTES || sha256(Buffer.from(text)) !== id)
       throw new Error("consumer metadata checksum or size mismatch");
     const context = consumerContextSchema.parse(JSON.parse(text));
-    if (context.contract !== this.contract)
-      throw new Error("consumer semantic contract changed; explicit bootstrap is required");
+    if (context.contract !== this.contract) throw new ConsumerContractChanged();
     const age = this.now().getTime() - Date.parse(context.created_at);
     if (age < -60_000) throw new Error("consumer context is from the future");
     if (age >= CURSOR_RECOVERY_MS) throw new ExpiredConsumerCursor();
