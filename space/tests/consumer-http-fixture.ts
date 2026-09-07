@@ -110,23 +110,33 @@ export async function consumerFixture() {
       runtime = value;
     },
     async post(value: PooledTweet, complete = true) {
-      await log.appendTweets([value]);
+      await this.postMany([value], complete);
+    },
+    async postMany(values: PooledTweet[], complete = true) {
+      await log.appendTweets(values);
       await index.advanceToLatest();
       if (!complete) return;
-      const id = unitIdFor(value);
-      const row = {
-        unit_id: id,
-        tweet_ids: index.enrichStore.unitMemberIds(id),
-        input_hash: computeInputHash(id, index.enrichStore.unitSemanticMembers(id)),
-        contract_hash: HTTP_CONTRACT,
-        preset_labels: [{ name: "ai", evidence: [{ tweet_id: value.id, quote: "model" }] }],
-        free_labels: [],
-        model: "fixture",
-        taxonomy_version: 1,
-        enriched_at: now().toISOString(),
-      };
+      const rows = values.map((value) => {
+        const id = unitIdFor(value);
+        return {
+          unit_id: id,
+          tweet_ids: index.enrichStore.unitMemberIds(id),
+          input_hash: computeInputHash(id, index.enrichStore.unitSemanticMembers(id)),
+          contract_hash: HTTP_CONTRACT,
+          preset_labels: [{ name: "ai", evidence: [{ tweet_id: value.id, quote: "model" }] }],
+          free_labels: [],
+          model: "fixture",
+          taxonomy_version: 1,
+          enriched_at: now().toISOString(),
+        };
+      });
       await log.commitBatch(
-        [{ path: "enrichment/2026/09/enrichment-2026-09-07.jsonl", lines: [JSON.stringify(row)] }],
+        [
+          {
+            path: "enrichment/2026/09/enrichment-2026-09-07.jsonl",
+            lines: rows.map((row) => JSON.stringify(row)),
+          },
+        ],
         [],
       );
       await index.advanceToLatest();

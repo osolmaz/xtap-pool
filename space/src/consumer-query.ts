@@ -4,12 +4,13 @@ import { consumerSelectionSchema } from "./consumer-context.js";
 import type { ConsumerSelection } from "./consumer-context.js";
 import { ConsumerHttpError } from "./consumer-errors.js";
 
-export type ConsumerRoute = "bootstrap" | "changes" | "history";
+export type ConsumerRoute = "bootstrap" | "changes" | "history" | "reconcile";
 const filters = ["author_ids", "labels", "label_mode", "free_label", "publication"];
 const options = {
   bootstrap: ["cursor", "limit"],
-  changes: ["after", "limit"],
-  history: ["cursor", "at", "post_ids", "since", "until", "limit"],
+  changes: ["after", "limit", "reconciled"],
+  history: ["cursor", "at", "post_ids", "since", "until", "limit", "reconciled"],
+  reconcile: ["cursor", "limit"],
 };
 export function consumerQuery(url: URL, route: ConsumerRoute): URLSearchParams {
   const query = url.searchParams;

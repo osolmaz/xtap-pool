@@ -5,6 +5,8 @@ import { observationPositionSchema, consumerCursorSchema } from "./consumer-curs
 import { consumerStepSchema } from "./consumer-page.js";
 import { consumerObservationSchema } from "./consumer-observations.js";
 
+import { reconciliationPageSchema } from "./consumer-privacy.js";
+
 const resolved = z.object({
   id: z.string(),
   context: consumerContextSchema,
@@ -17,9 +19,11 @@ export const consumerWorkerTaskSchema = z.object({
   contract: z.string(),
   target: resolved,
   base: resolved.optional(),
+  privacy: resolved.optional(),
+  reconciliation: resolved.optional(),
   cursor: consumerCursorSchema,
   limit: z.number().int().min(1).max(500),
-  operation: z.enum(["coverage", "page", "privacy"]),
+  operation: z.enum(["coverage", "page", "privacy", "reconcile"]),
 });
 export type ConsumerWorkerTask = z.infer<typeof consumerWorkerTaskSchema>;
 export const observationPageSchema = z.object({
@@ -37,6 +41,7 @@ export const observationPageSchema = z.object({
 });
 export const workerResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("privacy") }),
+  z.object({ kind: z.literal("reconcile"), page: reconciliationPageSchema }),
   z.object({
     kind: z.literal("coverage"),
     completeThrough: z.string().nullable(),

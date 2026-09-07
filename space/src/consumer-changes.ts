@@ -15,6 +15,8 @@ import { changedApprovals } from "./consumer-registry.js";
 import { consumerHistoryUntil } from "./consumer-context.js";
 import type { ResolvedConsumerContext } from "./consumer-context.js";
 
+import { ConsumerPrivacyEffects } from "./consumer-privacy.js";
+
 type Position = ConsumerCursor["position"];
 type PairBatch = {
   ids: string[];
@@ -33,13 +35,16 @@ export class ConsumerChangeEngine {
   private readonly targetBoundary: HistoricalBoundary;
   private readonly baseBoundary: HistoricalBoundary | undefined;
   private readonly changed: string[];
+  private readonly removed: ConsumerPrivacyEffects | undefined;
 
   constructor(
     database: Database.Database,
     private readonly target: ResolvedConsumerContext,
     private readonly base: ResolvedConsumerContext | undefined,
+    private readonly privacy?: ResolvedConsumerContext,
   ) {
     const context = target.context;
+    this.removed = privacyEffects(database, target, base, privacy);
     if (
       base !== undefined &&
       (base.context.contract !== context.contract ||
@@ -140,13 +145,16 @@ export class ConsumerChangeEngine {
     };
     if (position.kind === "bootstrap") return this.effects.bootstrapUnits(options);
     if (this.baseBoundary === undefined) throw new InvalidConsumerCursor();
-    return this.effects.affectedUnits({
+    const affected = this.effects.affectedUnits({
       ...options,
       changedSegments: this.changed,
       baseSegments: this.baseBoundary.segments,
       changedLabels: changedApprovals(this.baseBoundary.registry, this.targetBoundary.registry),
       contractHash: this.target.context.contract,
     });
+    const restored = this.removed?.restoredUnits(position.after, 33) ?? [];
+    const ids = [...new Set([...affected.ids, ...restored])].sort();
+    return { ids: ids.slice(0, 32), hasMore: affected.hasMore || ids.length > 32 };
   }
 
   private publishable(unit: EnrichedUnit | undefined): EnrichedUnit | undefined {
@@ -165,7 +173,11 @@ export class ConsumerChangeEngine {
         const after = this.reader.read(selected, this.targetBoundary, this.selection);
         return {
           ids: selected,
-          before: new Map(before.map((unit) => [unit.id, unit])),
+          before: new Map(
+            before
+              .filter((unit) => !this.removed?.includes(unit.posts.map((post) => post.id)))
+              .map((unit) => [unit.id, unit]),
+          ),
           after: new Map(after.map((unit) => [unit.id, unit])),
         };
       } catch (error) {
@@ -250,8 +262,13 @@ export class ConsumerChangeEngine {
   }
 
   private move(cursor: ConsumerCursor, position: Position): ConsumerCursor {
+    const next = { ...cursor };
+    if (position.kind === "idle" && this.privacy !== undefined) {
+      const keys = new Set(this.targetBoundary.segments);
+      if (this.privacy.snapshot.files.every((file) => keys.has(file.key))) delete next.privacy;
+    }
     return {
-      ...cursor,
+      ...next,
       position,
       ...(position.kind === "idle"
         ? { base: null, started_at: this.target.context.created_at }
@@ -298,4 +315,14 @@ function replacement(
   return before !== undefined && consumerUnitHash(before) === hash
     ? undefined
     : { type: "unit_upsert", content_hash: hash, unit: after };
+}
+
+function privacyEffects(
+  database: Database.Database,
+  target: ResolvedConsumerContext,
+  base?: ResolvedConsumerContext,
+  privacy?: ResolvedConsumerContext,
+): ConsumerPrivacyEffects | undefined {
+  if (base === undefined || privacy === undefined) return undefined;
+  return new ConsumerPrivacyEffects(database, [base], [target, base], privacy);
 }

@@ -276,7 +276,9 @@ export function createApp(deps: AppDeps): Hono {
       (membership.hasPermanentConfigError() || serviceAccounts.hasPermanentConfigError()) &&
       isConfigurationRecoveryRequest(c);
     if (readiness !== undefined && !readiness.ok && !configRecovery) {
-      if (["/api/units", "/api/changes", "/api/observations"].includes(c.req.path))
+      if (
+        ["/api/units", "/api/changes", "/api/observations", "/api/reconcile"].includes(c.req.path)
+      )
         return consumerErrorResponse(
           new ConsumerHttpError(503, "pool_not_ready", "The verified source is not ready."),
         );

@@ -4,7 +4,7 @@ import { ConsumerIndexState } from "./consumer-index-state.js";
 import { ConsumerChangeEngine, historicalSelection } from "./consumer-changes.js";
 import { ConsumerObservationReader } from "./consumer-observations.js";
 import { selectedCompleteThrough } from "./enrich-store.js";
-import { assertConsumerPrivacy } from "./consumer-privacy.js";
+import { ConsumerPrivacyEffects } from "./consumer-privacy.js";
 import type { ConsumerWorkerTask, ConsumerWorkerResult } from "./consumer-worker-task.js";
 import { ConsumerHttpError } from "./consumer-errors.js";
 
@@ -23,7 +23,9 @@ export function readConsumerTask(
         observationsThrough: selectedObservationThrough(database, task.target),
       };
     }
-    assertConsumerPrivacy(database, task.target);
+    const privacy = privacyEffects(database, task);
+    if (task.operation === "reconcile") return reconciliationPage(privacy, task);
+    privacy.assertUnchanged();
     if (task.operation === "privacy") return { kind: "privacy" };
     if (task.cursor.position.kind === "history") {
       const position = task.cursor.position;
@@ -47,7 +49,7 @@ export function readConsumerTask(
     }
     return {
       kind: "changes",
-      step: new ConsumerChangeEngine(database, task.target, task.base).step(
+      step: new ConsumerChangeEngine(database, task.target, task.base, task.privacy).step(
         task.cursor,
         task.limit,
       ),
@@ -55,7 +57,7 @@ export function readConsumerTask(
   })();
 }
 function assertTargetMembership(database: Database.Database, task: ConsumerWorkerTask): void {
-  for (const context of [task.target, task.base]) {
+  for (const context of [task.target, task.base, task.privacy, task.reconciliation]) {
     if (context === undefined) continue;
     const mismatch = database
       .prepare(
@@ -71,4 +73,21 @@ function assertTargetMembership(database: Database.Database, task: ConsumerWorke
         "The current database does not contain the pinned source.",
       );
   }
+}
+
+function privacyEffects(
+  database: Database.Database,
+  task: ConsumerWorkerTask,
+): ConsumerPrivacyEffects {
+  const exposed = task.base === undefined ? [task.target] : [task.target, task.base];
+  const baseline = task.privacy === undefined ? [task.target] : [task.target, task.privacy];
+  return new ConsumerPrivacyEffects(database, baseline, exposed, task.reconciliation);
+}
+function reconciliationPage(
+  privacy: ConsumerPrivacyEffects,
+  task: ConsumerWorkerTask,
+): ConsumerWorkerResult {
+  if (task.reconciliation === undefined || task.cursor.reconciliation === undefined)
+    throw new Error("missing reconciliation context");
+  return { kind: "reconcile", page: privacy.page(task.limit, task.cursor.reconciliation.after) };
 }
