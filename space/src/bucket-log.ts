@@ -962,7 +962,9 @@ function applyLines(
     store.database.transaction(() => {
       for (const [position, line] of content.split("\n").entries()) {
         for (const tweet of parseJsonlTweets(line, path)) {
-          store.observations.record(tweet, { segmentKey: sourceKey, operation, path, position });
+          const source = { segmentKey: sourceKey, operation, path, position };
+          store.observations.record(tweet, source);
+          store.sourceEffects.recordPost(tweet, source);
           tweets.push(tweet);
         }
       }
@@ -972,12 +974,17 @@ function applyLines(
     return tweets.length;
   }
   let rows = 0;
-  for (const line of content.split("\n")) {
+  for (const [position, line] of content.split("\n").entries()) {
     if (line.trim() === "") continue;
     const candidate: unknown = JSON.parse(line);
+    const source = { segmentKey: sourceKey, operation, path, position };
     if (kind === "enrichment") {
       const row = parseEnrichmentRow(candidate);
-      if (row !== undefined) enrich.applyEnrichment(row);
+      if (row !== undefined)
+        store.database.transaction(() => {
+          store.sourceEffects.recordResult(row, source);
+          enrich.applyEnrichment(row);
+        })();
     } else if (kind === "attempt") {
       enrich.replayAttemptEvent(attemptEventSchema.parse(candidate));
     } else if (kind === "registry") {

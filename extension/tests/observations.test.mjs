@@ -28,6 +28,12 @@ describe('observation sampling', () => {
     const second = await prepareObservations([tweet({ is_subscriber_only: true, captured_at: '2026-09-06T00:01:00Z' })], first.samples);
     assert.equal(second.accepted.length, 1);
   });
+  it('does not treat a follower-count update as a content edit', async () => {
+    const first = await prepareObservations([tweet({ author: { username: 'alice', follower_count: 10 } })]);
+    const second = await prepareObservations([tweet({ author: { username: 'alice', follower_count: 20 }, captured_at: '2026-09-06T00:01:00Z' })], first.samples);
+    assert.equal(second.accepted.length, 0);
+    assert.equal(second.sampled, 1);
+  });
   it('does not mutate the previously persisted sampling state', async () => {
     const previous = {};
     await prepareObservations([tweet()], previous);

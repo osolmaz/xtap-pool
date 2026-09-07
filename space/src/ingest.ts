@@ -87,7 +87,8 @@ export async function ingestBatch(
   }
 
   deps.store.database.transaction(() => {
-    deps.store.observations.recordBatch(accepted, sourceKey);
+    for (const { tweet, source } of deps.store.observations.recordBatch(accepted, sourceKey))
+      deps.store.sourceEffects.recordPost(tweet, source);
     deps.store.insert(accepted);
     deps.enrich?.registerTweets(accepted);
   })();

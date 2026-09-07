@@ -37,6 +37,9 @@ export async function prepareObservations(tweets, previous = {}) {
     const time = Date.parse(tweet.captured_at);
     if (typeof tweet.id !== 'string' || !tweet.id || !Number.isFinite(time)) throw new Error('observation requires a post ID and time');
     const content = Object.fromEntries(Object.entries(tweet).filter(([key]) => !OBSERVATION_FIELDS.has(key)));
+    if (tweet.author && typeof tweet.author === 'object') {
+      content.author = Object.fromEntries(Object.entries(tweet.author).filter(([key]) => key !== 'follower_count'));
+    }
     const hash = await digest(content);
     const before = samples.get(tweet.id);
     // A later visit in another interval is useful even when every count is unchanged.
