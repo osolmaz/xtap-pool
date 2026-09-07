@@ -80,6 +80,11 @@ export class InvalidConsumerCursor extends Error {
     super("invalid consumer cursor");
   }
 }
+export class ConsumerContractChanged extends Error {
+  constructor() {
+    super("The consumer contract changed. An explicit bootstrap is required.");
+  }
+}
 export class ExpiredConsumerCursor extends Error {
   constructor() {
     super("consumer cursor expired; an explicit new bootstrap is required");

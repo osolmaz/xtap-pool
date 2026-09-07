@@ -1,5 +1,9 @@
 import { ZodError } from "zod";
-import { ExpiredConsumerCursor, InvalidConsumerCursor } from "./consumer-cursor.js";
+import {
+  ConsumerContractChanged,
+  ExpiredConsumerCursor,
+  InvalidConsumerCursor,
+} from "./consumer-cursor.js";
 import { ConsumerBootstrapRequired } from "./consumer-index-state.js";
 import { OversizedConsumerSource } from "./consumer-page.js";
 import { HistoricalReadLimitError } from "./historical-unit-reader.js";
@@ -18,13 +22,17 @@ export function consumerError(error: unknown): ConsumerHttpError {
   if (error instanceof ConsumerHttpError) return error;
   if (error instanceof InvalidConsumerCursor || error instanceof ZodError)
     return new ConsumerHttpError(400, "invalid_request", "Invalid consumer query or cursor.");
+  if (error instanceof ConsumerContractChanged)
+    return new ConsumerHttpError(409, "contract_changed", error.message, {
+      action: "explicit_bootstrap",
+    });
   if (error instanceof ExpiredConsumerCursor)
     return new ConsumerHttpError(410, "cursor_expired", error.message, {
       action: "explicit_bootstrap",
     });
   if (error instanceof ConsumerBootstrapRequired)
     return new ConsumerHttpError(503, "projection_unavailable", error.message);
-  if (error instanceof OversizedConsumerSource || error instanceof HistoricalReadLimitError)
+  if (isSourceLimit(error))
     return new ConsumerHttpError(
       413,
       "source_item_too_large",
@@ -54,4 +62,8 @@ export function consumerErrorResponse(error: unknown): Response {
       },
     },
   );
+}
+
+function isSourceLimit(error: unknown): boolean {
+  return error instanceof OversizedConsumerSource || error instanceof HistoricalReadLimitError;
 }

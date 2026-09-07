@@ -61,20 +61,26 @@ The entire read has a 30-second wall deadline, including source/context I/O and 
 
 Errors use `{"error":{"code":"...","message":"...","recovery":{}}}`. The recovery field is present only when needed. No error includes an acknowledgment cursor.
 
-| HTTP status | Meaning and action                                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| 400         | Invalid, conflicting, unsupported, or wrong-kind query/cursor. Correct the request.                                |
-| 401         | Missing, invalid, expired, or revoked authentication.                                                              |
-| 403         | Valid service credential lacks an explicit required scope.                                                         |
-| 409         | `privacy_changed`: apply the removal procedure below.                                                              |
-| 410         | Cursor/context expired or history outside its retained range. Use explicit bootstrap or operator history recovery. |
-| 413         | A complete source item or final serialized response exceeds its bound. Do not advance.                             |
-| 429         | Consumer capacity is full. Retry the same cursor after five seconds.                                               |
-| 502         | Source/context read or verification failed. Retry the same cursor; persistent failures need operator repair.       |
-| 503         | Source projection unavailable, database replaced, worker failed, or deadline exceeded. Retry the same cursor.      |
+| HTTP status | Meaning and action                                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 400         | Invalid, conflicting, unsupported, or wrong-kind query/cursor. Correct the request.                                       |
+| 401         | Missing, invalid, expired, or revoked authentication.                                                                     |
+| 403         | Valid service credential lacks an explicit required scope.                                                                |
+| 409         | `privacy_changed`: apply the removal procedure below. `contract_changed`: use an explicit bootstrap for the new contract. |
+| 410         | Cursor/context expired or history outside its retained range. Use explicit bootstrap or operator history recovery.        |
+| 413         | A complete source item or final serialized response exceeds its bound. Do not advance.                                    |
+| 429         | Consumer capacity is full. Retry the same cursor after five seconds.                                                      |
+| 502         | Source/context read or verification failed. Retry the same cursor; persistent failures need operator repair.              |
+| 503         | Source projection unavailable, database replaced, worker failed, or deadline exceeded. Retry the same cursor.             |
 
 **Privacy removal procedure:** `409 privacy_changed` carries `recovery.action=discard_selection`, the exact normalized `selection`, `discard=["units","observations"]`, and `next=explicit_bootstrap`. Remove that selection's saved units and observations from staged and published consumer state before starting a new bootstrap. Remove dependent published bodies as part of the same recovery. Do not retain the earlier unfinished cursor or wait for a replacement body. This is a body-free removal of the entire accepted selection, including items accepted on earlier pages. It is an explicit privacy reset, not an automatic full-read fallback for ordinary errors. Current privacy also gates all old-source upserts and observations.
 
 ## Remaining live gates
 
-Local tests and repository checks are recorded at task completion. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
+Local checks passed: `npm run check` ran 712 Vitest tests in 75 files, 189 extension tests, and 180 native extension tests. Coverage was 87.01% lines/statements, 85.73% branches, and 91.40% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
+
+## Parent integration
+
+This branch changes no classifier model, prompt, or semantic contract. It does not change `index-bootstrap.ts`, `index-command.ts`, command entry points, or the setup wizard. In `durable-index.ts`, it adds only the optional fetch adapter to `createDurableIndexBucketClient`; in `bucket-log.ts`, it adds that adapter to the existing raw Bucket clients. Keep those options and their read/write/list propagation when merging the parent's resumable CPU bootstrap and tail verification work. Preserve the parent's `compareSegmentKeys` export. No HTTP path publishes `index/current.json`.
+
+The requested documentation command is `npx --no-install @simpledoc/simpledoc check`. In this local npm installation, that form returned exit 127 (`@simpledoc/simpledoc: not found`). The same scoped checker, version 0.1.6, passed with `npx --no-install --package=@simpledoc/simpledoc simpledoc check`. No untracked generated `index.html` was present. The unscoped npm package is unrelated.
