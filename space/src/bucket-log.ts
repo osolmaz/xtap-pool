@@ -203,13 +203,19 @@ const legacyEnrichmentRowSchema = z
   })
   .loose();
 
-export function createRawBucketReader(rawBucket: string, accessToken: string): RawBucketReader {
+export function createRawBucketReader(
+  rawBucket: string,
+  accessToken: string,
+  fetcher?: typeof fetch,
+): RawBucketReader {
   const repo = { type: "bucket", name: rawBucket } as const;
+  const transport = fetcher === undefined ? {} : { fetch: fetcher };
   return {
     async list(prefix): Promise<readonly BucketObject[]> {
       const objects: BucketObject[] = [];
       for await (const entry of listFiles({
         repo,
+        ...transport,
         accessToken,
         recursive: true,
         path: prefix,
@@ -225,19 +231,31 @@ export function createRawBucketReader(rawBucket: string, accessToken: string): R
       return objects;
     },
     async download(key): Promise<Uint8Array | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path: key, xet: false });
+      const blob = await downloadFile({
+        repo,
+        accessToken,
+        ...transport,
+        path: key,
+        xet: false,
+      });
       return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
     },
   };
 }
 
-export function createRawBucketClient(rawBucket: string, accessToken: string): RawBucketClient {
+export function createRawBucketClient(
+  rawBucket: string,
+  accessToken: string,
+  fetcher?: typeof fetch,
+): RawBucketClient {
   const repo = { type: "bucket", name: rawBucket } as const;
+  const transport = fetcher === undefined ? {} : { fetch: fetcher };
   return {
-    ...createRawBucketReader(rawBucket, accessToken),
+    ...createRawBucketReader(rawBucket, accessToken, fetcher),
     async upload(key, content): Promise<void> {
       await uploadFile({
         repo,
+        ...transport,
         accessToken,
         file: { path: key, content: new Blob([content]) },
         commitTitle: `Store ${key}`,

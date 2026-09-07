@@ -3,6 +3,12 @@ import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 
+import { ConsumerContextStore } from "./consumer-context.js";
+import { ConsumerSourceStore } from "./consumer-source.js";
+import { ConsumerCursorCodec } from "./consumer-cursor.js";
+import { ConsumerRuntime } from "./consumer-runtime.js";
+import { ConsumerWorkers } from "./consumer-workers.js";
+import { consumerFetch, withConsumerDeadline } from "./consumer-deadline.js";
 import { createApp } from "./app.js";
 import type { AppReadiness } from "./app.js";
 import { loadConfig } from "./config.js";
@@ -14,6 +20,7 @@ import type { StorageCredentialReadiness } from "./storage-token.js";
 import { loadEnrichTaxonomy } from "./enrich-config.js";
 import {
   createDurableIndexBucketReader,
+  createDurableIndexBucketClient,
   durableIndexManifestSchema,
   DurableIndex,
 } from "./durable-index.js";
@@ -28,7 +35,7 @@ import { UnitStore } from "./unit-store.js";
 const config = loadConfig(process.env);
 const log = new BucketLog(
   config.rawBucket,
-  createRawBucketClient(config.rawBucket, config.hfToken),
+  createRawBucketClient(config.rawBucket, config.hfToken, consumerFetch),
   join(config.dataDir, "raw-cache"),
 );
 const mutex = new Mutex();
@@ -141,7 +148,32 @@ applyIndexStats();
 storageState = { state: "ready" };
 enrichStore.releaseClaims();
 readiness = buildReadiness();
+const consumerBucket = createDurableIndexBucketClient(
+  config.indexBucket,
+  config.hfToken,
+  consumerFetch,
+);
+const consumerContexts = new ConsumerContextStore(
+  new ConsumerSourceStore(log),
+  consumerBucket,
+  contractHash,
+);
+const consumerWorkers = new ConsumerWorkers();
+const consumer = new ConsumerRuntime({
+  contexts: consumerContexts,
+  codec: new ConsumerCursorCodec(config.poolSigningSecret),
+  workers: consumerWorkers,
+  locked: (operation) => mutex.run(operation),
+  current: () => ({
+    boundary: index.consumerBoundary(),
+    snapshot: index.sourceSnapshot(),
+    taxonomy: { version: taxonomy.version, labels: [...taxonomy.labels] },
+    databasePath: store.database.name,
+  }),
+});
+let lastConsumerCleanup = 0;
 const app = createApp({
+  consumer,
   config,
   store,
   membership,
@@ -294,6 +326,13 @@ async function refreshExternalEnrichment(): Promise<void> {
     storageState = { state: "ready" };
     readiness = buildReadiness();
   });
+  if (Date.now() - lastConsumerCleanup >= 3_600_000) {
+    await withConsumerDeadline(
+      () => consumerContexts.cleanup(consumerBucket),
+      new AbortController().signal,
+    );
+    lastConsumerCleanup = Date.now();
+  }
 }
 
 function enrichmentRefreshMs(): number {

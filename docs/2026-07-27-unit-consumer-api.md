@@ -6,6 +6,8 @@ date: "2026-07-27"
 
 # Unit consumer API
 
+The machine contract below is superseded by the [incremental HTTP contract](2026-09-07-consumer-http-handoff.md). `/api/units` now requires explicit pinned bootstrap; it no longer returns the old full-read envelope. Explorer whole-unit browsing uses the separate session-only `/api/explorer/units` route.
+
 The [incremental consumer and engagement-history plan](2026-09-07-incremental-consumer-and-engagement-history-plan.md) records the planned replacement for the normal full-read and boot-revision pagination procedures below. It includes repeated-observation delivery, historical counts, removals, and stable source cursors. These changes are not implemented yet; this document continues to describe the existing consumer path.
 
 xtap-pool is the semantic source of truth for downstream applications. Consumers read enriched conversation-author units instead of scanning the private dataset or rebuilding labels, threads, free-label vocabulary, and graph edges.

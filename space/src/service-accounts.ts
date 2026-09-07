@@ -121,12 +121,17 @@ export class ServiceAccountRegistry {
   }
 
   authorize(token: string, requiredScope: ServiceAccountScope): ServiceAccountIdentity | undefined {
+    const identity = this.authenticate(token);
+    return identity?.scopes.includes(requiredScope) === true ? identity : undefined;
+  }
+
+  authenticate(token: string): ServiceAccountIdentity | undefined {
     const parsed = parseToken(token);
     if (parsed === undefined || this.configError !== undefined) return undefined;
     const account = this.file.accounts.find(
       (candidate) => candidate.id === parsed.accountId && candidate.status === "active",
     );
-    if (account?.scopes.includes(requiredScope) !== true) return undefined;
+    if (account === undefined) return undefined;
     const key = account.keys.find((candidate) => candidate.id === parsed.keyId);
     if (key === undefined || isExpired(key, this.options.now())) return undefined;
     if (!tokenHashMatches(token, key.token_hash)) return undefined;

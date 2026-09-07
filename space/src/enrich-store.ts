@@ -1418,30 +1418,7 @@ export class EnrichStore {
   }
 
   private completeThrough(options: UnitSelection): string | undefined {
-    const selectedSql = selectedUnits(options);
-    const nonDone = this.db
-      .prepare(
-        `SELECT MIN(latest_activity_at) AS threshold FROM enrich_queue q
-         WHERE unit_id IN (${selectedSql.sql}) AND status != 'done'`,
-      )
-      .get(...selectedSql.params) as { threshold: string | null };
-    if (nonDone.threshold === null) {
-      const doneMax = this.db
-        .prepare(
-          `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
-           WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'`,
-        )
-        .get(...selectedSql.params) as { m: string | null };
-      return doneMax.m ?? undefined;
-    }
-    const row = this.db
-      .prepare(
-        `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
-         WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'
-           AND latest_activity_at < ?`,
-      )
-      .get(...selectedSql.params, nonDone.threshold) as { m: string | null };
-    return row.m ?? undefined;
+    return selectedCompleteThrough(this.db, options);
   }
 
   recentErrorClasses(): { error_class: ErrorClass; count: number }[] {
@@ -1571,7 +1548,7 @@ type EligibleUnitOptions = UnitSelection & {
   contractHash: string;
 };
 
-function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unknown[] } {
+export function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unknown[] } {
   const labels = options.labels ?? [];
   const labelPlaceholders = labels.map(() => "?").join(",");
   const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ? AND e.contract_hash = ?
@@ -1734,4 +1711,34 @@ function aggregateStatusRows(rows: readonly StatusRow[]): {
     if (applied.newestCompletedAt !== undefined) newestCompletedAt = applied.newestCompletedAt;
   }
   return { totals, oldestPendingAt, newestCompletedAt };
+}
+
+export function selectedCompleteThrough(
+  database: Database.Database,
+  options: UnitSelection,
+): string | undefined {
+  const selectedSql = selectedUnits(options);
+  const nonDone = database
+    .prepare(
+      `SELECT MIN(latest_activity_at) AS threshold FROM enrich_queue q
+         WHERE unit_id IN (${selectedSql.sql}) AND status != 'done'`,
+    )
+    .get(...selectedSql.params) as { threshold: string | null };
+  if (nonDone.threshold === null) {
+    const doneMax = database
+      .prepare(
+        `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
+           WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'`,
+      )
+      .get(...selectedSql.params) as { m: string | null };
+    return doneMax.m ?? undefined;
+  }
+  const row = database
+    .prepare(
+      `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
+         WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'
+           AND latest_activity_at < ?`,
+    )
+    .get(...selectedSql.params, nonDone.threshold) as { m: string | null };
+  return row.m ?? undefined;
 }

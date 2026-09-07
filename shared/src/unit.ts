@@ -4,12 +4,16 @@ import type { LabelAssignment } from "./enrichment.js";
 import type { PooledTweet } from "./tweet.js";
 
 /** Stable read scopes granted to a machine consumer. */
-export const serviceAccountScopeSchema = z.enum(["units:read", "taxonomy:read"]);
+export const serviceAccountScopeSchema = z.enum([
+  "units:read",
+  "taxonomy:read",
+  "observations:read",
+]);
 
 export type ServiceAccountScope = z.infer<typeof serviceAccountScopeSchema>;
 
 /**
- * One enriched conversation-author unit returned by `GET /api/units`.
+ * One enriched conversation-author unit returned in consumer changes or explorer browsing.
  * `preset_labels` and `free_labels` are evidence-bearing assignments; only
  * approved free labels appear here.
  */
@@ -21,7 +25,7 @@ export type EnrichedUnit = {
   free_labels: readonly LabelAssignment[];
 };
 
-/** A revision-consistent page of enriched units. */
+/** Explorer-only browsing page; machine consumers use signed change envelopes. */
 export type UnitPage = {
   revision: string;
   cutoff?: string;

@@ -44,6 +44,7 @@ export const consumerCursorSchema = z
     base: hash.nullable(),
     started_at: z.iso.datetime(),
     position: positionSchema,
+    metadata_sent: z.boolean().optional(),
   })
   .strict()
   .superRefine((cursor, context) => {

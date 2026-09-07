@@ -347,6 +347,7 @@ function optionalIssued(issued: { name: string; token: string } | undefined): {
 function ServiceAccountsPanel(): React.JSX.Element {
   const [state, setState] = useState<ServiceState>({ status: "loading" });
   const [name, setName] = useState("");
+  const [observationsRead, setObservationsRead] = useState(false);
   const issuedRef = useRef<{ name: string; token: string } | undefined>(undefined);
 
   useEffect(() => {
@@ -465,6 +466,7 @@ function ServiceAccountsPanel(): React.JSX.Element {
             const credential = await issueServiceAccount(accountName, [
               "units:read",
               "taxonomy:read",
+              ...(observationsRead ? (["observations:read"] as const) : []),
             ]);
             return { name: credential.account.name, token: credential.token };
           });
@@ -479,6 +481,16 @@ function ServiceAccountsPanel(): React.JSX.Element {
             setName(event.target.value);
           }}
         />
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={observationsRead}
+            onChange={(event) => {
+              setObservationsRead(event.target.checked);
+            }}
+          />
+          Grant observation history access
+        </label>
         <button
           type="submit"
           className="rounded-md bg-(--x-accent) px-3 py-2 text-sm font-semibold text-white"

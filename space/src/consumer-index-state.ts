@@ -48,8 +48,10 @@ export class ConsumerIndexState {
   constructor(
     private readonly database: Database.Database,
     private readonly contract: string,
+    mode: "read" | "write" = "write",
   ) {
-    database.exec(`CREATE TABLE IF NOT EXISTS consumer_index_state (
+    if (mode === "write")
+      database.exec(`CREATE TABLE IF NOT EXISTS consumer_index_state (
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
       payload_json TEXT NOT NULL CHECK(json_valid(payload_json))
     ) STRICT`);

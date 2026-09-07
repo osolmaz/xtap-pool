@@ -260,7 +260,7 @@ export class ConsumerChangeEngine {
   }
 }
 
-function historicalSelection(target: ResolvedConsumerContext): HistoricalSelection {
+export function historicalSelection(target: ResolvedConsumerContext): HistoricalSelection {
   const selection = target.context.selection;
   return {
     authorIds: selection.author_ids,

@@ -111,6 +111,20 @@ export class ConsumerContextStore {
     return { id, context, snapshot: options.snapshot };
   }
 
+  /** Only expired immutable context objects. Raw snapshot bases and segments are
+   * retained by the raw log, which has no deletion operation. Database pruning
+   * is independent: historical reads use retained indexes in the current DB. */
+  async cleanup(bucket: Pick<DurableIndexBucketClient, "list" | "remove">): Promise<number> {
+    const cutoff = this.now().getTime() - CURSOR_RECOVERY_MS - 2 * 86_400_000;
+    const expired = (await bucket.list(CONSUMER_CONTEXT_PREFIX))
+      .filter((file) => /^index\/consumer-contexts\/[a-f0-9]{64}\.json$/u.test(file.path))
+      .filter((file) => file.uploadedAt !== undefined && Date.parse(file.uploadedAt) < cutoff)
+      .slice(0, 256)
+      .map((file) => file.path);
+    if (expired.length > 0) await bucket.remove(expired);
+    return expired.length;
+  }
+
   async read(id: string): Promise<ResolvedConsumerContext> {
     hash.parse(id);
     const text = await this.bucket.readText(`${CONSUMER_CONTEXT_PREFIX}${id}.json`);
