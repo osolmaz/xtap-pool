@@ -9,6 +9,7 @@ import { UnitStore } from "../src/unit-store.js";
 import { ConsumerObservationReader } from "../src/consumer-observations.js";
 import { consumerRegistry, changedApprovals } from "../src/consumer-registry.js";
 import type { ConsumerRegistry } from "../src/consumer-registry.js";
+import { consumerQueryPlan } from "./consumer-query-plan.js";
 import { makePooled } from "./helpers.js";
 
 let store: TweetStore;
@@ -90,6 +91,61 @@ afterEach(() => {
 });
 
 describe("bounded historical unit reconstruction", () => {
+  it("uses observation point lookups with a large source boundary and excludes later bodies", () => {
+    const before = read();
+    addPost(
+      { ...initial(), text: "GLM model edited.", captured_at: "2026-07-08T00:00:00Z" },
+      "future-edit",
+    );
+    const keys = [
+      ...initialKeys,
+      ...Array.from({ length: 38219 }, (_, n) => `unused-${String(n)}`),
+    ];
+    const plan = consumerQueryPlan(store.database, /WITH candidates AS/u);
+    expect(read(keys)).toEqual(before);
+    expect(plan.some((line) => /SEARCH s .*\(observation_id=\?\)/u.test(line))).toBe(true);
+    expect(plan.some((line) => line.includes("segment_key=? AND observation_id=?"))).toBe(false);
+  });
+
+  it("batches result lookup while enforcing the candidate bound separately for each unit", () => {
+    const other = { ...initial(), id: "200", conversation_id: "other" };
+    addPost(other, "other-post");
+    addResult(other, "other-result");
+    const valid = addResult(initial(), "valid-result");
+    const keys = [...initialKeys, "other-post", "other-result", "valid-result"];
+    for (let n = 0; n < 49; n++) {
+      const key = `invalid-${String(n)}`;
+      store.sourceEffects.recordResult(
+        {
+          ...valid,
+          enriched_at: new Date(Date.UTC(2026, 6, 8, 0, n)).toISOString(),
+          preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "absent quote" }] }],
+        },
+        source(key),
+      );
+      keys.push(key);
+    }
+    const plan = consumerQueryPlan(store.database, /WITH requested AS MATERIALIZED/u);
+    expect(
+      read(keys, ["thread:a", "other:a"])
+        .map((unit) => unit.id)
+        .sort(),
+    ).toEqual(["other:a", "thread:a"]);
+    expect(plan.filter((line) => line === "MATERIALIZE requested")).toHaveLength(1);
+    expect(plan.some((line) => /SEARCH s .*\(result_hash=\?\)/u.test(line))).toBe(true);
+    store.sourceEffects.recordResult(
+      {
+        ...valid,
+        enriched_at: "2026-07-09T00:00:00.000Z",
+        preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "absent quote" }] }],
+      },
+      source("one-too-many"),
+    );
+    expect(() => read([...keys, "one-too-many"], ["thread:a", "other:a"])).toThrow(
+      "recorded result validation exceeds its candidate bound",
+    );
+  });
+
   it("reads the old and target content after the live database has moved forward", () => {
     const before = read();
     expect(before).toHaveLength(1);
@@ -241,6 +297,38 @@ describe("bounded historical unit reconstruction", () => {
     addPost(privatePost, "private");
     addResult(privatePost, "private-result");
     expect(read([...initialKeys, "private", "private-result"])).toEqual([]);
+  });
+
+  it("uses observation point lookups for history rows and coverage across a large source", () => {
+    addPost({ ...initial(), captured_at: "2026-05-22T00:00:00Z", metrics: { likes: 2 } }, "later");
+    const keys = [
+      ...initialKeys,
+      "later",
+      ...Array.from({ length: 38219 }, (_, n) => `unused-${String(n)}`),
+    ];
+    addPost({ ...initial(), captured_at: "2026-05-23T00:00:00Z", metrics: { likes: 3 } }, "future");
+    const plan = consumerQueryPlan(
+      store.database,
+      /WITH samples AS MATERIALIZED|COUNT\(\*\) AS count/u,
+    );
+    const history = new ConsumerObservationReader(store.database, 1, contract);
+    const options = {
+      postIds: ["100"],
+      boundary: { segments: keys, registry: initialRegistry },
+      selection,
+      since: "2026-05-20T00:00:00.000Z",
+      until: "2026-05-25T00:00:00.000Z",
+      limit: 1,
+    };
+    const first = history.history(options);
+    expect(first.observations.map((observation) => observation.metrics.likes)).toEqual([1]);
+    expect(first.coverage[0]).toMatchObject({ count: 2, state: "available" });
+    const last = history.history({ ...options, after: first.next });
+    expect(last.observations.map((observation) => observation.metrics.likes)).toEqual([2]);
+    expect(last.next).toBeUndefined();
+    expect(last.coverage).toEqual(first.coverage);
+    expect(plan.filter((line) => /SEARCH s .*\(observation_id=\?\)/u.test(line))).toHaveLength(4);
+    expect(plan.some((line) => line.includes("segment_key=? AND observation_id=?"))).toBe(false);
   });
 
   it("pages logical observations with bounded source references and stable coverage", () => {

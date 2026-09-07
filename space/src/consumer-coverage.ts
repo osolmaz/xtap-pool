@@ -28,6 +28,8 @@ export function selectedObservationThrough(
     taxonomyVersion: context.taxonomy.version,
     contractHash: context.contract,
   });
+  // Start source membership with the observation, not one probe per pinned segment.
+  // Both indexes exist, but the segment-first plan exceeds the real-source deadline.
   const row = database
     .prepare(
       `WITH eligible AS MATERIALIZED (${eligible.sql}), permitted AS MATERIALIZED (
@@ -46,7 +48,7 @@ export function selectedObservationThrough(
         AND (json_type(c.payload_json, '$.is_subscriber_only') IS NULL OR json_type(c.payload_json, '$.is_subscriber_only') = 'false')
         AND (json_type(c.payload_json, '$.is_retweet') IS NULL OR json_type(c.payload_json, '$.is_retweet') = 'false')
         AND json_extract(c.payload_json, '$.author.id') IN (SELECT value FROM json_each(?))
-        AND EXISTS (SELECT 1 FROM observation_sources s WHERE s.observation_id = o.observation_id
+        AND EXISTS (SELECT 1 FROM observation_sources s INDEXED BY idx_observation_source_id WHERE s.observation_id = o.observation_id
           AND s.segment_key IN (SELECT json_extract(value, '$.key') FROM json_each(?)))
     `,
     )

@@ -11,6 +11,7 @@ import {
   HTTP_CONTRACT,
 } from "./consumer-http-fixture.js";
 import type { ConsumerFixture } from "./consumer-http-fixture.js";
+import { consumerQueryPlan } from "./consumer-query-plan.js";
 import { coverageProbe } from "./consumer-coverage-probe.js";
 
 let f: ConsumerFixture;
@@ -114,6 +115,34 @@ async function registry(name: string, status: "candidate" | "approved" | "reject
   await f.index.advanceToLatest();
 }
 describe("source coverage maintenance", () => {
+  it("looks up each observation before testing a large exact source boundary", async () => {
+    await f.postMany(Array.from({ length: 100 }, (_, n) => consumerTweet(String(100 + n))));
+    const source = await finish(BOOTSTRAP);
+    const pinned = await context(source.cursor);
+    await f.post(
+      consumerTweet("100", { captured_at: "2026-09-06T05:00:00.000Z", metrics: { likes: 5 } }),
+      false,
+    );
+    const file = pinned.snapshot.files[0];
+    if (file === undefined) throw new Error("missing fixture source");
+    const target = {
+      ...pinned,
+      snapshot: {
+        ...pinned.snapshot,
+        files: [
+          ...pinned.snapshot.files,
+          ...Array.from({ length: 38219 }, (_, n) => ({ ...file, key: `unused-${String(n)}` })),
+        ],
+      },
+    };
+    const plan = consumerQueryPlan(f.index.store.database, /SELECT MAX\(o.observed_at\)/u);
+    const coverage = updateConsumerCoverage(f.index.store.database, target);
+    expect(coverage.observationsThrough).toBe(source.observations_through);
+    expect(coverage.completeThrough).toBe(source.complete_through);
+    expect(plan.some((line) => /SEARCH s .*\(observation_id=\?\)/u.test(line))).toBe(true);
+    expect(plan.some((line) => line.includes("segment_key=? AND observation_id=?"))).toBe(false);
+  });
+
   it("does zero body reads for twenty no-op polls and twenty harmless revisions, including restart and replay", async () => {
     await f.postMany(Array.from({ length: 250 }, (_, n) => consumerTweet(String(100 + n))));
     let source = await finish(BOOTSTRAP);
@@ -122,8 +151,10 @@ describe("source coverage maintenance", () => {
     const started = probe.events().length;
     for (let n = 0; n < 20; n++) {
       f.advanceTime(1000);
-      source = await finish(`/api/changes?after=${source.cursor}`);
+      source = await page(`/api/changes?after=${source.cursor}`);
       expect(source.changes).toEqual([]);
+      expect(source.has_more).toBe(false);
+      expect(f.codec.decode(source.cursor).position.kind).toBe("idle");
     }
     expect(source.source).toBe(original.source);
     expect(source.history_until > original.history_until).toBe(true);

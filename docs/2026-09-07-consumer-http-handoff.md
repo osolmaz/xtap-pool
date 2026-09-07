@@ -114,9 +114,59 @@ There is no new persistence, table, index, projection identity, or classifier ch
 
 The regression fixture measures the real forked worker. Test-only wrappers count evaluated JSON body predicates and returned post-body fields, including reads outside the coverage operation. The bootstrap is a positive control for the counter. With 250 posts, twenty identical-source polls and twenty harmless-revision comparisons read **zero post bodies**; all 40 coverage evaluations use the reuse path. This includes a fresh worker process and context-store restart, blocked/dispatched attempt replay, and an unpublished registry candidate. With 260 posts, ten batches of ten metric observations update ten posts: only those ten post IDs are read; the 250 unrelated post IDs are not read. The clocks are checked against an independent full-coverage calculation. Additional tests cover delayed samples, corrected clocks, mixed edits and counters, pending-to-eligible changes, private/retweet maximum withdrawal, contributor winner changes, and actual metadata changes.
 
-These are small-fixture read counts, not a completed production-size performance check. They measure logical body access, not SQLite cache-page I/O. The parent's pinned real-source canary must still measure warm latency, CPU, source I/O, and memory at the required scale.
+These are small-fixture read counts, not a completed production-size performance check. They measure logical body access, not SQLite cache-page I/O. The full-source local canary below adds real reader timings. Cold restore and remote transport still need separate measurements.
 
-Local commands for this branch are `npm run build --workspace shared`, `npm run build --workspace space`, `npx --no-install vitest run space/tests/consumer-coverage-update.test.ts`, `UV_OFFLINE=1 npm run check`, and `npm_config_offline=true npx --no-install --package=@simpledoc/simpledoc simpledoc check`. Build shared and space before tests/coverage: this branch predates the parent's build hooks. Keep the parent's hooks, counts-only ingest acknowledgment, extension version 0.26.0, and bootstrap changes during integration.
+Local commands for this branch are `npm run build --workspace shared`, `npm run build --workspace space`, `npx --no-install vitest run space/tests/consumer-coverage-update.test.ts`, `UV_OFFLINE=1 npm run check`, and `npm_config_offline=true npx --no-install --package=@simpledoc/simpledoc simpledoc check`. The merged build hooks also build space before tests and coverage. The counts-only ingest acknowledgment, extension version 0.26.0, and bootstrap implementation are unchanged by the initial-coverage fix.
+
+## Full-source initial coverage fix
+
+The September 7 local canary used the immutable prepared source `36f27e68bf5ba7cfa53a6fedd7ba6fa66906113d058a048dd1384e7aa37034aa`: 38,219 segments, 689,421 logical observations, and a 4,811,792,384-byte SQLite database. The current Our Models publication account file selects 123 exact author IDs. Their source history contains 114,603 distinct unit candidates before current eligibility and label filtering. The source database was opened read-only. No index rebuild, schema migration, source copy, or publication was required.
+
+The original first request reached the 30-second deadline in `coverage` (30.012 seconds in the parent log). `EXPLAIN QUERY PLAN` showed observation membership driven by `idx_observation_source_segment (segment_key=? AND observation_id=?)`. This probes the large segment selection for each observation. Content completeness also took two bounded queries of 6.05 and 4.43 seconds in the diagnostic process; the following observation query had not finished when that process reached its 35-second diagnostic limit.
+
+The fix keeps every eligibility, privacy, and exact source predicate:
+
+- `consumer-coverage.ts` and `historical-unit-reader.ts` use the existing observation-ID index for source membership. The membership set is still the exact pinned source. The fixed observation-coverage query took 10.688, 4.673, and 5.496 seconds in three local reads and returned the same maximum each time.
+- `source-effect-store.ts` uses the existing unit-ID index for bootstrap order. SQLite can stop at the next page boundary instead of sorting all remaining author matches. A measured 33-ID candidate query fell from 1.747 seconds to 0.011–0.016 seconds across three repetitions, with identical rows.
+- Historical observation reconstruction for the same measured slice fell from 0.413 seconds to 0.023 seconds across three repetitions, with identical rows.
+- `recorded-result.ts` batches exact-input result lookups for the requested unit slice. It builds source membership once, probes by result hash, and keeps deterministic result order, quote validation, and the 50-candidate limit for each unit. The single-unit caller uses the same implementation. No classifier input, model, prompt, source effect, or projection identity changes.
+- `consumer-observations.ts` uses observation-ID lookups for history rows and history coverage. The same 100-post source query spent 5.338 and 5.344 seconds in these two statements before the fix. The final history canary returned 133 observations in three pages, each taking 0.610–0.760 seconds, with identical coverage across pages and a null final history cursor.
+- An exact no-op returns an empty page with an idle cursor. It skips candidate SQL when there are no source additions or changed approvals, after validating source containment. The earlier implementation returned an unnecessary empty observation continuation. This was detected after the complete bootstrap, and the saved global cursor was reused for the fixed probes.
+- Bootstrap uses the historical reader's existing 200-unit request bound. Content deltas retain their 32-candidate bound. The 2,000-post reconstruction bound, complete-item byte checks, response limits, and 30-second request deadline remain in force. A measured page processed 200 candidates and returned 59 eligible units in 0.761 seconds after these changes.
+
+These query timings are diagnostics on one host, not cold-storage or cloud measurements. The meaningful acceptance test is a complete, correct local source read within the unchanged per-request deadline, followed by warm no-op and restart probes. The full sequence uses local immutable context files and the local pinned snapshot in place of Bucket metadata transport. It does not measure remote metadata latency, source download, browser capture, metric-delta publication, or website freshness. SQL plan tests and the existing body-read tests check the access paths separately.
+
+The private harness is `/tmp/xtap-consumer-initial-coverage/consumer-read-canary.mjs`; its imports point to this worktree. The parent's harness is unchanged. Reproduce with `timeout -k 3s 5450s node /tmp/xtap-consumer-initial-coverage/consumer-read-canary.mjs <prepared-bootstrap.sqlite> <private-output-directory>`. It checkpoints every page locally, limits the complete run to 5,000 pages and 90 minutes, replays page 10 after a worker/context-store restart, polls the idle cursor twenty times, and performs another restart probe. These harness limits do not change the production deadline. The compiled source was built with `npm run build --workspace shared` and `npm run build --workspace space`.
+
+The successful report is `/tmp/xtap-consumer-initial-coverage/run-3/report.json`; bounded history is in `run-3/history-report.json`. The bootstrap log is `canary-3.log`, and the resumed no-op/restart log is `canary-final.log` under the same private root. The bootstrap query implementation stayed fixed during those 575 pages. The later no-op transition and history lookup fixes were tested by resuming that completed checkpoint; no accepted bootstrap page was discarded or read again as a new bootstrap.
+
+| Full-source local measurement                  |                                   Result |
+| ---------------------------------------------- | ---------------------------------------: |
+| Bootstrap pages                                |                                      575 |
+| Unit upserts                                   |                                   34,743 |
+| Distinct post IDs                              |                                   68,291 |
+| Serialized bootstrap bytes                     |                               90,116,606 |
+| Largest serialized page                        |                            326,282 bytes |
+| Sum of bootstrap request times                 |                          523.959 seconds |
+| Bootstrap request median / p95 / maximum       |           0.916 / 1.092 / 13.755 seconds |
+| First coverage worker / complete first request |                  13.203 / 13.755 seconds |
+| Identical page-10 replay after restart         |                            0.788 seconds |
+| Each no-op response body                       |                  598 bytes; zero changes |
+| Twenty no-op polls: minimum / p95 / maximum    |            1.463 / 1.609 / 1.682 seconds |
+| Final restart poll                             |              1.682 seconds; zero changes |
+| Bounded history                                | 100 posts; 133 observations; three pages |
+| History total invocation time                  |                            2.137 seconds |
+| Resumed no-op/restart invocation time          |                           33.301 seconds |
+
+**523.959 seconds is the sum of all 575 saved bootstrap page timings. The resumed report's 33.301 seconds covers only its no-op/restart invocation.** Neither value includes all diagnostic work or time between invocations. The source file was preserved: device, inode, byte size, and modification time match the recorded pre-canary values. Context transport was local immutable files and a local pinned snapshot, with zero network reads/writes and no credentials. The canary's authorization callback is local; deployed grants remain an operator gate.
+
+The host exposed 20 ARM64 CPUs and 130,596,577,280 bytes of RAM; the CPU model was unavailable. The database page cache was warm from the read-only diagnostics. Some early bootstrap pages overlapped local checks. The no-op timing run followed those checks. The resumed main process reached 564,800 KiB peak RSS; this is neither bootstrap peak memory nor combined worker memory. These are one-host measurements, with repeated query/no-op probes rather than a statistical confidence interval. All measured requests stayed below the unchanged 30-second deadline, and the uninstrumented warm no-op p95 met the two-second local target.
+
+A separate real-database worker probe counted 8,011 body evaluations across 319 post IDs as a positive control. Twenty no-op polls and one restart poll then produced **zero post-body evaluations** across 42 worker operations; all 21 coverage operations reused their base clocks. The private result is `/tmp/xtap-consumer-initial-coverage/body-read-report.json`. Its instrumented timings are not used for the latency target. It measures logical JSON-body evaluation and returned body fields, not physical SQLite cache-page I/O.
+
+The bounded history harness is `/tmp/xtap-consumer-initial-coverage/consumer-history-canary.mjs`, run with the same database and completed checkpoint directory under a 335-second outer diagnostic bound. Each HTTP request still has the production 30-second deadline. It verifies all 133 distinct observations against the returned coverage, uses history continuations for all three pages, and rejects a history cursor that becomes global/idle. The body probe uses `consumer-noop-probe.mjs` with a separate copy of local context metadata and the completed source cursor; it does not copy the database or restart bootstrap.
+
+The report records base commit `b229b70` plus hashes of the final changed source files. The canonical JSON hash of that source-file map is `d21b9a78cadb5039fe11b7f5be6c8ab268c5943c47a13db36aa307cc5f7ef273`. The publication-account file hash is `850bb1009aaa5f4deb40055cc062161111d6cec6498b2ea132ef085f320d3949`. Source coverage remained `complete_through=2026-09-06T22:21:24.712Z` and `observations_through=2026-09-06T22:56:43.226Z`.
 
 ## Privacy reconciliation
 
@@ -172,7 +222,7 @@ The normal page limits and wall deadline apply. Signed cursors are limited to 8 
 
 ## Remaining live gates
 
-Local checks passed: `npm run check` ran 748 Vitest tests in 78 files, 189 extension tests, and 180 native extension tests. This includes 11 coverage-maintenance tests, 13 paged privacy recovery tests, and 14 post-hash contract tests. Coverage was 87.29% lines/statements, 85.94% branches, and 91.53% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
+Local checks passed: `npm run check` ran 761 Vitest tests in 78 files, 189 extension tests, and 180 native extension tests. This includes 12 coverage-maintenance tests, 13 paged privacy recovery tests, and 14 post-hash contract tests. Coverage was 88.04% lines/statements, 85.75% branches, and 92.08% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, cold/cloud and real metric-delta measurements, and website publication proof remain pending. No production completion is claimed.
 
 ## Parent integration
 

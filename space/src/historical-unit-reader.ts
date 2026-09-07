@@ -8,7 +8,7 @@ import { UnitStore } from "./unit-store.js";
 import type { UnitQuery } from "./unit-store.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import type { ConsumerRegistry } from "./consumer-registry.js";
-import { recordedResult } from "./recorded-result.js";
+import { recordedResults } from "./recorded-result.js";
 
 const MAX_POSTS = 2000;
 export class HistoricalReadLimitError extends Error {}
@@ -60,7 +60,7 @@ export class HistoricalUnitReader {
       );
       slice.insert(posts);
       enrich.registerTweets(posts);
-      for (const id of ids) this.applyResult(id, enrich, keys);
+      this.applyResults(ids, enrich, keys);
       this.applyRegistry(slice.database, registry);
       // Coverage timestamps are reported separately. A later metric observation
       // must not hide an otherwise complete unit behind the old capture cutoff.
@@ -100,7 +100,7 @@ export class HistoricalUnitReader {
                 WHERE s.observation_id = o.observation_id AND s.segment_key IN (SELECT value FROM json_each(@keys))) AS received_at
         FROM post_observations o JOIN post_content_versions c ON c.content_hash = o.content_hash
         WHERE o.post_id IN (SELECT value FROM json_each(@posts))
-          AND EXISTS (SELECT 1 FROM observation_sources s WHERE s.observation_id = o.observation_id
+          AND EXISTS (SELECT 1 FROM observation_sources s INDEXED BY idx_observation_source_id WHERE s.observation_id = o.observation_id
                       AND s.segment_key IN (SELECT value FROM json_each(@keys)))
       ), ranked AS (
         SELECT *, ROW_NUMBER() OVER (
@@ -128,18 +128,20 @@ export class HistoricalUnitReader {
     });
   }
 
-  private applyResult(unitId: string, enrich: EnrichStore, keys: string): void {
-    const members = enrich.unitSemanticMembers(unitId);
-    if (members.length === 0) return;
-    const hash = computeInputHash(unitId, members);
-    const row = recordedResult({
+  private applyResults(ids: readonly string[], enrich: EnrichStore, keys: string): void {
+    const requests = ids.flatMap((id) => {
+      const members = enrich.unitSemanticMembers(id);
+      return members.length === 0
+        ? []
+        : [{ unit_id: id, input_hash: computeInputHash(id, members) }];
+    });
+    const results = recordedResults({
       database: this.database,
       enrich,
-      unitId,
-      inputHash: hash,
+      requests,
       sourceKeys: keys,
     });
-    if (row !== undefined) enrich.applyEnrichment(row);
+    for (const row of results.values()) enrich.applyEnrichment(row);
   }
 
   private applyRegistry(slice: Database.Database, registry: ConsumerRegistry): void {

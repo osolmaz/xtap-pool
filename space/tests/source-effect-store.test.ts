@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EnrichmentRow } from "@xtap-pool/shared";
 import { TweetStore } from "../src/store.js";
+import { consumerQueryPlan } from "./consumer-query-plan.js";
 import { makePooled } from "./helpers.js";
 
 let store: TweetStore;
@@ -57,6 +58,23 @@ function affected(
 }
 
 describe("indexed source effects", () => {
+  it("does no candidate query for an exact unchanged source and still validates containment", () => {
+    post("existing");
+    const query = vi.spyOn(store.database, "prepare");
+    expect(affected([], ["existing"])).toEqual({ ids: [], hasMore: false });
+    expect(query).not.toHaveBeenCalled();
+    expect(() =>
+      store.sourceEffects.affectedUnits({
+        changedSegments: [],
+        baseSegments: ["missing"],
+        targetSegments: [],
+        changedLabels: [],
+        contractHash: "contract",
+        limit: 200,
+      }),
+    ).toThrow("source comparison is outside the pinned target");
+  });
+
   it("finds both old and new membership without including future dependencies", () => {
     post("old");
     post("new", { conversation_id: "new", captured_at: "2026-05-22T00:00:00Z" });
@@ -97,6 +115,28 @@ describe("indexed source effects", () => {
   it("ignores a raw registry change when the published approvals did not change", () => {
     store.sourceEffects.recordResult(result("old:a"), source("result"));
     expect(affected(["registry"], ["result", "registry"])).toEqual({ ids: [], hasMore: false });
+  });
+
+  it("stops ordered bootstrap candidates at each page without sorting the remaining cohort", () => {
+    const { keys, expected } = bootstrapCohort();
+    const plan = consumerQueryPlan(store.database, /SELECT DISTINCT u.unit_id/u);
+    const actual: string[] = [];
+    let after = "";
+    for (;;) {
+      const page = store.sourceEffects.bootstrapUnits({
+        targetSegments: keys,
+        authorIds: ["a", "b"],
+        after,
+        limit: 7,
+      });
+      actual.push(...page.ids);
+      expect(page.ids.length).toBeLessThanOrEqual(7);
+      if (!page.hasMore) break;
+      after = page.ids.at(-1) ?? "";
+    }
+    expect(actual).toEqual(expected.sort());
+    expect(plan.some((line) => /SEARCH u .*\(unit_id>\?\)/u.test(line))).toBe(true);
+    expect(plan.some((line) => line.includes("TEMP B-TREE"))).toBe(false);
   });
 
   it("bounds bootstrap candidates by historical exact author IDs and pinned membership", () => {
@@ -201,3 +241,19 @@ describe("indexed source effects", () => {
     });
   });
 });
+
+function bootstrapCohort() {
+  const keys: string[] = [];
+  const expected: string[] = [];
+  for (let n = 0; n < 200; n++) {
+    const id = String(1000 + n);
+    const author = n % 3 === 0 ? "outside" : n % 2 === 0 ? "a" : "b";
+    for (const copy of ["first", "retry"]) {
+      const key = `${id}-${copy}`;
+      post(key, { id, conversation_id: id, author: { id: author, username: author } });
+      if (n % 5 !== 0) keys.push(key);
+    }
+    if (author !== "outside" && n % 5 !== 0) expected.push(`${id}:${author}`);
+  }
+  return { keys, expected };
+}

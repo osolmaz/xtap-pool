@@ -112,7 +112,7 @@ export class ConsumerChangeEngine {
     const more = candidates.hasMore || batch.ids.length < candidates.ids.length;
     if (!more)
       next =
-        position.kind === "bootstrap"
+        position.kind === "bootstrap" || this.changed.length === 0
           ? { kind: "idle" }
           : { kind: "observations", segment_offset: 0 };
     return { changes: page.changes, cursor: this.move(cursor, next) };
@@ -141,7 +141,7 @@ export class ConsumerChangeEngine {
       targetSegments: this.targetBoundary.segments,
       authorIds: this.target.context.selection.author_ids,
       ...(position.after === undefined ? {} : { after: position.after }),
-      limit: 32,
+      limit: position.kind === "bootstrap" ? 200 : 32,
     };
     if (position.kind === "bootstrap") return this.effects.bootstrapUnits(options);
     if (this.baseBoundary === undefined) throw new InvalidConsumerCursor();
