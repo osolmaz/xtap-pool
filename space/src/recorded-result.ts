@@ -37,6 +37,7 @@ export function recordedResults(
     .parse(options.requests);
   const results = new Map<string, EnrichmentRow>();
   if (requests.length === 0) return results;
+  // Limit each indexed unit lookup before the window ranks its candidates.
   // Unary + prevents the second index column from driving an IN loop over every
   // segment for each result. Keys are strings; exact membership is unchanged.
   const rows = options.database
@@ -48,10 +49,16 @@ export function recordedResults(
       SELECT r.unit_id, r.payload_json, ROW_NUMBER() OVER (
         PARTITION BY r.unit_id ORDER BY r.enriched_at DESC, r.result_hash DESC
       ) AS position FROM requested q CROSS JOIN consumer_results r
-        ON r.unit_id = q.unit_id AND r.contract_hash = @contract AND r.input_hash = q.input_hash
-      WHERE (@keys IS NULL OR EXISTS (
-        SELECT 1 FROM consumer_result_sources s INDEXED BY idx_consumer_result_source_hash
-        WHERE s.result_hash = r.result_hash AND +s.segment_key IN (SELECT value FROM json_each(@keys))))
+        ON r.rowid IN (
+          SELECT candidate.rowid FROM consumer_results candidate
+          WHERE candidate.unit_id = q.unit_id AND candidate.contract_hash = @contract
+            AND candidate.input_hash = q.input_hash
+            AND (@keys IS NULL OR EXISTS (
+              SELECT 1 FROM consumer_result_sources s INDEXED BY idx_consumer_result_source_hash
+              WHERE s.result_hash = candidate.result_hash
+                AND +s.segment_key IN (SELECT value FROM json_each(@keys))))
+          ORDER BY candidate.enriched_at DESC, candidate.result_hash DESC LIMIT @limit
+        )
     ) SELECT unit_id, payload_json, position FROM candidates
       WHERE position <= @limit ORDER BY unit_id, position`,
     )
@@ -63,6 +70,7 @@ export function recordedResults(
     });
   for (const candidate of rows) {
     const parsed = candidateSchema.parse(candidate);
+    // As in single-unit replay, a valid early result ends validation for that unit.
     if (results.has(parsed.unit_id)) continue;
     if (parsed.position > MAX_CANDIDATES)
       throw new Error("recorded result validation exceeds its candidate bound");

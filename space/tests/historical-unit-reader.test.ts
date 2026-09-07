@@ -9,7 +9,7 @@ import { UnitStore } from "../src/unit-store.js";
 import { ConsumerObservationReader } from "../src/consumer-observations.js";
 import { consumerRegistry, changedApprovals } from "../src/consumer-registry.js";
 import type { ConsumerRegistry } from "../src/consumer-registry.js";
-import { consumerQueryPlan } from "./consumer-query-plan.js";
+import { consumerQueryPlan, consumerResultBodyReads } from "./consumer-query-plan.js";
 import { makePooled } from "./helpers.js";
 
 let store: TweetStore;
@@ -144,6 +144,24 @@ describe("bounded historical unit reconstruction", () => {
     expect(() => read([...keys, "one-too-many"], ["thread:a", "other:a"])).toThrow(
       "recorded result validation exceeds its candidate bound",
     );
+  });
+
+  it("limits rows before ranking a long result history and keeps a valid newest result", () => {
+    const valid = addResult(initial(), "valid-result");
+    const keys = [...initialKeys, "valid-result"];
+    store.database.transaction(() => {
+      for (let n = 0; n < 500; n++) {
+        const key = `long-history-${String(n)}`;
+        store.sourceEffects.recordResult(
+          { ...valid, enriched_at: new Date(Date.UTC(2026, 6, 8, 0, n)).toISOString() },
+          source(key),
+        );
+        keys.push(key);
+      }
+    })();
+    const reads = consumerResultBodyReads(store.database);
+    expect(read(keys).map((unit) => unit.id)).toEqual(["thread:a"]);
+    expect(reads()).toBe(51);
   });
 
   it("reads the old and target content after the live database has moved forward", () => {
