@@ -168,6 +168,14 @@ The bounded history harness is `/tmp/xtap-consumer-initial-coverage/consumer-his
 
 The report records base commit `b229b70` plus hashes of the final changed source files. The canonical JSON hash of that source-file map is `d21b9a78cadb5039fe11b7f5be6c8ab268c5943c47a13db36aa307cc5f7ef273`. The publication-account file hash is `850bb1009aaa5f4deb40055cc062161111d6cec6498b2ea132ef085f320d3949`. Source coverage remained `complete_through=2026-09-06T22:21:24.712Z` and `observations_through=2026-09-06T22:56:43.226Z`.
 
+### Final-code repeat and candidate bound
+
+A fresh run at committed `532668f` repeated all 575 bootstrap pages without changing source or code during the run. It returned the same 34,743 units, 68,291 distinct posts, and 90,116,606 response bytes. Bootstrap request time totaled 614.507 seconds; the longest request took 17.268 seconds. Page 10 replayed identically after worker restart. Twenty no-op requests and another restart also passed. The full invocation took 666.467 seconds, including local metadata and checkpoint work. The report is `/tmp/xtap-consumer-initial-coverage/run-final-532668f/report.json`.
+
+This repeat measured no-op p95 at 2.630 seconds and restart at 2.640 seconds, compared with 1.609 seconds in the earlier warm run. Other local implementation work was active. The two runs do not establish consistent compliance with the two-second local target, and neither measures cloud transport or website freshness. All requests remained within the unchanged 30-second deadline. Do not report only the faster run.
+
+Follow-up review identified that the batched SQL limited results after its window function, which could rank an entire unit's history. The corrected query limits each indexed unit lookup to 51 candidates before ranking. A regression uses 500 additional valid results and counts actual result-body evaluations entering the window: only 51 may be evaluated. Existing tests still reject a unit when all first 50 candidates fail validation. A valid early result remains accepted even when older results exist, as in the previous single-unit implementation; the bound limits validation work, not the total retained history. The fresh full-run timing above predates this final candidate-bound correction. A separate read-only parity probe compared both queries for the 100 real units with the most retained results. All 100 returned rows matched exactly; the largest retained history in this source was 10. The report is `/tmp/xtap-consumer-initial-coverage/result-bound-report.json`. The 500-result regression covers the longer-history case that this real source does not contain.
+
 ## Privacy reconciliation
 
 A withdrawal after an earlier accepted page stops that sequence with HTTP 409:
