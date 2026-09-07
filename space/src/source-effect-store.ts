@@ -120,6 +120,8 @@ export class SourceEffectStore {
     const target = new Set(options.targetSegments);
     if ([...options.changedSegments, ...options.baseSegments].some((key) => !target.has(key)))
       throw new Error("source comparison is outside the pinned target");
+    if (options.changedSegments.length === 0 && options.changedLabels.length === 0)
+      return { ids: [], hasMore: false };
     const rows = this.database
       .prepare(
         `
@@ -204,9 +206,11 @@ export class SourceEffectStore {
     limit: number;
   }): { ids: string[]; hasMore: boolean } {
     const limit = limitSchema.parse(options.limit);
+    // Unit order lets LIMIT stop at the page boundary. Author order sorts all
+    // remaining candidates again for every page of a multi-author selection.
     const rows = this.database
       .prepare(
-        `SELECT DISTINCT u.unit_id FROM consumer_post_units u
+        `SELECT DISTINCT u.unit_id FROM consumer_post_units u INDEXED BY idx_consumer_post_units_unit
       JOIN observation_sources s ON s.source_ref = u.source_ref
       WHERE u.author_id IN (SELECT value FROM json_each(@authors))
         AND s.segment_key IN (SELECT value FROM json_each(@keys)) AND u.unit_id > @after

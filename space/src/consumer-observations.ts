@@ -99,7 +99,7 @@ export class ConsumerObservationReader {
         `WITH samples AS MATERIALIZED (
       SELECT o.*, s.source_ref, s.received_at AS source_received_at,
         ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY s.received_at, s.source_ref) AS copy
-      FROM post_observations o JOIN observation_sources s ON s.observation_id = o.observation_id
+      FROM post_observations o JOIN observation_sources s INDEXED BY idx_observation_source_id ON s.observation_id = o.observation_id
       JOIN post_content_versions c ON c.content_hash = o.content_hash
       WHERE ${PUBLIC_SAMPLE} AND o.post_id IN (SELECT value FROM json_each(@posts))
         AND o.observed_at >= @since AND o.observed_at < @until
@@ -197,7 +197,7 @@ export class ConsumerObservationReader {
       FROM post_observations o JOIN post_content_versions c ON c.content_hash = o.content_hash
       WHERE ${PUBLIC_SAMPLE} AND o.post_id IN (SELECT value FROM json_each(@posts))
       AND o.observed_at >= @since AND o.observed_at < @until
-      AND EXISTS (SELECT 1 FROM observation_sources s WHERE s.observation_id = o.observation_id
+      AND EXISTS (SELECT 1 FROM observation_sources s INDEXED BY idx_observation_source_id WHERE s.observation_id = o.observation_id
                   AND s.segment_key IN (SELECT value FROM json_each(@keys))) GROUP BY o.post_id`,
       )
       .all({

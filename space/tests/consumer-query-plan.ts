@@ -1,0 +1,30 @@
+import type Database from "better-sqlite3";
+import { vi } from "vitest";
+import { z } from "zod";
+
+/** Inspect the executed statement with its real bindings. This catches planner
+ * regressions without a host-dependent elapsed-time assertion. */
+export function consumerQueryPlan(database: Database.Database, match: RegExp): string[] {
+  const prepare = database.prepare.bind(database);
+  const details: string[] = [];
+  vi.spyOn(database, "prepare").mockImplementation((sql: string) => {
+    const statement = prepare(sql);
+    if (!match.test(sql)) return statement;
+    const measure =
+      <T>(call: (...parameters: unknown[]) => T) =>
+      (...parameters: unknown[]) => {
+        details.push(
+          ...z
+            .array(z.object({ detail: z.string() }))
+            .parse(prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters))
+            .map((row) => row.detail),
+        );
+        return call(...parameters);
+      };
+    statement.get = measure(statement.get.bind(statement));
+    statement.all = measure(statement.all.bind(statement));
+    statement.iterate = measure(statement.iterate.bind(statement));
+    return statement;
+  });
+  return details;
+}
