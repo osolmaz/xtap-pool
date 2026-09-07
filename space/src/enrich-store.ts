@@ -1557,24 +1557,27 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
               AND q.taxonomy_version = ? AND q.status = 'done'`;
   const unitWhere =
     options.unitIds === undefined ? "" : " AND um.unit_id IN (SELECT value FROM json_each(?))";
-  const selection = `${unitWhere}${cutoffWhere(options.cutoff)}${publicationWhere(
+  const selection = `${cutoffWhere(options.cutoff)}${publicationWhere(
     options.publication,
     "um.unit_id",
   )}${authorWhere(options.authorIds, "um.unit_id")}`;
-  const cutoffParams = [
-    ...(options.unitIds === undefined ? [] : [JSON.stringify(options.unitIds)]),
-    ...(options.cutoff !== undefined ? [options.cutoff] : []),
-  ];
+  // A unit can have many members and match several labels. Deduplicate before
+  // reading post bodies for publication/author checks, not after those checks.
+  const selected = (sql: string) =>
+    `WITH candidates AS MATERIALIZED (${sql}) SELECT um.unit_id FROM candidates um WHERE 1 = 1${selection}`;
+  const unitParams = options.unitIds === undefined ? [] : [JSON.stringify(options.unitIds)];
+  const cutoffParams = options.cutoff !== undefined ? [options.cutoff] : [];
   const authorParams = options.authorIds ?? [];
   if (labels.length === 0) {
     return {
-      sql: `SELECT DISTINCT um.unit_id FROM unit_members um
+      sql: selected(`SELECT DISTINCT um.unit_id FROM unit_members um
             ${finalizedJoins}
-            WHERE 1 = 1${selection}`,
+            WHERE 1 = 1${unitWhere}`),
       params: [
         options.taxonomyVersion,
         options.contractHash,
         options.taxonomyVersion,
+        ...unitParams,
         ...cutoffParams,
         ...authorParams,
       ],
@@ -1582,34 +1585,36 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
   }
   if (options.labelMode !== "all") {
     return {
-      sql: `SELECT DISTINCT um.unit_id FROM unit_members um
+      sql: selected(`SELECT DISTINCT um.unit_id FROM unit_members um
             ${finalizedJoins}
             JOIN label_assignments la ON la.unit_id = um.unit_id AND la.kind = 'preset'
-            WHERE la.name IN (${labelPlaceholders})${selection}`,
+            WHERE la.name IN (${labelPlaceholders})${unitWhere}`),
       params: [
         options.taxonomyVersion,
         options.contractHash,
         options.taxonomyVersion,
         ...labels,
+        ...unitParams,
         ...cutoffParams,
         ...authorParams,
       ],
     };
   }
   return {
-    sql: `SELECT um.unit_id FROM unit_members um
+    sql: selected(`SELECT um.unit_id FROM unit_members um
           ${finalizedJoins}
           JOIN label_assignments la ON la.unit_id = um.unit_id AND la.kind = 'preset'
-          WHERE la.name IN (${labelPlaceholders})${selection}
-          GROUP BY um.unit_id HAVING COUNT(DISTINCT la.name) = ?`,
+          WHERE la.name IN (${labelPlaceholders})${unitWhere}
+          GROUP BY um.unit_id HAVING COUNT(DISTINCT la.name) = ?`),
     params: [
       options.taxonomyVersion,
       options.contractHash,
       options.taxonomyVersion,
       ...labels,
+      ...unitParams,
+      labels.length,
       ...cutoffParams,
       ...authorParams,
-      labels.length,
     ],
   };
 }
