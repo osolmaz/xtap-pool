@@ -14,6 +14,7 @@ export function registerConsumerRoutes(
   const routes: [string, ConsumerRoute, ServiceAccountScope[]][] = [
     ["/api/units", "bootstrap", ["units:read", "taxonomy:read"]],
     ["/api/changes", "changes", ["units:read", "taxonomy:read", "observations:read"]],
+    ["/api/reconcile", "reconcile", ["units:read"]],
     ["/api/observations", "history", ["units:read", "observations:read"]],
   ];
   for (const [path, route, scopes] of routes)

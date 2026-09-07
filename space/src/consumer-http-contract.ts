@@ -2,6 +2,8 @@ import { z } from "zod";
 import { consumerChangeSchema } from "./consumer-page.js";
 import { observationPageSchema } from "./consumer-worker-task.js";
 
+import { consumerRemovalSchema } from "./consumer-privacy.js";
+
 const bounds = {
   schema_version: z.literal(1),
   source: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -24,5 +26,17 @@ export const consumerHistoryEnvelopeSchema = z
     observations: observationPageSchema.shape.observations,
     coverage: observationPageSchema.shape.coverage,
     next_cursor: z.string().nullable(),
+  })
+  .strict();
+
+export const consumerReconciliationEnvelopeSchema = z
+  .object({
+    schema_version: z.literal(1),
+    source: bounds.source,
+    removals: z.array(consumerRemovalSchema).max(500),
+    has_more: z.boolean(),
+    next_cursor: z.string().nullable(),
+    resume_cursor: z.string().nullable(),
+    resume_path: z.enum(["/api/units", "/api/changes", "/api/observations"]).nullable(),
   })
   .strict();

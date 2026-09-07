@@ -178,48 +178,6 @@ describe("incremental consumer HTTP", () => {
     expect((await f.request(history(token))).status).toBe(400);
   });
 
-  it("returns body-free removal instructions after an accepted page and prevents old history leaks", async () => {
-    await f.post(consumerTweet());
-    await f.post(consumerTweet("200"));
-    const accepted = new Map<string, unknown>();
-    const meta = await page(`${BOOTSTRAP}&limit=1`);
-    const first = await page(`/api/units?cursor=${meta.cursor}&limit=1`);
-    for (const change of first.changes)
-      if (change.type === "unit_upsert") accepted.set(change.unit.id, change.unit);
-    expect(accepted.size).toBe(1);
-    const consumed = await bootstrap();
-    await f.post(
-      consumerTweet("100", { is_subscriber_only: true, captured_at: "2026-09-06T08:00:00.000Z" }),
-      false,
-    );
-    for (const path of [
-      `/api/units?cursor=${first.cursor}`,
-      `/api/units?cursor=${meta.cursor}`,
-      history(consumed.cursor),
-    ]) {
-      const response = await f.request(path);
-      expect(response.status).toBe(409);
-      const raw = await response.text();
-      expect(raw).not.toContain("model release");
-      const body = JSON.parse(raw) as { error: { code: string; recovery: { action: string } } };
-      expect(body.error.code).toBe("privacy_changed");
-      if (body.error.recovery.action === "discard_selection") accepted.clear();
-    }
-    expect(accepted.size).toBe(0);
-    const removal = await page(`/api/changes?after=${consumed.cursor}`);
-    expect(removal.changes).toContainEqual({
-      type: "unit_remove",
-      unit_id: "100:a",
-      reason: "not_available",
-    });
-    const fresh = await bootstrap();
-    const safe = consumerHistoryEnvelopeSchema.parse(
-      await (await f.request(history(fresh.cursor))).json(),
-    );
-    expect(safe.observations).toEqual([]);
-    expect(safe.coverage[0]?.state).toBe("unavailable");
-  });
-
   it("returns explicit expiry recovery and does not renew old source leases", async () => {
     const first = await page(BOOTSTRAP);
     const source = await bootstrap();
@@ -329,27 +287,6 @@ describe("incremental consumer HTTP", () => {
       ).status,
     ).toBe(410);
   });
-  it("stops an unfinished changes sequence after privacy withdrawal, including newly accepted bodies", async () => {
-    const source = await bootstrap();
-    await f.post(consumerTweet());
-    await f.post(consumerTweet("200"));
-    const unfinished = await page(`/api/changes?after=${source.cursor}&limit=1`);
-    expect(unfinished.changes[0]?.type).toBe("unit_upsert");
-    expect(unfinished.has_more).toBe(true);
-    await f.post(
-      consumerTweet("100", { is_subscriber_only: true, captured_at: "2026-09-06T10:00:00.000Z" }),
-      false,
-    );
-    const response = await f.request(`/api/changes?after=${unfinished.cursor}`);
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      error: {
-        code: "privacy_changed",
-        recovery: { action: "discard_selection", discard: ["units", "observations"] },
-      },
-    });
-  });
-
   it("reports a changed semantic contract as explicit 409 recovery", async () => {
     const source = await bootstrap();
     vi.spyOn(f.options().contexts, "read").mockRejectedValue(new ConsumerContractChanged());

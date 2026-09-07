@@ -9,6 +9,10 @@ export const observationPositionSchema = z
   .object({ post_id: postId, observed_at: z.iso.datetime(), id: hash })
   .strict();
 export type ObservationPosition = z.infer<typeof observationPositionSchema>;
+export const removalPositionSchema = z
+  .object({ post_id: postId, unit_id: z.string().max(512) })
+  .strict();
+export type RemovalPosition = z.infer<typeof removalPositionSchema>;
 const positionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("idle") }).strict(),
   z.object({ kind: z.literal("bootstrap"), after: id.optional() }).strict(),
@@ -45,9 +49,16 @@ export const consumerCursorSchema = z
     started_at: z.iso.datetime(),
     position: positionSchema,
     metadata_sent: z.boolean().optional(),
+    privacy: hash.optional(),
+    reconciliation: z
+      .object({ target: hash, after: removalPositionSchema.optional() })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((cursor, context) => {
+    if (cursor.reconciliation !== undefined && cursor.position.kind === "idle")
+      context.addIssue({ code: "custom", message: "an idle cursor cannot have pending removals" });
     const changes = ["content", "activation", "observations"].includes(cursor.position.kind);
     if (changes !== (cursor.base !== null))
       context.addIssue({
@@ -74,7 +85,7 @@ export type ConsumerCursor = z.infer<typeof consumerCursorSchema>;
 const DAY = 86_400_000;
 export const CURSOR_RECOVERY_MS = 30 * DAY;
 export const PAGE_LEASE_MS = 2 * DAY;
-const MAX_BYTES = 4096;
+const MAX_BYTES = 8192;
 export class InvalidConsumerCursor extends Error {
   constructor() {
     super("invalid consumer cursor");
