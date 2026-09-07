@@ -1,11 +1,17 @@
 // xTap — Tweet parser
 // Extracts and normalizes tweets from X/Twitter GraphQL API responses.
+import { exactCounter } from './observations.js';
 
 /**
  * Main entry point. Given an endpoint name and the raw GraphQL response data,
  * returns an array of normalized tweet objects.
  */
-export function extractTweets(endpoint, data) {
+export function extractTweets(endpoint, data, observedAt = new Date().toISOString()) {
+  const capturedAt = new Date(observedAt).toISOString();
+  return parseTweets(endpoint, data).map(tweet => ({ ...tweet, captured_at: capturedAt }));
+}
+
+function parseTweets(endpoint, data) {
   if (!data) return [];
 
   // TweetResultByRestId returns a single tweet, not a timeline with instructions.
@@ -320,12 +326,13 @@ export function normalizeTweet(raw) {
     text,
     lang: legacy.lang,
     metrics: {
-      likes: legacy.favorite_count || 0,
-      retweets: legacy.retweet_count || 0,
-      replies: legacy.reply_count || 0,
-      views: parseInt(raw.views?.count, 10) || null,
-      bookmarks: legacy.bookmark_count || 0,
-      quotes: legacy.quote_count || 0
+      format: 'exact-v1',
+      likes: exactCounter(legacy.favorite_count),
+      retweets: exactCounter(legacy.retweet_count),
+      replies: exactCounter(legacy.reply_count),
+      views: exactCounter(raw.views?.count),
+      bookmarks: exactCounter(legacy.bookmark_count),
+      quotes: exactCounter(legacy.quote_count)
     },
     media,
     urls,

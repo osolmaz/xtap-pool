@@ -4,7 +4,12 @@
 // in chrome.storage.local and flushed in batches to POST <poolUrl>/api/ingest
 // with the user's pool token. Delivery is at-least-once; the Space dedups.
 
+import { prepareObservations } from './observations.js';
+
 const QUEUE_KEY = 'poolQueue';
+const SAMPLES_KEY = 'poolSamples';
+const REJECTIONS_KEY = 'poolRejections';
+const MAX_REJECTIONS = 500;
 const CONFIG_KEYS = ['poolUrl', 'poolToken', 'poolUsername', 'poolPaused', 'poolStats'];
 const MAX_QUEUE = 5000;
 const MAX_BATCH = 500;
@@ -16,13 +21,16 @@ const BACKOFF_MAX_MS = 15 * 60_000;
 export const DEFAULT_POOL_URL = 'https://osolmaz-xtap-pool.hf.space';
 
 let queue = [];
+let samples = {};
+let rejections = [];
+let queueWrites = Promise.resolve();
 let config = {
   poolUrl: DEFAULT_POOL_URL,
   poolToken: '',
   poolUsername: '',
   poolPaused: false,
 };
-let stats = { synced: 0, lastError: null, lastSyncAt: null };
+let stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, lastError: null, lastSyncAt: null };
 let flushTimer = null;
 let backoffMs = 0;
 let flushing = false;
@@ -32,16 +40,32 @@ function storage() {
 }
 
 function storageGet(keys) {
-  return new Promise((resolve) => storage().get(keys, resolve));
+  return new Promise((resolve, reject) => storage().get(keys, result => {
+    const error = globalThis.chrome.runtime?.lastError;
+    if (error) reject(new Error(error.message || 'pool storage read failed'));
+    else resolve(result);
+  }));
 }
 
 function storageSet(items) {
-  return new Promise((resolve) => storage().set(items, () => resolve()));
+  return new Promise((resolve, reject) => storage().set(items, () => {
+    const error = globalThis.chrome.runtime?.lastError;
+    if (error) reject(new Error(error.message || 'pool storage write failed'));
+    else resolve();
+  }));
+}
+
+function withQueueWrite(operation) {
+  const result = queueWrites.then(operation, operation);
+  queueWrites = result.catch(() => {});
+  return result;
 }
 
 export async function initPoolSync() {
-  const saved = await storageGet([QUEUE_KEY, ...CONFIG_KEYS]);
+  const saved = await storageGet([QUEUE_KEY, SAMPLES_KEY, REJECTIONS_KEY, ...CONFIG_KEYS]);
   queue = Array.isArray(saved[QUEUE_KEY]) ? saved[QUEUE_KEY] : [];
+  samples = saved[SAMPLES_KEY] && typeof saved[SAMPLES_KEY] === 'object' ? saved[SAMPLES_KEY] : {};
+  rejections = Array.isArray(saved[REJECTIONS_KEY]) ? saved[REJECTIONS_KEY] : [];
   if (typeof saved.poolUrl === 'string' && saved.poolUrl) config.poolUrl = saved.poolUrl;
   if (typeof saved.poolToken === 'string') config.poolToken = saved.poolToken;
   if (typeof saved.poolUsername === 'string') config.poolUsername = saved.poolUsername;
@@ -50,25 +74,29 @@ export async function initPoolSync() {
   if (queue.length > 0) scheduleFlush(0);
 }
 
-async function persistQueue() {
-  await storageSet({ [QUEUE_KEY]: queue });
-}
-
 async function persistStats() {
   await storageSet({ poolStats: stats });
 }
 
-/** Queue captured tweets for pool sync. Never throws. */
+/** Persist samples and admission state together. Failure leaves staged work pending. */
 export function poolEnqueue(tweets) {
-  if (!Array.isArray(tweets) || tweets.length === 0) return;
-  queue.push(...tweets);
-  if (queue.length > MAX_QUEUE) {
-    const dropped = queue.length - MAX_QUEUE;
-    queue = queue.slice(-MAX_QUEUE);
-    console.warn(`[xtap-pool] queue overflow, dropped ${dropped} oldest tweets`);
-  }
-  persistQueue();
-  scheduleFlush(queue.length >= MAX_BATCH ? 0 : FLUSH_DEBOUNCE_MS);
+  if (!Array.isArray(tweets) || tweets.length === 0) return Promise.resolve();
+  return withQueueWrite(async () => {
+    const prepared = await prepareObservations(tweets, samples);
+    if (queue.length + prepared.accepted.length > MAX_QUEUE) {
+      stats = { ...stats, blocked: stats.blocked + 1, lastError: 'pool queue full — staged observations are waiting' };
+      await persistStats();
+      scheduleFlush(0);
+      throw new Error(stats.lastError);
+    }
+    const nextQueue = [...queue, ...prepared.accepted];
+    const nextStats = { ...stats, observations: stats.observations + prepared.accepted.length, sampled: stats.sampled + prepared.sampled };
+    await storageSet({ [QUEUE_KEY]: nextQueue, [SAMPLES_KEY]: prepared.samples, poolStats: nextStats });
+    queue = nextQueue;
+    samples = prepared.samples;
+    stats = nextStats;
+    if (queue.length > 0) scheduleFlush(queue.length >= MAX_BATCH ? 0 : FLUSH_DEBOUNCE_MS);
+  });
 }
 
 function scheduleFlush(delayMs) {
@@ -79,7 +107,10 @@ function scheduleFlush(delayMs) {
   }
   flushTimer = setTimeout(() => {
     flushTimer = null;
-    poolFlush();
+    poolFlush().catch(error => {
+      stats.lastError = `pool persistence failed: ${error.message}`;
+      scheduleFlush(BACKOFF_BASE_MS);
+    });
   }, delayMs);
 }
 
@@ -90,10 +121,19 @@ export async function poolFlush() {
   try {
     while (queue.length > 0) {
       const batch = queue.slice(0, MAX_BATCH);
-      const ok = await sendBatch(batch);
-      if (!ok) break;
-      queue = queue.slice(batch.length);
-      await persistQueue();
+      const acknowledgment = await sendBatch(batch);
+      if (!acknowledgment) break;
+      await withQueueWrite(async () => {
+        const nextQueue = queue.slice(batch.length);
+        const nextRejections = [...rejections, ...acknowledgment.rejected.map(item => ({ tweet: batch[item.index], reason: item.reason }))];
+        if (nextRejections.length > MAX_REJECTIONS) throw new Error('pool rejection archive full — queued observations retained');
+        const nextStats = { ...stats, synced: stats.synced + batch.length - acknowledgment.rejected.length, lastError: nextRejections.length ? `${nextRejections.length} rejected observations saved for inspection` : null, lastSyncAt: new Date().toISOString() };
+        await storageSet({ [QUEUE_KEY]: nextQueue, [REJECTIONS_KEY]: nextRejections, poolStats: nextStats });
+        queue = nextQueue;
+        rejections = nextRejections;
+        stats = nextStats;
+        backoffMs = 0;
+      });
     }
   } finally {
     flushing = false;
@@ -116,26 +156,33 @@ async function sendBatch(batch) {
   }
   if (response.status === 401) {
     // Token expired or revoked — needs a manual reconnect, retrying won't help.
-    stats.lastError = 'pool token rejected — reconnect from the popup';
-    await persistStats();
+    await withQueueWrite(async () => {
+      stats.lastError = 'pool token rejected — reconnect from the popup';
+      await persistStats();
+    });
     return false;
   }
   if (!response.ok) {
     return retryLater(`pool responded ${response.status}`);
   }
-  const body = await response.json().catch(() => ({}));
-  stats.synced += typeof body.added === 'number' ? body.added : batch.length;
-  stats.lastError = null;
-  stats.lastSyncAt = new Date().toISOString();
-  backoffMs = 0;
-  await persistStats();
-  return true;
+  const body = await response.json().catch(() => null);
+  if (!body || body.ok !== true || !Number.isSafeInteger(body.added) || body.added < 0 ||
+      !Number.isSafeInteger(body.duplicates) || body.duplicates < 0 ||
+      !Array.isArray(body.rejected) ||
+      !body.rejected.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < batch.length && typeof item.reason === 'string' && item.reason.length > 0) ||
+      new Set(body.rejected.map(item => item.index)).size !== body.rejected.length ||
+      body.added + body.duplicates + body.rejected.length !== batch.length) {
+    return retryLater('pool did not acknowledge the complete observation batch');
+  }
+  return { rejected: body.rejected };
 }
 
 async function retryLater(message) {
   backoffMs = Math.min(backoffMs > 0 ? backoffMs * 2 : BACKOFF_BASE_MS, BACKOFF_MAX_MS);
-  stats.lastError = `${message} — retrying in ${Math.round(backoffMs / 1000)}s`;
-  await persistStats();
+  await withQueueWrite(async () => {
+    stats.lastError = `${message} — retrying in ${Math.round(backoffMs / 1000)}s`;
+    await persistStats();
+  });
   scheduleFlush(backoffMs);
   return false;
 }
@@ -215,6 +262,10 @@ export function poolStatus() {
     paused: config.poolPaused,
     queued: queue.length,
     synced: stats.synced,
+    observations: stats.observations,
+    sampled: stats.sampled,
+    blocked: stats.blocked,
+    rejected: rejections.length,
     lastError: stats.lastError,
     lastSyncAt: stats.lastSyncAt,
   };
@@ -223,8 +274,11 @@ export function poolStatus() {
 // Test-only hook: reset module state between node --test cases.
 export function _resetForTests() {
   queue = [];
+  samples = {};
+  rejections = [];
+  queueWrites = Promise.resolve();
   config = { poolUrl: DEFAULT_POOL_URL, poolToken: '', poolUsername: '', poolPaused: false };
-  stats = { synced: 0, lastError: null, lastSyncAt: null };
+  stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, lastError: null, lastSyncAt: null };
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = null;
   backoffMs = 0;

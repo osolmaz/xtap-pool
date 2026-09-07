@@ -76,6 +76,17 @@ export {
   type SemanticTweetFields,
 } from "./hash.js";
 export {
+  observationSchema,
+  observationMetricsSchema,
+  observationMetrics,
+  exactCounter,
+  normalizeObservation,
+  contentHash,
+  tweetContent,
+  type Observation,
+  type ObservationMetrics,
+} from "./observation.js";
+export {
   serviceAccountScopeSchema,
   type ServiceAccountScope,
   type EnrichedUnit,

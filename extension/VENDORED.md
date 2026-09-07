@@ -19,13 +19,24 @@ this directory, excluding the modifications below.
 - Firefox manifests, build scripts, page-interception tests, and browser E2E
   harness are omitted. Firefox does not implement Chrome's extension debugger
   API, and this fork does not fall back to page-owned fetch/XHR interception.
-- `lib/pool-sync.js` — **new**: persistent sync queue + batched flush to the
-  pool Space's `/api/ingest` with backoff.
+- `lib/pool-sync.js` — **new**: persistent observation queue and batched flush to
+  the pool Space's `/api/ingest` with backoff. Queue admission and sampling state
+  are saved together. Storage errors and queue overflow leave staged work pending.
+  A batch leaves the queue only after a complete server acknowledgment. Explicitly
+  rejected records are saved in a bounded local rejection archive, so one invalid
+  post does not block valid work. A full rejection archive blocks removal instead
+  of discarding records.
+- `lib/observations.js` — **new**: stable local observation identities, exact
+  nullable counters, and five-minute sampling for unchanged content. Later visits
+  and immediate content or visibility edits are independent of unique-post export
+  deduplication.
 - `pool-connect.js` — **new**: content script for the Space's `/connect` page;
   hands the pool token to the service worker (no copy-paste).
 - `background.js` — imports `lib/pool-sync.js`; new captures also feed the pool
-  queue; new `POOL_*` message handlers; a `chrome.alarms` periodic pool flush;
-  `initPoolSync()` during startup. Upstream's durable staging, coupled
+  queue before unique-post deduplication; new `POOL_*` message handlers; a
+  `chrome.alarms` periodic pool flush and staged-response retry;
+  `initPoolSync()` during startup. Staging uses local storage and preserves the
+  original observation time through a browser restart. Upstream's coupled
   dedup/buffer persistence, image backfill, bounded splitting, startup flush,
   and HTTP-only transport remain in place around the pool path.
 - `popup.html` / `popup.js` — added the "Pool sync" section (status, connect,
@@ -60,7 +71,10 @@ this directory, excluding the modifications below.
   run. Up to four leased receipt runs may be active. Heartbeats, source-tab
   closure, and lease expiry reclaim runs that no longer have a live client.
 - `lib/tweet-parser.js` — accepts object-shaped Draft.js `entityMap`s in
-  addition to X's array-of-pairs shape (+ regression test).
+  addition to X's array-of-pairs shape (+ regression test). New counter objects
+  carry `format: "exact-v1"`; absent, rounded, invalid, and unsafe counters are
+  null, while actual zero counts remain zero. Recovery passes the original response
+  time to `extractTweets`.
 - `.github/workflows/release.yml` — packages the pool settings, connection,
   reload, and cutover pages; omits unsupported Firefox artifacts.
 - Removed upstream `AGENTS.md` / `CLAUDE.md` (superseded by the repo root's).

@@ -301,12 +301,10 @@ export class BucketLog {
     validateOperations(segment.operations);
     const raw = canonicalBytes(segment);
     const digest = sha256(raw);
-    const category = segmentCategory(segment.operations);
-    const day = segment.created_at.slice(0, 10);
     const time = Date.parse(segment.created_at);
     if (!Number.isSafeInteger(time))
       throw new Error("segment created_at is outside the safe range");
-    const key = `${SEGMENT_PREFIX}/${category}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(time).padStart(13, "0")}-${segment.transaction_id}-${digest}.json.gz`;
+    const key = sourceSegmentKey(segment, digest);
     const compressed = new Uint8Array(await gzipAsync(raw, { level: 9 }));
     const existing = await this.client.download(key);
     if (existing === undefined) await this.requireWriter().upload(key, compressed);
@@ -699,25 +697,38 @@ export class BucketLog {
 
   applySegment(segment: BucketSegment, store: TweetStore, enrich: EnrichStore): SourceCounts {
     const counts = emptyCounts();
-    for (const operation of segment.operations) {
+    const sourceKey = sourceSegmentKey(segment, sha256(canonicalBytes(segment)));
+    for (const [operationIndex, operation] of segment.operations.entries()) {
       if (operation.mode === "write") {
         this.rememberText(operation.path, operation.content);
         continue;
       }
       const kind = sourceKind(operation.path);
       const content = `${operation.lines.join("\n")}\n`;
-      counts[kind] += applyLines(kind, operation.path, content, store, enrich, (receipt) => {
-        if (this.lastReceipt === undefined || receipt.finished_at > this.lastReceipt.finished_at) {
-          this.lastReceipt = receipt;
-        }
-        if (
-          hasRegistryCursor(receipt) &&
-          (this.lastRegistryReceipt === undefined ||
-            receipt.finished_at > this.lastRegistryReceipt.finished_at)
-        ) {
-          this.lastRegistryReceipt = receipt;
-        }
-      });
+      counts[kind] += applyLines(
+        kind,
+        operation.path,
+        content,
+        store,
+        enrich,
+        (receipt) => {
+          if (
+            this.lastReceipt === undefined ||
+            receipt.finished_at > this.lastReceipt.finished_at
+          ) {
+            this.lastReceipt = receipt;
+          }
+          if (
+            hasRegistryCursor(receipt) &&
+            (this.lastRegistryReceipt === undefined ||
+              receipt.finished_at > this.lastRegistryReceipt.finished_at)
+          ) {
+            this.lastRegistryReceipt = receipt;
+          }
+        },
+        sourceKey,
+        operationIndex,
+      );
     }
     return counts;
   }
@@ -943,11 +954,21 @@ function applyLines(
   store: TweetStore,
   enrich: EnrichStore,
   observeReceipt: (receipt: EnrichReceipt) => void,
+  sourceKey: string,
+  operation: number,
 ): number {
   if (kind === "tweet") {
-    const tweets = parseJsonlTweets(content, path);
-    store.insert(tweets);
-    enrich.registerTweets(tweets);
+    const tweets: PooledTweet[] = [];
+    store.database.transaction(() => {
+      for (const [position, line] of content.split("\n").entries()) {
+        for (const tweet of parseJsonlTweets(line, path)) {
+          store.observations.record(tweet, { segmentKey: sourceKey, operation, path, position });
+          tweets.push(tweet);
+        }
+      }
+      store.insert(tweets);
+      enrich.registerTweets(tweets);
+    })();
     return tweets.length;
   }
   let rows = 0;
@@ -970,10 +991,13 @@ function applyLines(
   return rows;
 }
 
-function assertSegmentKeyMatches(key: string, segment: BucketSegment, contentSha256: string): void {
+function sourceSegmentKey(segment: BucketSegment, contentSha256: string): string {
   const day = segment.created_at.slice(0, 10);
-  const expected = `${SEGMENT_PREFIX}/${segmentCategory(segment.operations)}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(Date.parse(segment.created_at)).padStart(13, "0")}-${segment.transaction_id}-${contentSha256}.json.gz`;
-  if (key !== expected) throw new Error(`Bucket segment key does not match its contents: ${key}`);
+  return `${SEGMENT_PREFIX}/${segmentCategory(segment.operations)}/${day.slice(0, 4)}/${day.slice(5, 7)}/${day.slice(8, 10)}/${String(Date.parse(segment.created_at)).padStart(13, "0")}-${segment.transaction_id}-${contentSha256}.json.gz`;
+}
+function assertSegmentKeyMatches(key: string, segment: BucketSegment, contentSha256: string): void {
+  if (key !== sourceSegmentKey(segment, contentSha256))
+    throw new Error(`Bucket segment key does not match its contents: ${key}`);
 }
 
 function segmentCategory(operations: readonly BucketOperation[]): string {

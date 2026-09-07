@@ -22,6 +22,8 @@ import {
 } from "../src/bucket-log.js";
 import type { BucketObject, RawBucketClient } from "../src/bucket-log.js";
 import { makePooled } from "./helpers.js";
+import { TweetStore } from "../src/store.js";
+import { EnrichStore } from "../src/enrich-store.js";
 
 const gunzipAsync = promisify(gunzip);
 const gzipAsync = promisify(gzip);
@@ -74,6 +76,75 @@ function log(bucket = new MemoryBucket()): { bucket: MemoryBucket; log: BucketLo
 }
 
 describe("BucketLog", () => {
+  it("retains exact operation and line provenance during raw replay", async () => {
+    const state = log();
+    const store = new TweetStore();
+    const enrich = new EnrichStore(store.database, 1);
+    try {
+      const first = makePooled({ metrics: { likes: 10 } });
+      const second = makePooled({ captured_at: "2026-05-22T00:00:00Z", metrics: { likes: 12 } });
+      const path = "data/osolmaz/2026/05/tweets-2026-05-21.jsonl";
+      const key = await state.log.commitBatch(
+        [
+          { path, lines: [" ", JSON.stringify(first)] },
+          { path: "data/osolmaz/2026/05/tweets-2026-05-22.jsonl", lines: [JSON.stringify(second)] },
+        ],
+        [],
+      );
+      const compressed = state.bucket.files.get(key);
+      expect(compressed).toBeDefined();
+      const segment = bucketSegmentSchema.parse(
+        JSON.parse((await gunzipAsync(compressed!)).toString("utf8")),
+      );
+      state.log.applySegment(segment, store, enrich);
+      state.log.applySegment(segment, store, enrich);
+      expect(
+        store.database
+          .prepare(
+            "SELECT operation, position FROM observation_sources ORDER BY operation, position",
+          )
+          .all(),
+      ).toEqual([
+        { operation: 0, position: 1 },
+        { operation: 1, position: 0 },
+      ]);
+      expect(
+        store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
+      ).toEqual({ count: 2 });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reconstructs the same source references as the immediate ingest write", async () => {
+    const state = log();
+    const immediate = new TweetStore();
+    const replayed = new TweetStore();
+    try {
+      const tweets = [
+        makePooled({ metrics: { likes: 10 } }),
+        makePooled({ captured_at: "2026-05-22T00:00:00Z", metrics: { likes: 11 } }),
+        makePooled({ captured_at: "2026-05-21T09:00:00Z", metrics: { likes: 12 } }),
+      ];
+      const key = await state.log.appendTweets(tweets);
+      immediate.observations.recordBatch(tweets, key);
+      const compressed = state.bucket.files.get(key);
+      expect(compressed).toBeDefined();
+      const segment = bucketSegmentSchema.parse(
+        JSON.parse((await gunzipAsync(compressed!)).toString("utf8")),
+      );
+      state.log.applySegment(segment, replayed, new EnrichStore(replayed.database, 1));
+      for (const table of ["post_content_versions", "post_observations", "observation_sources"]) {
+        expect(replayed.database.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()).toEqual(
+          immediate.database.prepare(`SELECT * FROM ${table} ORDER BY 1`).all(),
+        );
+      }
+    } finally {
+      immediate.close();
+      replayed.close();
+    }
+  });
+
   it("stores deterministic gzip with a checksum-addressed immutable key", async () => {
     const state = log();
     const key = await state.log.commitBatch(

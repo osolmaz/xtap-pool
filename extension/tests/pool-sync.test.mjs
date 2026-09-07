@@ -1,9 +1,11 @@
-import { beforeEach, describe, it, mock } from 'node:test';
+import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Minimal chrome.storage.local stub backed by a plain object.
 const storageData = {};
+let storageError = false;
 globalThis.chrome = {
+  runtime: {},
   storage: {
     local: {
       get(keys, cb) {
@@ -14,8 +16,10 @@ globalThis.chrome = {
         cb(out);
       },
       set(items, cb) {
-        Object.assign(storageData, items);
+        if (storageError) globalThis.chrome.runtime.lastError = { message: 'storage full' };
+        else Object.assign(storageData, structuredClone(items));
         if (cb) cb();
+        delete globalThis.chrome.runtime.lastError;
       },
     },
   },
@@ -38,15 +42,18 @@ function tweet(id) {
 }
 
 function okFetch() {
-  return mock.fn(() =>
-    Promise.resolve(new Response(JSON.stringify({ added: 1, duplicates: 0, rejected: [] }), { status: 200 })),
+  return mock.fn((_url, init) =>
+    Promise.resolve(new Response(JSON.stringify({ ok: true, added: JSON.parse(init.body).tweets.length, duplicates: 0, rejected: [] }), { status: 200 })),
   );
 }
 
 beforeEach(() => {
   _resetForTests();
+  storageError = false;
   for (const key of Object.keys(storageData)) delete storageData[key];
 });
+
+afterEach(() => _resetForTests());
 
 describe('poolConnect + poolStatus', () => {
   it('stores the token and username for the configured pool origin', async () => {
@@ -87,7 +94,7 @@ describe('poolConnect + poolStatus', () => {
 describe('poolEnqueue + poolFlush', () => {
   it('does nothing without a token', async () => {
     globalThis.fetch = okFetch();
-    poolEnqueue([tweet('1')]);
+    await poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(globalThis.fetch.mock.callCount(), 0);
     assert.equal(poolStatus().queued, 1);
@@ -97,7 +104,7 @@ describe('poolEnqueue + poolFlush', () => {
     globalThis.fetch = okFetch();
     await poolSetConfig({ url: 'https://s.hf.space' });
     await poolConnect({ token: 'tok', username: 'osolmaz' }, 'https://s.hf.space/connect');
-    poolEnqueue([tweet('1'), tweet('2')]);
+    await poolEnqueue([tweet('1'), tweet('2')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 0);
     assert.equal(poolStatus().synced >= 1, true);
@@ -112,7 +119,7 @@ describe('poolEnqueue + poolFlush', () => {
     globalThis.fetch = mock.fn(() => Promise.reject(new Error('offline')));
     await poolSetConfig({ url: 'https://s.hf.space' });
     await poolConnect({ token: 'tok', username: 'o' }, 'https://s.hf.space/connect');
-    poolEnqueue([tweet('1')]);
+    await poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 1);
     assert.match(poolStatus().lastError, /offline/);
@@ -122,18 +129,123 @@ describe('poolEnqueue + poolFlush', () => {
     globalThis.fetch = mock.fn(() => Promise.resolve(new Response('no', { status: 401 })));
     await poolSetConfig({ url: 'https://s.hf.space' });
     await poolConnect({ token: 'expired', username: 'o' }, 'https://s.hf.space/connect');
-    poolEnqueue([tweet('1')]);
+    await poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(poolStatus().queued, 1);
     assert.match(poolStatus().lastError, /reconnect/);
   });
 
-  it('caps the queue at 5000 tweets', async () => {
+  it('blocks overflow without discarding queued work or committing sample markers', async () => {
+    await poolEnqueue([tweet('first')]);
     const many = [];
-    for (let i = 0; i < 5100; i++) many.push(tweet(String(i)));
-    poolEnqueue(many);
-    assert.equal(poolStatus().queued, 5000);
+    for (let i = 0; i < 5000; i++) many.push(tweet(String(i)));
+    await assert.rejects(poolEnqueue(many), /queue full/);
+    assert.equal(poolStatus().queued, 1);
+    assert.equal(storageData.poolQueue[0].id, 'first');
+    assert.equal(Object.keys(storageData.poolSamples).length, 1);
+    assert.equal(poolStatus().blocked, 1);
   });
+});
+
+describe('durable observation delivery', () => {
+  it('retains six-hour repeats and content edits but samples same-interval counters', async () => {
+    const first = { ...tweet('1'), metrics: { likes: 1 } };
+    await poolEnqueue([first]);
+    await poolEnqueue([{ ...first, captured_at: '2026-05-21T00:02:00Z', metrics: { likes: 2 } }]);
+    await poolEnqueue([{ ...first, captured_at: '2026-05-21T00:03:00Z', text: 'edited' }]);
+    await poolEnqueue([{ ...first, captured_at: '2026-05-21T06:00:00Z' }]);
+    assert.equal(poolStatus().queued, 3);
+    assert.equal(poolStatus().sampled, 1);
+    assert.equal(new Set(storageData.poolQueue.map(item => item.observation_id)).size, 3);
+  });
+
+  it('does not acknowledge or mark a sample when storage fails', async () => {
+    storageError = true;
+    await assert.rejects(poolEnqueue([tweet('1')]), /storage full/);
+    assert.equal(poolStatus().queued, 0);
+    assert.equal(storageData.poolSamples, undefined);
+    storageError = false;
+    await poolEnqueue([tweet('1')]);
+    assert.equal(poolStatus().queued, 1);
+  });
+
+  it('restores the exact queued identity and sampling state after a restart', async () => {
+    await poolEnqueue([tweet('1')]);
+    const original = structuredClone(storageData.poolQueue);
+    _resetForTests();
+    await initPoolSync();
+    await poolEnqueue([tweet('1')]);
+    assert.deepEqual(storageData.poolQueue, original);
+    assert.equal(poolStatus().queued, 1);
+  });
+
+  it('serializes concurrent enqueue writes without losing either observation', async () => {
+    await Promise.all([poolEnqueue([tweet('1')]), poolEnqueue([tweet('2')])]);
+    assert.deepEqual(storageData.poolQueue.map(item => item.id), ['1', '2']);
+  });
+
+  it('keeps a new enqueue that arrives during an in-flight batch request', async () => {
+    await poolSetConfig({ token: 'test-token' });
+    await poolEnqueue([tweet('1')]);
+    let release;
+    let requested;
+    const started = new Promise(resolve => { requested = resolve; });
+    globalThis.fetch = mock.fn((_url, init) => {
+      if (JSON.parse(init.body).tweets[0].id === '1') {
+        requested();
+        return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify({ ok: true, added: 1, duplicates: 0, rejected: [] }))); });
+      }
+      return Promise.resolve(new Response('', { status: 503 }));
+    });
+    const flushing = poolFlush();
+    await started;
+    await poolEnqueue([tweet('2')]);
+    release();
+    await flushing;
+    assert.deepEqual(storageData.poolQueue.map(item => item.id), ['2']);
+  });
+
+  it('saves explicit server rejections separately and continues unaffected work', async () => {
+    await poolSetConfig({ token: 'test-token' });
+    await poolEnqueue([tweet('bad'), tweet('good')]);
+    globalThis.fetch = mock.fn(() => Promise.resolve(new Response(JSON.stringify({ ok: true, added: 1, duplicates: 0, rejected: [{ index: 0, reason: 'author missing' }] }))));
+    await poolFlush();
+    assert.equal(poolStatus().queued, 0);
+    assert.equal(poolStatus().synced, 1);
+    assert.equal(poolStatus().rejected, 1);
+    assert.equal(storageData.poolRejections[0].tweet.id, 'bad');
+    assert.equal(storageData.poolRejections[0].reason, 'author missing');
+    assert.match(poolStatus().lastError, /saved for inspection/);
+  });
+
+  it('keeps an acknowledged batch pending if the dequeue write fails', async () => {
+    await poolSetConfig({ token: 'test-token' });
+    await poolEnqueue([tweet('1')]);
+    const original = structuredClone(storageData.poolQueue);
+    globalThis.fetch = mock.fn(() => {
+      storageError = true;
+      return Promise.resolve(new Response(JSON.stringify({ ok: true, added: 1, duplicates: 0, rejected: [] })));
+    });
+    await assert.rejects(poolFlush(), /storage full/);
+    assert.deepEqual(storageData.poolQueue, original);
+    assert.equal(poolStatus().queued, 1);
+    storageError = false;
+    globalThis.fetch = mock.fn(() => Promise.resolve(new Response(JSON.stringify({ ok: true, added: 0, duplicates: 1, rejected: [] }))));
+    await poolFlush();
+    assert.equal(poolStatus().queued, 0);
+    assert.equal(poolStatus().synced, 1);
+  });
+
+  for (const body of [null, {}, { ok: true, added: 0, duplicates: 0, rejected: [] }, { ok: true, added: 0, duplicates: 0, rejected: [{ index: 2, reason: 'invalid' }] }]) {
+    it(`retains unacknowledged work for response ${JSON.stringify(body)}`, async () => {
+      await poolSetConfig({ token: 'test-token' });
+      await poolEnqueue([tweet('1')]);
+      globalThis.fetch = mock.fn(() => Promise.resolve(new Response(JSON.stringify(body))));
+      await poolFlush();
+      assert.equal(storageData.poolQueue.length, 1);
+      assert.match(poolStatus().lastError, /acknowledge/);
+    });
+  }
 });
 
 describe('pause + config + persistence', () => {
@@ -143,7 +255,7 @@ describe('pause + config + persistence', () => {
     await poolConnect({ token: 'tok', username: 'o' }, 'https://s.hf.space/connect');
     const paused = await poolTogglePause();
     assert.equal(paused, true);
-    poolEnqueue([tweet('1')]);
+    await poolEnqueue([tweet('1')]);
     await poolFlush();
     assert.equal(globalThis.fetch.mock.callCount(), 0);
     await poolTogglePause();

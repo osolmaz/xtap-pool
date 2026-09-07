@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 
-import type { PooledTweet } from "@xtap-pool/shared";
+import { normalizeObservation, type PooledTweet } from "@xtap-pool/shared";
+import { ObservationStore } from "./observation-store.js";
 
 import { ensureEnrichmentTables } from "./enrich-store.js";
 
@@ -51,8 +52,6 @@ type TweetRow = {
   contributors: string;
 };
 
-type ExistingRow = { captured_at: string };
-
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
@@ -84,6 +83,7 @@ export function decodeCursor(cursor: string): Cursor | undefined {
 /** In-process index over the pooled tweets; a cache of the raw Bucket log, rebuilt on boot. */
 export class TweetStore {
   private readonly db: Database.Database;
+  readonly observations: ObservationStore;
 
   constructor(path = ":memory:") {
     this.db = new Database(path);
@@ -124,6 +124,7 @@ export class TweetStore {
       END;
     `);
     ensureEnrichmentTables(this.db);
+    this.observations = new ObservationStore(this.db);
   }
 
   /** Underlying database handle, shared with the enrichment store. */
@@ -133,32 +134,25 @@ export class TweetStore {
 
   /** Clear the tweet index before replaying a complete Bucket snapshot. */
   clearForRebuild(): void {
-    this.db.prepare("DELETE FROM tweets").run();
+    this.db.transaction(() => {
+      this.db.prepare("DELETE FROM tweets").run();
+      this.observations.clearForRebuild();
+    })();
   }
 
-  /** Split a stamped batch into tweets worth storing vs. exact/stale duplicates. */
+  /** Deduplicate logical observations, never all observations of a known post. */
   classify(tweets: readonly PooledTweet[]): ClassifiedBatch {
-    const existingStmt = this.db.prepare(
-      "SELECT captured_at FROM tweets WHERE id = ? AND contributed_by = ?",
-    );
     let skippedDuplicates = 0;
-    const seenInBatch = new Map<string, PooledTweet>();
+    const accepted = new Map<string, PooledTweet>();
     for (const tweet of tweets) {
-      const batchKey = `${tweet.id}\u0000${tweet.contributed_by}`;
-      const inBatch = seenInBatch.get(batchKey);
-      if (inBatch !== undefined) {
-        if (tweet.captured_at > inBatch.captured_at) seenInBatch.set(batchKey, tweet);
+      const id = normalizeObservation(tweet).id;
+      if (accepted.has(id) || this.observations.has(id)) {
         skippedDuplicates += 1;
         continue;
       }
-      const existing = existingStmt.get(tweet.id, tweet.contributed_by) as ExistingRow | undefined;
-      if (existing !== undefined && existing.captured_at >= tweet.captured_at) {
-        skippedDuplicates += 1;
-        continue;
-      }
-      seenInBatch.set(batchKey, tweet);
+      accepted.set(id, tweet);
     }
-    return { accepted: [...seenInBatch.values()], skippedDuplicates };
+    return { accepted: [...accepted.values()], skippedDuplicates };
   }
 
   /** Upsert stamped tweets, keeping the freshest capture per (id, contributor). */
@@ -278,9 +272,9 @@ function toParams(tweet: PooledTweet): Record<string, unknown> {
   return {
     id: tweet.id,
     contributedBy: tweet.contributed_by,
-    capturedAt: tweet.captured_at,
-    pooledAt: tweet.pooled_at,
-    sortTs: createdAt ?? tweet.captured_at,
+    capturedAt: new Date(tweet.captured_at).toISOString(),
+    pooledAt: new Date(tweet.pooled_at).toISOString(),
+    sortTs: new Date(createdAt ?? tweet.captured_at).toISOString(),
     authorUsername: tweet.author.username.toLowerCase(),
     text: tweet.text,
     hasMedia: Array.isArray(media) && media.length > 0 ? 1 : 0,

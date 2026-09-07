@@ -13,7 +13,7 @@ The earlier Our Models work stopped repeated AI processing and made checks cheap
 
 The required result is specific: a harmless source revision change must not cause a complete post download, and a new likes/views observation must not rerun semantic processing. Saving future counts in Our Models alone would leave both historical access and the content-change problem unresolved.
 
-Status: **planned, not implemented**. This documentation task does not change an extension, API, schema, deployed Space, Job, schedule, credential, resource, or spending limit. The Our Models story work remains paused. Existing approved enrichment work remains active.
+Status: **implementation in progress** on `feat/incremental-consumers`. The bounded raw-history audit is complete. Observation normalization, indexed provenance, repeat delivery, and durable browser recovery are under local test. The bounded APIs, source-effect indexes, bootstrap cutover, Our Models integration, and live verification are not complete. No replacement extension, Space, Job, schedule, credential, resource, or spending limit has been deployed by this implementation. Existing approved enrichment work remains active.
 
 ## Ownership and related work
 
@@ -88,6 +88,41 @@ Perform this first, before promising growth measurements or freezing the history
 Store raw audit inputs only in approved private working storage. Track the bounded audit procedure, aggregate counts, snapshot/checksum references, and conclusions in this repository. Do not commit captured text, account-specific browsing history, credentials, or a raw export.
 
 No repeat records means unknown historical growth. Do not fabricate an earlier count of zero. Do not infer metrics from scroller receipts, current totals, or a post's publication date.
+
+### September 7 audit and first implementation slice
+
+The audit used existing local Hugging Face authentication in place. It read only the canonical private raw and index Buckets. The source snapshot was `36f27e68bf5ba7cfa53a6fedd7ba6fa66906113d058a048dd1384e7aa37034aa`; the active manifest named database checksum `2083eaf860cc69d038371eb2e3adf83366411baf21fbcb83e0062d44d3f623e2` and projection contract `2a2814ad4162457c0b8fe6de9cc07e0813f9fffadd3bde21ca46c731cc58de69`.
+
+The selection took seven evenly spaced tweet segments per available UTC day from September 1 through September 6. The pinned snapshot had no September 7 tweet segment. Each selected object passed compressed-size and uncompressed-checksum verification. This was a bounded sample, not a complete history audit.
+
+| Measure                                              |             Observed value |
+| ---------------------------------------------------- | -------------------------: |
+| Selected segments                                    |                         42 |
+| Compressed bytes                                     |                    263,173 |
+| Physical records and distinct raw observation tuples |                      1,196 |
+| Distinct post IDs                                    |                      1,136 |
+| Posts with two distinct observation times            |                         60 |
+| Posts with three observation times                   |                          0 |
+| Repeat pairs from the same contributor               |                         60 |
+| Repeat pairs 1–18 hours apart                        |                         18 |
+| Minimum / median / maximum interval, hours           | 5.8992 / 25.6423 / 25.6427 |
+| Download and first-pass audit time, seconds          |                     33.682 |
+
+All 60 pairs had changed view counts. Likes changed in 40 pairs, replies in 29, and reposts in 16. Two pairs had decreasing reply counts. Among the 18 pairs 1–18 hours apart, nonzero, nondecreasing endpoints were available for likes in 16 pairs, replies in 10, reposts in 8, and views in all 18. This sample supports some historical growth measurements, but does not establish acceleration coverage.
+
+All 1,196 records had numeric values for the four counters. That does not prove that each counter was observed: the old parser replaced absent likes, replies, and reposts with zero, and partially parsed view strings. The sample contains 289 zero likes, 574 zero replies, and 918 zero reposts without a format marker. Their original meaning cannot be recovered from the saved parser output. Historical normalized zero values therefore remain null. Positive historical values retain their raw source reference; the original GraphQL counter was not independently verified.
+
+New parser output marks the metrics object with `format: "exact-v1"`, admits only exact nonnegative safe integers or exact decimal strings, and preserves actual zero separately from null. This marker is excluded from content identity with the other metric fields. It does not change historical raw records.
+
+The checked-in extension already uses passive Chrome Debugger Network capture in `lib/graphql-capture.js`. It does not need a new capture permission or a replacement main-world script for this task. A read-only process check found no local Chrome or Chromium browser, so the installed browser build and live browser canary remain unverified.
+
+The first source slice adds normalized observations, immutable content versions, and physical provenance keyed by segment, operation, logical path, and line position. Server admission keeps delayed and same-batch observations. Exact logical retries remain idempotent. Browser delivery occurs before unique-post export deduplication, and queue admission is saved with sampling state. A full queue leaves staged work pending; it does not discard the oldest observation. Staged responses now survive browser restart and retain their original observation time.
+
+A complete ingest acknowledgment accounts for every submitted observation as accepted, duplicate, or explicitly rejected. The browser saves explicit rejections in a local archive capped at 500 records; it continues valid work without silently dropping rejected data. Queue removal and rejection records are saved together. Archive overflow blocks removal and leaves the pending batch intact.
+
+Local validation of this slice passed `npm run check`: formatting, lint, TypeScript, 597 Vitest tests, 188 extension tests, 180 native Python tests, coverage, and the duplicate-code check. Raw replay tests compare the same physical source references against immediate ingest, including operation and line positions. These are local results, not evidence of deployment or end-to-end publication speed.
+
+These changes alone do not remove the Our Models full read. Source-effect indexing, pinned bounded reads, and incremental website publication remain required before this task is complete.
 
 ## Repeated observations
 

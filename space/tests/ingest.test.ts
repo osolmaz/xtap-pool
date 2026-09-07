@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Mutex, ingestBatch } from "../src/ingest.js";
 import type { IngestDeps } from "../src/ingest.js";
 import { TweetStore } from "../src/store.js";
+import { EnrichStore } from "../src/enrich-store.js";
 import { makeTweet } from "./helpers.js";
 import { FakeLog } from "./fake-log.js";
 
@@ -76,6 +77,60 @@ describe("ingestBatch", () => {
     const again = await ingestBatch(deps, "osolmaz", { tweets: [makeTweet()] });
     expect(again).toMatchObject({ ok: true, added: 0, duplicates: 1 });
     expect(log.commits).toHaveLength(1);
+  });
+
+  it("rejects a future observation without preventing a valid delayed observation", async () => {
+    const outcome = await ingestBatch(deps, "osolmaz", {
+      tweets: [
+        makeTweet({ captured_at: "2026-07-06T12:05:00.001Z" }),
+        makeTweet({ captured_at: "2026-07-01T00:00:00Z" }),
+      ],
+    });
+    expect(outcome).toMatchObject({
+      ok: true,
+      added: 1,
+      rejected: [{ index: 0, reason: "captured_at is more than five minutes in the future" }],
+    });
+    expect(
+      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
+    ).toEqual({ count: 1 });
+  });
+
+  it("keeps all observations in a batch and admits a delayed older capture", async () => {
+    const first = makeTweet({ metrics: { likes: 1 } });
+    const second = makeTweet({ captured_at: "2026-05-21T09:00:00Z", metrics: { likes: 10 } });
+    expect(await ingestBatch(deps, "osolmaz", { tweets: [first, second] })).toMatchObject({
+      added: 2,
+      duplicates: 0,
+    });
+    expect(
+      await ingestBatch(deps, "osolmaz", {
+        tweets: [makeTweet({ captured_at: "2026-05-21T00:00:00Z", metrics: { likes: 2 } })],
+      }),
+    ).toMatchObject({ added: 1 });
+    expect(deps.store.count()).toBe(1);
+    expect(
+      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
+    ).toEqual({ count: 3 });
+    expect(deps.store.database.prepare("SELECT captured_at FROM tweets").get()).toEqual({
+      captured_at: "2026-05-21T09:00:00.000Z",
+    });
+  });
+
+  it("rolls back all local projections together after a durable raw write", async () => {
+    const enrich = new EnrichStore(deps.store.database, 1);
+    const failure = vi.spyOn(enrich, "registerTweets").mockImplementation(() => {
+      throw new Error("local apply failed");
+    });
+    await expect(
+      ingestBatch({ ...deps, enrich }, "osolmaz", { tweets: [makeTweet()] }),
+    ).rejects.toThrow("local apply failed");
+    expect(log.commits).toHaveLength(1);
+    expect(deps.store.count()).toBe(0);
+    expect(
+      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
+    ).toEqual({ count: 0 });
+    failure.mockRestore();
   });
 
   it("fails closed when the hub commit fails: nothing persisted locally", async () => {

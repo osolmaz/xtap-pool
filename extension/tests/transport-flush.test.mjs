@@ -193,12 +193,12 @@ describe('daemon rejection handling', () => {
 // ---------------------------------------------------------------------------
 
 describe('image backfill accounting', () => {
-  it('posts backfill duplicates without incrementing capture counters', () => {
+  it('posts backfill duplicates without incrementing capture counters', async () => {
     const env = setup();
     env.imageDownload = true;
     env.seenIds = new Set(['1']);
 
-    env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
+    await env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
 
     assert.equal(env.buffer.length, 1, 'duplicate photo tweet must still reach the daemon');
     assert.equal(env.buffer[0].id, '1');
@@ -224,7 +224,7 @@ describe('image backfill accounting', () => {
       return okResponse({ ok: true });
     };
 
-    env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
+    await env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
     await env.flush();
 
     assert.equal(posted.tweets.length, 1);
@@ -232,13 +232,13 @@ describe('image backfill accounting', () => {
     assert.equal(posted.tweets[0].__xtap_image_backfill, undefined);
   });
 
-  it('drops image backfill before real buffered tweets when the buffer is full', () => {
+  it('drops image backfill before real buffered tweets when the buffer is full', async () => {
     const env = setup();
     env.imageDownload = true;
     env.seenIds = new Set(['1']);
     env.buffer = Array.from({ length: 2000 }, (_, i) => ({ id: `real-${i}`, text: 'real' }));
 
-    env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
+    await env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
 
     assert.equal(env.buffer.length, 2000);
     assert.equal(env.buffer[0].id, 'real-0');
@@ -248,11 +248,11 @@ describe('image backfill accounting', () => {
     assert.ok(env.traceEvents.some(e => e.status === 'BUFFER_OVERFLOW'));
   });
 
-  it('counts fresh captures while image download is enabled', () => {
+  it('counts fresh captures while image download is enabled', async () => {
     const env = setup();
     env.imageDownload = true;
 
-    env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
+    await env.enqueueTweets([photoTweet('1')], 'HomeTimeline');
 
     assert.equal(env.buffer.length, 1);
     assert.equal(env.sessionCount, 1);
@@ -262,12 +262,12 @@ describe('image backfill accounting', () => {
     assert.equal(event.status, 'ACCEPTED');
   });
 
-  it('lets one article duplicate enrich a previous non-article capture', () => {
+  it('lets one article duplicate enrich a previous non-article capture', async () => {
     const env = setup();
     env.imageDownload = true;
     env.seenIds = new Set(['1']);
 
-    env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
+    await env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
 
     assert.equal(env.buffer.length, 1);
     assert.equal(env.sessionCount, 1);
@@ -277,13 +277,13 @@ describe('image backfill accounting', () => {
     assert.equal(event.status, 'ACCEPTED');
   });
 
-  it('deduplicates repeated full article captures after the enrichment write', () => {
+  it('deduplicates repeated full article captures after the enrichment write', async () => {
     const env = setup();
     env.imageDownload = true;
     env.seenIds = new Set(['1']);
 
-    env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
-    env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
+    await env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
+    await env.enqueueTweets([{ ...photoTweet('1'), is_article: true }], 'TweetResultByRestId');
 
     assert.equal(env.buffer.length, 1);
     assert.equal(env.sessionCount, 1);
@@ -574,9 +574,9 @@ describe('debug log buffering', () => {
 // ---------------------------------------------------------------------------
 
 describe('flush alarm', () => {
-  it('schedules an alarm when tweets are buffered', () => {
+  it('schedules an alarm when tweets are buffered', async () => {
     const env = setup();
-    env.enqueueTweets([{ id: '1', text: 'one' }], 'test');
+    await env.enqueueTweets([{ id: '1', text: 'one' }], 'test');
     assert.ok(env.alarms.created.some(a => a.name === 'xtap-flush'),
       'buffered tweets need a chrome.alarms backstop — the setTimeout flush '
       + 'timer dies with the service worker');
