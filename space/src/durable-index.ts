@@ -15,6 +15,7 @@ import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
 import { ConsumerIndexState, ConsumerBootstrapRequired } from "./consumer-index-state.js";
 import type { ConsumerIndexBoundary } from "./consumer-index-state.js";
+import { IndexBootstrapState } from "./index-bootstrap-state.js";
 
 const INDEX_SCHEMA_VERSION = 1;
 const CURRENT_MANIFEST_KEY = "index/current.json";
@@ -127,6 +128,7 @@ export type DurableIndexOptions = {
   sourceReplayConcurrency?: number;
   reuseVerifiedDatabase?: boolean;
   verifiedBasePath?: string;
+  bootstrapTarget?: string;
   publicationBoundary?: (
     state: "uploaded" | "verified" | "published",
     manifest: DurableIndexManifest,
@@ -158,6 +160,7 @@ export class DurableIndex {
   readonly store: TweetStore;
   readonly enrichStore: EnrichStore;
   private readonly consumerState: ConsumerIndexState;
+  private readonly bootstrapState: IndexBootstrapState;
 
   constructor(
     private readonly options: DurableIndexOptions,
@@ -166,6 +169,7 @@ export class DurableIndex {
     enrichStore: EnrichStore,
     private publishedKeys: string[],
   ) {
+    this.bootstrapState = new IndexBootstrapState(store.database);
     this.store = store;
     this.enrichStore = enrichStore;
     this.consumerState = new ConsumerIndexState(store.database, options.contractHash);
@@ -357,6 +361,8 @@ export class DurableIndex {
         contract_hash: options.contractHash,
       });
       index.consumerState.commit(revision, index.enrichStore, true);
+      if (options.bootstrapTarget !== undefined)
+        index.bootstrapState.begin(options.bootstrapTarget);
     })();
     return index;
   }
@@ -409,7 +415,22 @@ export class DurableIndex {
     };
   }
 
+  beginBootstrap(source: string): void {
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new ConsumerBootstrapRequired();
+    this.consumerState.require(metadata.raw_snapshot_revision);
+    this.bootstrapState.begin(source);
+  }
+
+  finishBootstrap(source: string): void {
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new ConsumerBootstrapRequired();
+    this.consumerState.require(metadata.raw_snapshot_revision);
+    this.bootstrapState.finish(source, metadata.raw_snapshot_revision);
+  }
+
   consumerBoundary(): ConsumerIndexBoundary {
+    this.bootstrapState.requireComplete();
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new ConsumerBootstrapRequired();
     return this.consumerState.require(metadata.raw_snapshot_revision);
@@ -582,6 +603,7 @@ export class DurableIndex {
     }
     const metadata = readMetadata(this.store.database);
     if (metadata === undefined) throw new Error("durable index metadata is missing");
+    await this.assertPredecessorIncluded(baselineManifest, metadata.raw_snapshot_revision);
     assertDatabaseIntegrity(this.store.database);
     const checkpoint = await this.options.log.storeSnapshot({
       schema_version: 1,
@@ -651,6 +673,20 @@ export class DurableIndex {
       return manifest;
     } finally {
       await Promise.all([rm(publishPath, { force: true }), rm(verifyPath, { force: true })]);
+    }
+  }
+
+  private async assertPredecessorIncluded(raw: string | undefined, source: string): Promise<void> {
+    if (raw === undefined) return;
+    const predecessor = parseManifest(raw, this.options);
+    if (predecessor.source.revision === source) return;
+    const previous = await this.options.log.loadSnapshot(predecessor.source.revision);
+    const candidate = sourceRows(this.store.database);
+    for (const file of previous.files) {
+      const row = candidate.get(file.key);
+      if (row === undefined)
+        throw new Error("candidate index omits previously published source segments");
+      assertSameSourceFile(row, file);
     }
   }
 

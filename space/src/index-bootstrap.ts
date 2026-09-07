@@ -30,15 +30,16 @@ export async function prepareIndexBootstrap(options: BootstrapOptions): Promise<
 }> {
   const limits = bounds.parse(options);
   const snapshot = await options.log.loadSnapshot(options.sourceRevision);
-  await pinTarget(options.databasePath, snapshot, options.sourceRevision);
+  await verifyPinnedTarget(options.databasePath, options.sourceRevision);
   const index = existsSync(options.databasePath)
     ? DurableIndex.openLocal(options)
-    : await DurableIndex.createEmpty(options);
+    : await DurableIndex.createEmpty({ ...options, bootstrapTarget: options.sourceRevision });
   try {
-    index.consumerBoundary();
     const ordered = [...snapshot.files].sort((a, b) => compareSegmentKeys(a.key, b.key));
     const applied = index.sourceSnapshot();
     const completed = assertPrefix(applied, ordered);
+    index.beginBootstrap(options.sourceRevision);
+    await pinTarget(options.databasePath, snapshot, options.sourceRevision);
     let position = completed;
     const stop = Math.min(ordered.length, completed + limits.maxSegments);
     while (position < stop && !options.signal?.aborted) {
@@ -56,7 +57,10 @@ export async function prepareIndexBootstrap(options: BootstrapOptions): Promise<
       });
     }
     const complete = position === ordered.length;
-    if (complete) index.verify();
+    if (complete) {
+      index.finishBootstrap(options.sourceRevision);
+      index.verify();
+    }
     return {
       index,
       complete,
@@ -74,7 +78,12 @@ async function pinTarget(path: string, snapshot: BucketSnapshot, revision: strin
   const targetPath = `${path}.source.json`;
   await mkdir(dirname(targetPath), { recursive: true });
   if (!existsSync(targetPath)) await writeExclusiveTarget(targetPath, bytes);
-  if (sha256(await readFile(targetPath)) !== revision)
+  await verifyPinnedTarget(path, revision);
+}
+
+async function verifyPinnedTarget(path: string, revision: string): Promise<void> {
+  const targetPath = `${path}.source.json`;
+  if (existsSync(targetPath) && sha256(await readFile(targetPath)) !== revision)
     throw new Error(
       "bootstrap target changed; use a separate working directory for another source",
     );

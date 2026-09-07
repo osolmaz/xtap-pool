@@ -89,6 +89,13 @@ describe("DurableIndex", () => {
     const partial = await prepareIndexBootstrap({ ...config, maxSegments: 1 });
     expect(partial.complete).toBe(false);
     expect(partial.progress).toMatchObject({ completed: 1, total: 3 });
+    expect(() => partial.index.consumerBoundary()).toThrow("bootstrap is incomplete");
+    await expect(partial.index.publish()).rejects.toThrow("bootstrap is incomplete");
+    const copied = options("copied-partial");
+    await partial.index.store.database.backup(copied.databasePath);
+    const recoveredCopy = DurableIndex.openLocal(copied);
+    expect(() => recoveredCopy.consumerBoundary()).toThrow("bootstrap is incomplete");
+    recoveredCopy.close();
     const appliedKey = partial.index.sourceSnapshot().files[0]!.key;
     partial.index.close();
     await appendTweet("4");
@@ -179,6 +186,19 @@ describe("DurableIndex", () => {
     expect(advance.filesChanged).toBe(1);
     expect(advance.counts.tweets).toBe(2);
     restored.close();
+  });
+
+  it("cannot replace the live index with a source that omits published segments", async () => {
+    await appendTweet("1");
+    const old = await DurableIndex.bootstrap(options("old-source"));
+    await old.publish();
+    await appendTweet("2");
+    const current = await DurableIndex.bootstrap(options("current-source"));
+    const published = await current.publish();
+    current.close();
+    await expect(old.publish()).rejects.toThrow("omits previously published source");
+    expect(JSON.parse(bucket.files.get("index/current.json")!.toString("utf8"))).toEqual(published);
+    old.close();
   });
 
   it("reports restore, replay, build, upload, verify, and manifest progress", async () => {
