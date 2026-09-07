@@ -98,6 +98,26 @@ Errors use `{"error":{"code":"...","message":"...","recovery":{}}}`. The recover
 | 502         | Source/context read or verification failed. Retry the same cursor; persistent failures need operator repair.              |
 | 503         | Source projection unavailable, database replaced, worker failed, or deadline exceeded. Retry the same cursor.             |
 
+## Coverage maintenance
+
+Idle changes polls still pin a fresh immutable context under the existing mutex. The source, current metadata, context lease, and history window are refreshed. Every page still checks authorization, current privacy, database identity, and exact pinned source containment. HTTP response shapes are unchanged.
+
+`consumer-coverage-update.ts` selects one of three internal coverage paths:
+
+- **Reuse:** the base has the same selection, contract, projection, taxonomy version, and approval membership for its selected free label. Exact source-set differences and the existing `source_segments` counts and source-effect indexes show no relevant post or new result effects. Identical sources, bookkeeping writes, ignored/replayed attempts, duplicate results, and unrelated author units retain both clocks without reading post bodies. Attempt replay uses the existing queue rules: completed work stays done, and retry/blocked states remain incomplete. There is no second queue projection.
+- **Metrics:** source-index proofs compare affected posts' latest contributor-copy hash sets, the selected content hash, and the start of the content run at the base with current `unit_members` facts. A same-time hash conflict uses the existing privacy tie-break for that affected post. Once the entire delta passes, observation coverage reads only affected posts and their units' privacy/eligibility facts, in batches of at most 100 post IDs. It retains the prior maximum and includes any later permitted observation. Delayed samples cannot move the maximum backwards. No unrelated cohort body is read.
+- **Semantic recalculation:** new selected results, changed content or membership, a corrected content-run clock, a changed taxonomy version, or a selected free-label approval change require a current selected-coverage calculation. This can read the selected cohort. It computes the new maximum directly, so withdrawal of the previous maximum can lower it or return null. Private, unselected, pending, and currently retweeted post samples do not advance observation coverage. This is a coverage calculation, not a fallback content download.
+
+Taxonomy descriptions and unrelated approval changes can leave coverage unchanged while still emitting the required metadata change. Registry revision numbers alone do not determine either decision. The page privacy and fresh-observation queries use fixed join order from their bounded source candidates; SQLite cannot start by evaluating privacy on the whole content table.
+
+There is no new persistence, table, index, projection identity, or classifier change. `eligibleUnits` in `enrich-store.ts` gains only an optional internal unit-ID filter for the affected-post query. Keep that filter and the source-driven join order when combining later parent changes. The running source-index preparation does not need a restart or rebuild.
+
+The regression fixture measures the real forked worker. Test-only wrappers count evaluated JSON body predicates and returned post-body fields, including reads outside the coverage operation. The bootstrap is a positive control for the counter. With 250 posts, twenty identical-source polls and twenty harmless-revision comparisons read **zero post bodies**; all 40 coverage evaluations use the reuse path. This includes a fresh worker process and context-store restart, blocked/dispatched attempt replay, and an unpublished registry candidate. With 260 posts, ten batches of ten metric observations update ten posts: only those ten post IDs are read; the 250 unrelated post IDs are not read. The clocks are checked against an independent full-coverage calculation. Additional tests cover delayed samples, corrected clocks, mixed edits and counters, pending-to-eligible changes, private/retweet maximum withdrawal, contributor winner changes, and actual metadata changes.
+
+These are small-fixture read counts, not a completed production-size performance check. They measure logical body access, not SQLite cache-page I/O. The parent's pinned real-source canary must still measure warm latency, CPU, source I/O, and memory at the required scale.
+
+Local commands for this branch are `npm run build --workspace shared`, `npm run build --workspace space`, `npx --no-install vitest run space/tests/consumer-coverage-update.test.ts`, `UV_OFFLINE=1 npm run check`, and `npm_config_offline=true npx --no-install --package=@simpledoc/simpledoc simpledoc check`. Build shared and space before tests/coverage: this branch predates the parent's build hooks. Keep the parent's hooks, counts-only ingest acknowledgment, extension version 0.26.0, and bootstrap changes during integration.
+
 ## Privacy reconciliation
 
 A withdrawal after an earlier accepted page stops that sequence with HTTP 409:
@@ -152,7 +172,7 @@ The normal page limits and wall deadline apply. Signed cursors are limited to 8 
 
 ## Remaining live gates
 
-Local checks passed: `npm run check` ran 737 Vitest tests in 77 files, 189 extension tests, and 180 native extension tests. This includes 13 paged privacy recovery tests and 14 post-hash contract tests. Coverage was 87.17% lines/statements, 85.78% branches, and 91.47% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
+Local checks passed: `npm run check` ran 748 Vitest tests in 78 files, 189 extension tests, and 180 native extension tests. This includes 11 coverage-maintenance tests, 13 paged privacy recovery tests, and 14 post-hash contract tests. Coverage was 87.29% lines/statements, 85.94% branches, and 91.53% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
 
 ## Parent integration
 

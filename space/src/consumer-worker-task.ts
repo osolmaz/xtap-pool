@@ -44,6 +44,7 @@ export const workerResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("reconcile"), page: reconciliationPageSchema }),
   z.object({
     kind: z.literal("coverage"),
+    mode: z.enum(["reuse", "metrics", "semantic"]),
     completeThrough: z.string().nullable(),
     observationsThrough: z.string().nullable(),
   }),

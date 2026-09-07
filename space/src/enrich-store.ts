@@ -1544,6 +1544,7 @@ type UnitSelection = {
 };
 
 type EligibleUnitOptions = UnitSelection & {
+  unitIds?: readonly string[];
   taxonomyVersion: number;
   contractHash: string;
 };
@@ -1554,11 +1555,16 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
   const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ? AND e.contract_hash = ?
             JOIN enrich_queue q ON q.unit_id = um.unit_id
               AND q.taxonomy_version = ? AND q.status = 'done'`;
-  const selection = `${cutoffWhere(options.cutoff)}${publicationWhere(
+  const unitWhere =
+    options.unitIds === undefined ? "" : " AND um.unit_id IN (SELECT value FROM json_each(?))";
+  const selection = `${unitWhere}${cutoffWhere(options.cutoff)}${publicationWhere(
     options.publication,
     "um.unit_id",
   )}${authorWhere(options.authorIds, "um.unit_id")}`;
-  const cutoffParams = options.cutoff !== undefined ? [options.cutoff] : [];
+  const cutoffParams = [
+    ...(options.unitIds === undefined ? [] : [JSON.stringify(options.unitIds)]),
+    ...(options.cutoff !== undefined ? [options.cutoff] : []),
+  ];
   const authorParams = options.authorIds ?? [];
   if (labels.length === 0) {
     return {
