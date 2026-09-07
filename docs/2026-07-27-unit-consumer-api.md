@@ -6,9 +6,11 @@ date: "2026-07-27"
 
 # Unit consumer API
 
+The [incremental consumer and engagement-history plan](2026-09-07-incremental-consumer-and-engagement-history-plan.md) records the planned replacement for the normal full-read and boot-revision pagination procedures below. It includes repeated-observation delivery, historical counts, removals, and stable source cursors. These changes are not implemented yet; this document continues to describe the existing consumer path.
+
 xtap-pool is the semantic source of truth for downstream applications. Consumers read enriched conversation-author units instead of scanning the private dataset or rebuilding labels, threads, free-label vocabulary, and graph edges.
 
-This document describes the target consumer contract in [Labels and Free Labels Implementation Plan](labels-and-free-labels-implementation-plan.md) and [Durable Enrichment Implementation Plan](durable-enrichment-implementation-plan.md). Production keeps serving the previous contract until the replacement reader and worker are complete and the migration recovery canary passes.
+This document describes the target consumer contract in [Labels and Free Labels Implementation Plan](2026-07-28-labels-and-free-labels-implementation-plan.md) and [Durable Enrichment Implementation Plan](2026-07-28-durable-enrichment-implementation-plan.md). Production keeps serving the previous contract until the replacement reader and worker are complete and the migration recovery canary passes.
 
 ## Service accounts
 
