@@ -13,7 +13,7 @@ The earlier Our Models work stopped repeated AI processing and made checks cheap
 
 The required result is specific: a harmless source revision change must not cause a complete post download, and a new likes/views observation must not rerun semantic processing. Saving future counts in Our Models alone would leave both historical access and the content-change problem unresolved.
 
-Status: **implementation in progress** on `feat/incremental-consumers`. The bounded raw-history audit, repeat delivery, indexed source effects, historical point reads, content clocks, bootstrap readiness, signed cursors, bounded change pages, and private history reads pass local tests. The HTTP APIs, bootstrap cutover, Our Models integration, and live verification are not complete. No replacement extension, Space, Job, schedule, credential, resource, or spending limit has been deployed by this implementation. Existing approved enrichment work remains active.
+Status: **implementation in progress** on `feat/incremental-consumers`. The bounded raw-history audit, repeat delivery, indexed source effects, historical point reads, content clocks, bootstrap readiness, signed cursors, and bounded HTTP change/history reads pass local tests. The HTTP contract also includes source-authored post hashes and paged privacy removals that preserve unrelated consumer data. Production bootstrap cutover, Our Models integration, and live verification are not complete. No replacement extension, Space, Job, schedule, credential, resource, or spending limit has been deployed by this implementation. A read-only check on September 7 confirmed that the canonical six-hour enrichment and five-minute publication schedules remain active.
 
 ## Ownership and related work
 
@@ -130,7 +130,9 @@ A separate consumer projection hash binds the derived index rules without changi
 
 These slices passed `npm run check`: 635 Vitest tests, 189 extension tests, 180 native Python tests, formatting, lint, TypeScript, coverage, and the duplicate-code check. The overall line coverage was 86.11%. These are local checks, not live throughput measurements.
 
-These changes alone do not remove the Our Models full read. The bounded HTTP contract, explicit production bootstrap, and incremental website publication remain required before this task is complete.
+The combined HTTP and bootstrap implementation subsequently passed `npm run check`: 744 Vitest tests in 77 files, 189 extension tests, and 180 native Python tests. Line coverage was 87.92%; the duplicate-code check found zero candidates. `npx --no-install @simpledoc/simpledoc check` and `git diff --check` passed. The exact consumer contract and required transaction rules are in the [HTTP handoff](2026-09-07-consumer-http-handoff.md). These checks include bounded native-query cancellation, pinned paging, targeted privacy recovery, and post-body/hash agreement. They are not deployment or live performance evidence.
+
+These changes alone do not remove the Our Models full read. Explicit production bootstrap and incremental website publication remain required before this task is complete.
 
 ## Repeated observations
 
