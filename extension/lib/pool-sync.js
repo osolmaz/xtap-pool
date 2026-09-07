@@ -166,7 +166,7 @@ async function sendBatch(batch) {
     return retryLater(`pool responded ${response.status}`);
   }
   const body = await response.json().catch(() => null);
-  if (!body || body.ok !== true || !Number.isSafeInteger(body.added) || body.added < 0 ||
+  if (!body || !Number.isSafeInteger(body.added) || body.added < 0 ||
       !Number.isSafeInteger(body.duplicates) || body.duplicates < 0 ||
       !Array.isArray(body.rejected) ||
       !body.rejected.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < batch.length && typeof item.reason === 'string' && item.reason.length > 0) ||

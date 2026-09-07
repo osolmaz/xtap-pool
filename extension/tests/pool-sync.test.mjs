@@ -43,7 +43,7 @@ function tweet(id) {
 
 function okFetch() {
   return mock.fn((_url, init) =>
-    Promise.resolve(new Response(JSON.stringify({ ok: true, added: JSON.parse(init.body).tweets.length, duplicates: 0, rejected: [] }), { status: 200 })),
+    Promise.resolve(new Response(JSON.stringify({ added: JSON.parse(init.body).tweets.length, duplicates: 0, rejected: [] }), { status: 200 })),
   );
 }
 
@@ -100,7 +100,7 @@ describe('poolEnqueue + poolFlush', () => {
     assert.equal(poolStatus().queued, 1);
   });
 
-  it('sends queued tweets with the bearer token and drains the queue', async () => {
+  it('sends queued tweets and drains the queue with the Space counts-only acknowledgement', async () => {
     globalThis.fetch = okFetch();
     await poolSetConfig({ url: 'https://s.hf.space' });
     await poolConnect({ token: 'tok', username: 'osolmaz' }, 'https://s.hf.space/connect');
