@@ -18,7 +18,7 @@ This is the HTTP handoff for the [incremental consumer plan](2026-09-07-incremen
 | Start or continue changes | `/api/changes?after=<cursor>`                                                           | `units:read`, `taxonomy:read`, `observations:read` |
 | Start history             | `/api/observations?at=<fully-consumed-cursor>&post_ids=123,456&since=<UTC>&until=<UTC>` | `units:read`, `observations:read`                  |
 | Reconcile privacy         | `/api/reconcile?cursor=<recovery-cursor>`                                               | `units:read`                                       |
-| Continue history          | `/api/observations?cursor=<next_cursor>`                                                | Same                                               |
+| Continue history          | `/api/observations?cursor=<next_cursor>`                                                | `units:read`, `observations:read`                  |
 
 Every request checks current authorization. An authorized member session also permits these reads. Existing credentials gain no scopes. An operator must issue an explicit grant for `observations:read`. Default grants stay unchanged. Explorer whole-unit browsing uses `/api/explorer/units` and requires a member session; it is not a machine recovery route. The explorer's separate `/api/tweets` route is unchanged.
 
@@ -45,6 +45,30 @@ All bootstrap and change responses have exactly these fields:
 The two coverage timestamps are null or UTC. Observation freshness does not promise complete observation coverage. The source identifies the exact raw object set, including late arrivals.
 
 Changes are the existing `metadata`, `unit_upsert`, `unit_remove`, and `observation` variants in `consumer-page.ts`. Bootstrap starts with a metadata-only page, even for an empty selection. Continue that page to receive upserts or the empty final page. The signed `metadata_sent` field prevents repeats at `limit=1`. Changes emit metadata only when the frozen taxonomy or approved registry state differs. Registry counters and coverage movement alone do not cause metadata changes.
+
+Each `unit_upsert` has exactly `type`, `content_hash`, `post_content_hashes`, and `unit`:
+
+```json
+{
+  "type": "unit_upsert",
+  "content_hash": "<canonical unit SHA-256>",
+  "post_content_hashes": [
+    "<canonical post SHA-256 for unit.posts[0]>",
+    "<canonical post SHA-256 for unit.posts[1]>"
+  ],
+  "unit": {
+    "id": "...",
+    "posts": ["<post body 0>", "<post body 1>"],
+    "contributors": ["..."],
+    "preset_labels": [],
+    "free_labels": []
+  }
+}
+```
+
+The example abbreviates post bodies. `post_content_hashes` is a required array of 64-character lowercase hex SHA-256 strings, with exactly one entry per `unit.posts` entry, in the same order. Entry `i` equals the shared source `contentHash(unit.posts[i])` and the `content_hash` from `normalizeObservation` for that exact body. It is present even when the post has no observations in the advertised hot window. The API validates each hash against the returned body; the historical reader also checks the reconstructed body against its stored source hash. No client normalization or observation lookup is required.
+
+Pair each body with its hash before indexing or sorting. Same-ID contributor copies do not collapse into a hash map: if multiple copies are returned, each has its own aligned entry. The current unit reader selects one body per post ID with the existing deterministic observed-time, privacy, content-hash, and contributor order. The upsert hash identifies that selected body, not an arbitrary other contributor's copy or all past versions. Observations can identify other retained versions; compare their hash with the saved body's supplied hash. Sample counters, capture/receipt times, attribution, transport metadata, and follower count do not change the post content hash. Content edits do. The new array is outside the post bodies and does not change either canonical hashing rule. It is included in complete-item and final response byte limits.
 
 Empty pages can have `has_more=true`. Continue until false. The final cursor is an idle cursor for the fully consumed target. Commit each page and cursor together. Do not poll changes or start history with an unfinished bootstrap cursor. Bootstrap does not deliver observations; use the final cursor for initial bounded history. Activation and fresh change phases can deliver the same logical observation. Deduplicate by observation `id`.
 
@@ -128,10 +152,10 @@ The normal page limits and wall deadline apply. Signed cursors are limited to 8 
 
 ## Remaining live gates
 
-Local checks passed: `npm run check` ran 723 Vitest tests in 76 files, 189 extension tests, and 180 native extension tests. This includes 13 paged privacy recovery tests. Coverage was 87.13% lines/statements, 85.79% branches, and 91.39% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
+Local checks passed: `npm run check` ran 737 Vitest tests in 77 files, 189 extension tests, and 180 native extension tests. This includes 13 paged privacy recovery tests and 14 post-hash contract tests. Coverage was 87.17% lines/statements, 85.78% branches, and 91.47% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, performance measurements, and website publication proof remain pending. No production completion is claimed.
 
 ## Parent integration
 
-This branch changes no classifier model, prompt, or semantic contract. It does not change `index-bootstrap.ts`, `index-command.ts`, command entry points, or the setup wizard. In `durable-index.ts`, it adds only the optional fetch adapter to `createDurableIndexBucketClient`; in `bucket-log.ts`, it adds that adapter to the existing raw Bucket clients. Keep those options and their read/write/list propagation when merging the parent's resumable CPU bootstrap and tail verification work. Preserve the parent's `compareSegmentKeys` export. No HTTP path publishes `index/current.json`. The bounded engine in `space/src/consumer-changes.ts` now accepts an optional applied privacy context to repair same-hash restoration. Preserve that argument, the cursor privacy fields in `consumer-cursor.ts`, and worker source-containment checks when combining later core changes. No source-effect table or classifier contract changed.
+This branch changes no classifier model, prompt, or semantic contract. It does not change `index-bootstrap.ts`, `index-command.ts`, command entry points, or the setup wizard. In `durable-index.ts`, it adds only the optional fetch adapter to `createDurableIndexBucketClient`; in `bucket-log.ts`, it adds that adapter to the existing raw Bucket clients. Keep those options and their read/write/list propagation when merging the parent's resumable CPU bootstrap and tail verification work. Preserve the parent's `compareSegmentKeys` export. No HTTP path publishes `index/current.json`. The bounded engine in `space/src/consumer-changes.ts` now accepts an optional applied privacy context to repair same-hash restoration. Preserve that argument, the cursor privacy fields in `consumer-cursor.ts`, and worker source-containment checks when combining later core changes. Keep the per-post hash field in `consumer-page.ts` and the exact source-hash check in `historical-unit-reader.ts` when combining later core changes. No source-effect table or classifier contract changed.
 
 The requested documentation command is `npx --no-install @simpledoc/simpledoc check`. In this local npm installation, that form returned exit 127 (`@simpledoc/simpledoc: not found`). The same scoped checker, version 0.1.6, passed with `npx --no-install --package=@simpledoc/simpledoc simpledoc check`. No untracked generated `index.html` was present. The unscoped npm package is unrelated.
