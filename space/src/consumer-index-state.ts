@@ -38,8 +38,10 @@ const countsSchema = z.object({
 });
 export type ConsumerIndexBoundary = z.infer<typeof stateSchema>;
 export class ConsumerBootstrapRequired extends Error {
-  constructor() {
-    super("consumer history projection is unavailable; explicit index bootstrap is required");
+  constructor(
+    message = "consumer history projection is unavailable; explicit index bootstrap is required",
+  ) {
+    super(message);
   }
 }
 
