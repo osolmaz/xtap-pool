@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 
 import { normalizeObservation, type PooledTweet } from "@xtap-pool/shared";
 import { ObservationStore } from "./observation-store.js";
+import { SourceEffectStore } from "./source-effect-store.js";
 
 import { ensureEnrichmentTables } from "./enrich-store.js";
 
@@ -84,6 +85,7 @@ export function decodeCursor(cursor: string): Cursor | undefined {
 export class TweetStore {
   private readonly db: Database.Database;
   readonly observations: ObservationStore;
+  readonly sourceEffects: SourceEffectStore;
 
   constructor(path = ":memory:") {
     this.db = new Database(path);
@@ -125,6 +127,7 @@ export class TweetStore {
     `);
     ensureEnrichmentTables(this.db);
     this.observations = new ObservationStore(this.db);
+    this.sourceEffects = new SourceEffectStore(this.db);
   }
 
   /** Underlying database handle, shared with the enrichment store. */
@@ -136,6 +139,7 @@ export class TweetStore {
   clearForRebuild(): void {
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM tweets").run();
+      this.sourceEffects.clearForRebuild();
       this.observations.clearForRebuild();
     })();
   }

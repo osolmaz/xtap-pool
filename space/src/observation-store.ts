@@ -132,16 +132,23 @@ export class ObservationStore {
         JSON.stringify(observation),
       );
   }
-  recordBatch(tweets: readonly PooledTweet[], segmentKey: string): void {
+  recordBatch(
+    tweets: readonly PooledTweet[],
+    segmentKey: string,
+  ): { tweet: PooledTweet; source: ObservationSource }[] {
+    const recorded: { tweet: PooledTweet; source: ObservationSource }[] = [];
     const positions = new Map<string, { operation: number; position: number }>();
     this.database.transaction(() => {
       for (const tweet of tweets) {
         const path = datasetPathFor(tweet.contributed_by, tweet.captured_at);
         const group = positions.get(path) ?? { operation: positions.size, position: 0 };
-        this.record(tweet, { segmentKey, path, ...group });
+        const source = { segmentKey, path, ...group };
+        this.record(tweet, source);
+        recorded.push({ tweet, source });
         positions.set(path, { ...group, position: group.position + 1 });
       }
     })();
+    return recorded;
   }
   clearForRebuild(): void {
     this.database.transaction(() => {

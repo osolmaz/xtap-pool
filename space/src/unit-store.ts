@@ -7,6 +7,8 @@ import type { EnrichedUnit, LabelAssignment, PooledTweet, UnitPage } from "@xtap
 import { readVisibleAssignments } from "./label-visibility.js";
 
 export type UnitQuery = {
+  /** Internal bounded lookup; public query parsing does not grant a new filter. */
+  unitIds?: readonly string[];
   contributors?: readonly string[];
   author?: string;
   authorIds?: readonly string[];
@@ -264,6 +266,7 @@ function ensureResultRevision(db: Database.Database): void {
 
 function buildFilters(query: UnitQuery): { whereSql: string; params: unknown[] } {
   const filters = [
+    ...unitFilters(query.unitIds),
     ...identityFilters(query),
     ...rangeFilters(query),
     ...labelFilters(query),
@@ -274,6 +277,16 @@ function buildFilters(query: UnitQuery): { whereSql: string; params: unknown[] }
     whereSql: ["1=1", ...filters.map((filter) => filter.sql)].join(" AND "),
     params: filters.flatMap((filter) => [...filter.values]),
   };
+}
+
+function unitFilters(ids: readonly string[] | undefined): Filter[] {
+  if (ids === undefined) return [];
+  return [
+    {
+      sql: ids.length === 0 ? "0=1" : `um.unit_id IN (${ids.map(() => "?").join(",")})`,
+      values: ids,
+    },
+  ];
 }
 
 function identityFilters(query: UnitQuery): Filter[] {

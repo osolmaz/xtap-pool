@@ -101,6 +101,7 @@ describe("exact source observations", () => {
       metrics: { likes: 400 },
       captured_at: "2026-09-06T15:00:00.000Z",
       source_endpoint: "another-response",
+      author: { id: "12", username: "alice", follower_count: 999 },
     });
     expect(contentHash(later)).toBe(contentHash(first));
     expect(computeInputHashFromTweets("123:12", [later])).toBe(
@@ -109,6 +110,7 @@ describe("exact source observations", () => {
     expect(normalizeObservation(later).id).not.toBe(normalizeObservation(first).id);
     expect(tweetContent(later)).not.toHaveProperty("metrics");
     expect(tweetContent(later)).not.toHaveProperty("source_endpoint");
+    expect(tweetContent(later)).not.toHaveProperty("author.follower_count");
   });
   it.each([
     { text: "Edited test" },

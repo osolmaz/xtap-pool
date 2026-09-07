@@ -63,9 +63,13 @@ const OBSERVATION_ONLY_FIELDS = new Set([
 /** Preserve content fields while excluding transport and sampled counters.
  * The enrichment input hash remains separately scoped to actual model input. */
 export function tweetContent(tweet: PooledTweet): Record<string, unknown> {
-  return Object.fromEntries(
+  const content = Object.fromEntries(
     Object.entries(tweet).filter(([key]) => !OBSERVATION_ONLY_FIELDS.has(key)),
   );
+  content["author"] = Object.fromEntries(
+    Object.entries(tweet.author).filter(([key]) => key !== "follower_count"),
+  );
+  return content;
 }
 export function contentHash(tweet: PooledTweet): string {
   return digest(tweetContent(tweet));
