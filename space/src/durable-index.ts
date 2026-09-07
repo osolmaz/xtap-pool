@@ -770,11 +770,13 @@ export function createDurableIndexBucketReader(
 export function createDurableIndexBucketClient(
   indexBucket: string,
   accessToken: string,
+  fetcher?: typeof fetch,
 ): DurableIndexBucketClient {
   const repo = { type: "bucket", name: indexBucket } as const;
+  const transport = fetcher === undefined ? {} : { fetch: fetcher };
   return {
     async download(path, destination, progress): Promise<boolean> {
-      const blob = await downloadFile({ repo, accessToken, path, xet: false });
+      const blob = await downloadFile({ repo, accessToken, ...transport, path, xet: false });
       if (blob === null) return false;
       const downloaded = blob;
       await mkdir(dirname(destination), { recursive: true });
@@ -802,6 +804,7 @@ export function createDurableIndexBucketClient(
       await progress?.(0, total);
       await uploadFile({
         repo,
+        ...transport,
         accessToken,
         file: { path, content: await openAsBlob(source) },
         commitTitle: `Publish ${path}`,
@@ -809,12 +812,13 @@ export function createDurableIndexBucketClient(
       await progress?.(total, total);
     },
     async readText(path): Promise<string | undefined> {
-      const blob = await downloadFile({ repo, accessToken, path, xet: false });
+      const blob = await downloadFile({ repo, accessToken, ...transport, path, xet: false });
       return blob === null ? undefined : blob.text();
     },
     async writeText(path, content): Promise<void> {
       await uploadFile({
         repo,
+        ...transport,
         accessToken,
         file: { path, content: new Blob([content]) },
         commitTitle: `Publish ${path}`,
@@ -824,6 +828,7 @@ export function createDurableIndexBucketClient(
       const files: BucketFile[] = [];
       for await (const entry of listFiles({
         repo,
+        ...transport,
         accessToken,
         recursive: true,
         path: prefix,
@@ -841,6 +846,7 @@ export function createDurableIndexBucketClient(
       if (paths.length === 0) return;
       await deleteFiles({
         repo,
+        ...transport,
         accessToken,
         paths: [...paths],
         commitTitle: "Prune durable index generations",

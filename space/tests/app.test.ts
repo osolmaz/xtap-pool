@@ -390,14 +390,17 @@ describe("enrichment endpoints", () => {
     await expect(ids("labels=ai&q=vllm")).resolves.toEqual(["1"]);
   });
 
-  it("serves whole enriched units to scoped machine credentials", async () => {
+  it("keeps whole-unit explorer browsing separate from machine bootstrap", async () => {
     await seedEnrichedTweets();
     const issued = await serviceAccounts.issue("osolmaz", "local-frontier", ["units:read"]);
     const authorization = { authorization: `Bearer ${issued.token}` };
 
-    const response = await app.request("/api/units?labels=ai,local-models&label_mode=any", {
-      headers: authorization,
-    });
+    const response = await app.request(
+      "/api/explorer/units?labels=ai,local-models&label_mode=any",
+      {
+        headers: { cookie: sessionCookie("osolmaz") },
+      },
+    );
     expect(response.status).toBe(200);
     const page = (await response.json()) as {
       revision: string;
@@ -406,12 +409,12 @@ describe("enrichment endpoints", () => {
     expect(page.units).toEqual([
       expect.objectContaining({ id: "1:someone", posts: [expect.objectContaining({ id: "1" })] }),
     ]);
-    const excluded = await app.request("/api/units?author_ids=author-excluded", {
-      headers: authorization,
+    const excluded = await app.request("/api/explorer/units?author_ids=author-excluded", {
+      headers: { cookie: sessionCookie("osolmaz") },
     });
     await expect(excluded.json()).resolves.toMatchObject({ units: [] });
-    const allowed = await app.request("/api/units?author_ids=author-allowed", {
-      headers: authorization,
+    const allowed = await app.request("/api/explorer/units?author_ids=author-allowed", {
+      headers: { cookie: sessionCookie("osolmaz") },
     });
     await expect(allowed.json()).resolves.toMatchObject({
       units: [expect.objectContaining({ id: "1:someone" })],
@@ -457,7 +460,7 @@ describe("enrichment endpoints", () => {
     expect(graph.status).toBe(200);
     const excluded = await app.request("/api/free-labels?author_ids=author-excluded", { headers });
     await expect(excluded.json()).resolves.toMatchObject({ free_labels: [] });
-    expect((await app.request("/api/units", { headers })).status).toBe(401);
+    expect((await app.request("/api/units", { headers })).status).toBe(403);
   });
 
   it("serves the labels summary with counts, queue depth and coverage", async () => {

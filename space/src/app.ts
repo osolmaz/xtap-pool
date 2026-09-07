@@ -9,6 +9,9 @@ import { z } from "zod";
 import { serviceAccountScopeSchema } from "@xtap-pool/shared";
 import type { EnrichReceipt, ServiceAccountScope } from "@xtap-pool/shared";
 
+import { registerConsumerRoutes } from "./consumer-routes.js";
+import type { ConsumerRuntime } from "./consumer-runtime.js";
+import { consumerErrorResponse, ConsumerHttpError } from "./consumer-errors.js";
 import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
 import type { EnrichTaxonomy } from "./enrich-config.js";
@@ -68,6 +71,7 @@ export type AppReadiness = {
 };
 
 export type AppDeps = {
+  consumer?: ConsumerRuntime;
   config: SpaceConfig;
   store: TweetStore;
   membership: PoolMembership;
@@ -272,6 +276,10 @@ export function createApp(deps: AppDeps): Hono {
       (membership.hasPermanentConfigError() || serviceAccounts.hasPermanentConfigError()) &&
       isConfigurationRecoveryRequest(c);
     if (readiness !== undefined && !readiness.ok && !configRecovery) {
+      if (["/api/units", "/api/changes", "/api/observations"].includes(c.req.path))
+        return consumerErrorResponse(
+          new ConsumerHttpError(503, "pool_not_ready", "The verified source is not ready."),
+        );
       return c.json({ error: "pool is not ready", readiness }, 503);
     }
     await next();
@@ -414,8 +422,15 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(page);
   });
 
-  app.get("/api/units", (c) => {
-    if (!readAuthorized(c, "units:read")) return c.json({ error: "unauthenticated" }, 401);
+  registerConsumerRoutes(
+    app,
+    deps.consumer,
+    (c) => sessionIdentity(c) !== undefined,
+    serviceAccounts,
+  );
+
+  app.get("/api/explorer/units", (c) => {
+    if (sessionIdentity(c) === undefined) return c.json({ error: "unauthenticated" }, 401);
     const parsed = tweetsQuerySchema.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid query parameters" }, 400);
     try {
