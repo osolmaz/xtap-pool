@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { z } from "zod";
-import { computeInputHash, tweetSchema } from "@xtap-pool/shared";
+import { computeInputHash, contentHash, tweetSchema } from "@xtap-pool/shared";
 import type { EnrichedUnit, PooledTweet } from "@xtap-pool/shared";
 import { TweetStore } from "./store.js";
 import { EnrichStore } from "./enrich-store.js";
@@ -16,6 +16,7 @@ const unitIdsSchema = z.array(z.string().min(1)).max(200);
 const postIdRow = z.object({ post_id: z.string() });
 const tweetRow = z.object({
   payload_json: z.string(),
+  content_hash: z.string(),
   contributor: z.string(),
   observed_at: z.string(),
   received_at: z.string(),
@@ -108,7 +109,7 @@ export class HistoricalUnitReader {
           content_hash DESC, observation_id DESC
         ) AS position FROM candidates
       )
-      SELECT payload_json, contributor, observed_at, received_at FROM ranked
+      SELECT payload_json, content_hash, contributor, observed_at, received_at FROM ranked
       WHERE position = 1 ORDER BY post_id, contributor LIMIT @limit
     `,
       )
@@ -120,7 +121,10 @@ export class HistoricalUnitReader {
       const content: unknown = JSON.parse(parsed.payload_json);
       const fields = z.record(z.string(), z.unknown()).parse(content);
       const tweet = tweetSchema.parse({ ...fields, captured_at: parsed.observed_at });
-      return { ...tweet, contributed_by: parsed.contributor, pooled_at: parsed.received_at };
+      const post = { ...tweet, contributed_by: parsed.contributor, pooled_at: parsed.received_at };
+      if (contentHash(post) !== parsed.content_hash)
+        throw new Error("historical post body does not match its source content hash");
+      return post;
     });
   }
 

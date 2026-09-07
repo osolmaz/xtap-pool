@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { labelAssignmentSchema, tweetSchema } from "@xtap-pool/shared";
+import { contentHash, labelAssignmentSchema, tweetSchema } from "@xtap-pool/shared";
 import { consumerTaxonomySchema } from "./consumer-context.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import { consumerObservationSchema } from "./consumer-observations.js";
@@ -22,14 +22,35 @@ const unitSchema = z
     free_labels: z.array(labelAssignmentSchema).readonly(),
   })
   .strict();
+const contentHashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+export const consumerUnitUpsertSchema = z
+  .object({
+    type: z.literal("unit_upsert"),
+    content_hash: contentHashSchema,
+    post_content_hashes: z.array(contentHashSchema).max(2000),
+    unit: unitSchema,
+  })
+  .strict()
+  .superRefine((change, context) => {
+    if (change.post_content_hashes.length !== change.unit.posts.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["post_content_hashes"],
+        message: "One content hash is required for each returned post, in the same order.",
+      });
+      return;
+    }
+    change.unit.posts.forEach((post, index) => {
+      if (change.post_content_hashes[index] !== contentHash(post))
+        context.addIssue({
+          code: "custom",
+          path: ["post_content_hashes", index],
+          message: "The content hash does not match the returned post body.",
+        });
+    });
+  });
 export const consumerChangeSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("unit_upsert"),
-      content_hash: z.string().regex(/^[a-f0-9]{64}$/u),
-      unit: unitSchema,
-    })
-    .strict(),
+  consumerUnitUpsertSchema,
   z
     .object({
       type: z.literal("unit_remove"),

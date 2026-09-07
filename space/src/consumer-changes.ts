@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { canonicalJson } from "@xtap-pool/shared";
+import { canonicalJson, contentHash } from "@xtap-pool/shared";
 import type { EnrichedUnit } from "@xtap-pool/shared";
 import { HistoricalUnitReader, HistoricalReadLimitError } from "./historical-unit-reader.js";
 import type { HistoricalBoundary, HistoricalSelection } from "./historical-unit-reader.js";
@@ -314,7 +314,12 @@ function replacement(
   const hash = consumerUnitHash(after);
   return before !== undefined && consumerUnitHash(before) === hash
     ? undefined
-    : { type: "unit_upsert", content_hash: hash, unit: after };
+    : {
+        type: "unit_upsert",
+        content_hash: hash,
+        post_content_hashes: after.posts.map(contentHash),
+        unit: after,
+      };
 }
 
 function privacyEffects(
