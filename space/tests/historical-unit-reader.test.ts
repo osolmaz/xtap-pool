@@ -6,6 +6,7 @@ import { EnrichStore } from "../src/enrich-store.js";
 import { HistoricalUnitReader } from "../src/historical-unit-reader.js";
 import { consumerUnitHash } from "../src/consumer-content.js";
 import { UnitStore } from "../src/unit-store.js";
+import { ConsumerObservationReader } from "../src/consumer-observations.js";
 import { consumerRegistry, changedApprovals } from "../src/consumer-registry.js";
 import type { ConsumerRegistry } from "../src/consumer-registry.js";
 import { makePooled } from "./helpers.js";
@@ -100,6 +101,33 @@ describe("bounded historical unit reconstruction", () => {
     expect(read()).toEqual(before);
     expect(read([...initialKeys, "edit", "edited-result"])[0]?.posts[0]?.text).toBe(
       "GLM model updated.",
+    );
+  });
+
+  it("keeps the latest applicable result when a later raw row has invalid evidence", () => {
+    const good = addResult(initial(), "good-retry");
+    const bad: EnrichmentRow = {
+      ...good,
+      enriched_at: "2026-07-08T00:00:00Z",
+      preset_labels: [{ name: "ai", evidence: [{ tweet_id: "100", quote: "absent quote" }] }],
+    };
+    store.sourceEffects.recordResult(bad, source("bad-result"));
+    enrich.applyEnrichment(bad);
+    expect(read([...initialKeys, "good-retry", "bad-result"]).map(consumerUnitHash)).toEqual(
+      new UnitStore(store.database, 1).query(selection).units.map(consumerUnitHash),
+    );
+  });
+
+  it("reuses a recorded exact-input result after a classified edit is reverted", () => {
+    const edited = { ...initial(), text: "GLM model changed", captured_at: "2026-05-22T00:00:00Z" };
+    addPost(edited, "edit-before-revert");
+    addResult(edited, "edit-result-before-revert");
+    const reverted = { ...initial(), captured_at: "2026-05-23T00:00:00Z" };
+    addPost(reverted, "revert");
+    expect(enrich.queueEntry("thread:a")?.status).toBe("done");
+    const target = [...initialKeys, "edit-before-revert", "edit-result-before-revert", "revert"];
+    expect(read(target).map(consumerUnitHash)).toEqual(
+      new UnitStore(store.database, 1).query(selection).units.map(consumerUnitHash),
     );
   });
 
@@ -214,6 +242,156 @@ describe("bounded historical unit reconstruction", () => {
     addResult(privatePost, "private-result");
     expect(read([...initialKeys, "private", "private-result"])).toEqual([]);
   });
+
+  it("pages logical observations with bounded source references and stable coverage", () => {
+    const later = {
+      ...initial(),
+      captured_at: "2026-05-22T00:00:00Z",
+      metrics: { likes: 50, views: 300 },
+    };
+    addPost(later, "later");
+    const history = new ConsumerObservationReader(store.database, 1, contract);
+    const options = {
+      postIds: ["100"],
+      boundary: { segments: [...initialKeys, "later"], registry: initialRegistry },
+      selection,
+      since: "2026-05-20T00:00:00.000Z",
+      until: "2026-05-25T00:00:00.000Z",
+      limit: 1,
+    };
+    const first = history.history(options);
+    expect(first.observations[0]?.metrics).toEqual({
+      likes: 1,
+      views: 10,
+      replies: null,
+      reposts: null,
+    });
+    expect(first.observations[0]?.source_ref).toMatch(/^[a-f0-9]{64}$/u);
+    expect(first.coverage[0]).toMatchObject({ state: "available", count: 2 });
+    if (first.next === undefined) throw new Error("missing page position");
+    addPost(
+      { ...later, captured_at: "2026-05-23T00:00:00Z", metrics: { likes: 80 } },
+      "future-metrics",
+    );
+    const second = history.history({ ...options, after: first.next });
+    expect(second.observations).toHaveLength(1);
+    expect(second.observations[0]?.metrics.likes).toBe(50);
+    expect(second.next).toBeUndefined();
+    expect(second.coverage).toEqual(first.coverage);
+    expect(history.history(options)).toEqual(first);
+    expect(() => history.history({ ...options, limit: 501 })).toThrow();
+    expect(() => history.history({ ...options, until: "2026-07-01T00:00:00.000Z" })).toThrow();
+  });
+
+  it("reads new observations without rediscovering old IDs and preserves a scan position for pending content", () => {
+    const later = { ...initial(), captured_at: "2026-05-22T00:00:00Z", metrics: { likes: 25 } };
+    addPost(later, "sample");
+    addPost(initial(), "retry-sample");
+    const history = new ConsumerObservationReader(store.database, 1, contract);
+    const keys = [...initialKeys, "sample", "retry-sample"];
+    const options = {
+      changedSegments: ["sample", "retry-sample"],
+      baseSegments: initialKeys,
+      boundary: { segments: keys, registry: initialRegistry },
+      selection,
+      since: "2026-05-20T00:00:00.000Z",
+      limit: 200,
+    };
+    expect(history.changed(options).observations.map((row) => row.metrics.likes)).toEqual([25]);
+    const edited = { ...later, text: "GLM model changed", captured_at: "2026-05-23T00:00:00Z" };
+    addPost(edited, "pending-sample");
+    const pending = history.changed({
+      ...options,
+      changedSegments: ["pending-sample"],
+      baseSegments: keys,
+      boundary: { ...options.boundary, segments: [...keys, "pending-sample"] },
+    });
+    expect(pending.observations).toEqual([]);
+    expect(pending.scanned?.post_id).toBe("100");
+    expect(pending.hasMore).toBe(false);
+    addResult(edited, "completed-sample");
+    const activated = history.history({
+      postIds: ["100"],
+      boundary: {
+        segments: [...keys, "pending-sample", "completed-sample"],
+        registry: initialRegistry,
+      },
+      selection,
+      since: "2026-05-20T00:00:00.000Z",
+      until: "2026-05-25T00:00:00.000Z",
+      limit: 200,
+    });
+    expect(activated.observations).toHaveLength(3);
+  });
+
+  it("deduplicates raw retries without changing receipt time in an old pinned page", () => {
+    const history = new ConsumerObservationReader(store.database, 1, contract);
+    const options = {
+      postIds: ["100"],
+      boundary: { segments: initialKeys, registry: initialRegistry },
+      selection,
+      since: "2026-05-20T00:00:00.000Z",
+      until: "2026-05-25T00:00:00.000Z",
+      limit: 200,
+    };
+    const before = history.history(options);
+    addPost({ ...initial(), pooled_at: "2026-07-05T00:00:00.000Z" }, "late-discovered-retry");
+    expect(history.history(options)).toEqual(before);
+    const after = history.history({
+      ...options,
+      boundary: { ...options.boundary, segments: [...initialKeys, "late-discovered-retry"] },
+    });
+    expect(after.observations).toHaveLength(1);
+    expect(after.observations[0]?.id).toBe(before.observations[0]?.id);
+    expect(after.observations[0]?.received_at).toBe("2026-07-05T00:00:00.000Z");
+    expect(after.coverage[0]?.count).toBe(1);
+    const empty = history.history({ ...options, since: "2026-05-23T00:00:00.000Z" });
+    expect(empty.coverage[0]).toMatchObject({ state: "no_history", count: 0 });
+  });
+
+  it.each([
+    { is_subscriber_only: true },
+    { is_retweet: true },
+    { author: { id: "900", username: "other" } },
+  ])("excludes a sample whose own content was outside the permitted public scope (%j)", (patch) => {
+    addPost(
+      { ...initial(), ...patch, captured_at: "2026-05-20T00:00:00Z", metrics: { likes: 9999 } },
+      "old-restricted",
+    );
+    const history = new ConsumerObservationReader(store.database, 1, contract);
+    const page = history.history({
+      postIds: ["100"],
+      boundary: { segments: [...initialKeys, "old-restricted"], registry: initialRegistry },
+      selection,
+      since: "2026-05-19T00:00:00.000Z",
+      until: "2026-05-25T00:00:00.000Z",
+      limit: 200,
+    });
+    expect(page.observations.map((row) => row.metrics.likes)).toEqual([1]);
+    expect(page.coverage[0]?.count).toBe(1);
+  });
+
+  it.each([true, "true", null])(
+    "denies retained history after a newer private or invalid visibility observation (%s)",
+    (visibility) => {
+      addPost(
+        { ...initial(), captured_at: "2026-05-22T00:00:00Z", is_subscriber_only: visibility },
+        "withdrawn",
+      );
+      const history = new ConsumerObservationReader(store.database, 1, contract);
+      const page = history.history({
+        postIds: ["100", "999"],
+        boundary: { segments: initialKeys, registry: initialRegistry },
+        selection,
+        since: "2026-05-20T00:00:00.000Z",
+        until: "2026-05-25T00:00:00.000Z",
+        limit: 200,
+      });
+      expect(page.observations).toEqual([]);
+      expect(page.coverage.map((row) => row.state)).toEqual(["unavailable", "unavailable"]);
+      expect(page.coverage.every((row) => row.count === null)).toBe(true);
+    },
+  );
 
   it("does not hydrate unrelated units and does not widen an empty request", () => {
     const other = makePooled({ id: "200", author: { id: "other", username: "other" } });

@@ -14,9 +14,10 @@ export const CONSUMER_PROJECTION_HASH = createHash("sha256")
       observations: "exact-v1, unmarked zero is unknown, physical provenance",
       content: "exclude observation fields and followers; current content-run clock",
       posts: "observed time, private first, content hash, contributor",
-      results: "UTC result time, canonical result hash; account for unsupported historical rows",
+      results:
+        "newest applicable result by UTC time and hash; reuse exact input; account for unsupported rows",
       registry: "frozen actual approved state, not raw revision inference",
-      changes: "exact source membership and historical reverse dependencies",
+      changes: "exact source membership, historical author-ID and reverse dependencies",
     }),
   )
   .digest("hex");

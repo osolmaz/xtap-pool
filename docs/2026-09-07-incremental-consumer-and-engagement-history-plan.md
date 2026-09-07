@@ -13,7 +13,7 @@ The earlier Our Models work stopped repeated AI processing and made checks cheap
 
 The required result is specific: a harmless source revision change must not cause a complete post download, and a new likes/views observation must not rerun semantic processing. Saving future counts in Our Models alone would leave both historical access and the content-change problem unresolved.
 
-Status: **implementation in progress** on `feat/incremental-consumers`. The bounded raw-history audit is complete. Observation normalization, indexed provenance, repeat delivery, and durable browser recovery are under local test. The bounded APIs, source-effect indexes, bootstrap cutover, Our Models integration, and live verification are not complete. No replacement extension, Space, Job, schedule, credential, resource, or spending limit has been deployed by this implementation. Existing approved enrichment work remains active.
+Status: **implementation in progress** on `feat/incremental-consumers`. The bounded raw-history audit, repeat delivery, indexed source effects, historical point reads, content clocks, bootstrap readiness, signed cursors, bounded change pages, and private history reads pass local tests. The HTTP APIs, bootstrap cutover, Our Models integration, and live verification are not complete. No replacement extension, Space, Job, schedule, credential, resource, or spending limit has been deployed by this implementation. Existing approved enrichment work remains active.
 
 ## Ownership and related work
 
@@ -122,7 +122,15 @@ A complete ingest acknowledgment accounts for every submitted observation as acc
 
 Local validation of this slice passed `npm run check`: formatting, lint, TypeScript, 597 Vitest tests, 188 extension tests, 180 native Python tests, coverage, and the duplicate-code check. Raw replay tests compare the same physical source references against immediate ingest, including operation and line positions. These are local results, not evidence of deployment or end-to-end publication speed.
 
-These changes alone do not remove the Our Models full read. Source-effect indexing, pinned bounded reads, and incremental website publication remain required before this task is complete.
+The next committed slices add historical content/result dependencies and point reads for old and target source sets. Metric-only updates and exact result retries produce no content candidates. Membership changes, label approvals, delayed source keys, and content conflicts remain candidates for exact comparison. Historical reads reconstruct only the requested entries in a bounded temporary database, not a complete old database.
+
+Content coverage now uses the start of the current content version, not the latest metric observation. Tests cover all six delivery orders of a three-observation edit/revert sequence, late discovery of an intervening edit, UTC normalization, and same-time private changes. Current and historical result reads use the same deterministic tie rule.
+
+A separate consumer projection hash binds the derived index rules without changing the LLM contract. The saved consumer boundary contains the actual approved registry state and commits with the source inventory. Every new segment checks its observation, membership, and result-reference counts. Unsupported historical result rows retain a physical reference but cannot supply current labels. An old index with empty new tables remains unavailable to consumer reads and cannot publish a new index until explicit bootstrap. Output-segment application now stores the verified source snapshot before committing its rows and boundary; a storage failure does not acknowledge partially applied work.
+
+These slices passed `npm run check`: 635 Vitest tests, 189 extension tests, 180 native Python tests, formatting, lint, TypeScript, coverage, and the duplicate-code check. The overall line coverage was 86.11%. These are local checks, not live throughput measurements.
+
+These changes alone do not remove the Our Models full read. The bounded HTTP contract, explicit production bootstrap, and incremental website publication remain required before this task is complete.
 
 ## Repeated observations
 
@@ -208,6 +216,12 @@ Use a content-addressed raw snapshot plus the semantic contract and normalized s
 A consumer cursor must describe the exact raw object set already consumed, not a timestamp or a lexicographic segment-key high-water mark. Raw writers can run concurrently, and a newly discovered object can have an earlier timestamp. Compare verified snapshot membership to find new segments. Store the exact snapshot manifest before issuing a durable cursor that refers to it; an unpersisted local hash is insufficient.
 
 This reuses the existing immutable snapshot mechanism. Snapshot manifests are metadata, not duplicate post exports. Normal advance reads and applies only new source segments. Query handlers must not rescan historical segment bodies.
+
+The audited snapshot has 38,219 segment descriptors and takes 15,752,981 bytes as canonical JSON. A metadata-size diagnostic used that snapshot with synthetic tails of 1, 16, 128, and 1,024 files. A retained base reference plus those exact additions took 502, 6,682, 52,837, and 422,019 bytes, respectively. At 1,024 additions, it saves 15,330,962 bytes per boundary, or 97.32%, before amortizing a new full base. This exceeds the 90% minimum worthwhile reduction chosen for this extra metadata logic. These are deterministic size calculations, not historical source deltas, network throughput, USD cost estimates, or launch approval.
+
+The bounded page engine now compares exact old and target content, emits removals, and returns retained observations when content first becomes eligible. It filters by historical account membership before reading content and checks current privacy on every upsert and history read. Raw retries do not duplicate logical observations. Recorded classifier results can be reused after an exact content revert; an invalid later quote does not erase a valid prior result. Local validation passed: `npm run check` with 667 Vitest tests, 189 extension tests, 180 native extension tests, 86.80% line coverage, and `npx simpledoc check`. HTTP authorization, worker deadlines, and live recovery remain separate unfinished gates.
+
+The implementation therefore stores an immutable full base through the existing raw snapshot store and places its hash plus explicit additions in the read context. It rolls the base after 1,024 additions or a 1 MiB descriptor. Reconstruction verifies the checksum of the complete source set. It rejects removed, mutated, or duplicated files and includes late keys; it does not use a key watermark. At most two loaded bases are cached in memory. Read contexts belong in the existing index Bucket and do not replace its shared manifest. HTTP deadlines, retained-context cleanup, and real publication timing still need their rollout checks.
 
 Separate the time of a substantive content version from the time of its latest metric observation. A count-only revisit must neither remove an already completed unit from cutoff selection nor advance content completeness by itself. Status and content reads must use the same completed-content boundary. An edit that invalidates the current enrichment must produce the documented pending/removal state until a matching result is ready; stale enrichment must not be attached to the edited text. Include this distinction in status, replay, and cutoff regression tests.
 

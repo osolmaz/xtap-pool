@@ -26,11 +26,12 @@ CREATE TABLE IF NOT EXISTS consumer_result_sources (
 CREATE INDEX IF NOT EXISTS idx_consumer_result_source_segment ON consumer_result_sources(segment_key, result_hash);
 CREATE INDEX IF NOT EXISTS idx_consumer_result_source_hash ON consumer_result_sources(result_hash, segment_key);
 CREATE TABLE IF NOT EXISTS consumer_post_units (
-  source_ref TEXT PRIMARY KEY, post_id TEXT NOT NULL, unit_id TEXT NOT NULL,
+  source_ref TEXT PRIMARY KEY, post_id TEXT NOT NULL, unit_id TEXT NOT NULL, author_id TEXT,
   FOREIGN KEY(source_ref) REFERENCES observation_sources(source_ref)
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_consumer_post_units_post ON consumer_post_units(post_id, unit_id, source_ref);
 CREATE INDEX IF NOT EXISTS idx_consumer_post_units_unit ON consumer_post_units(unit_id, post_id, source_ref);
+CREATE INDEX IF NOT EXISTS idx_consumer_post_units_author ON consumer_post_units(author_id, unit_id, source_ref);
 CREATE TABLE IF NOT EXISTS consumer_label_units (
   result_hash TEXT NOT NULL, name TEXT NOT NULL,
   PRIMARY KEY(result_hash, name),
@@ -41,17 +42,20 @@ CREATE INDEX IF NOT EXISTS idx_consumer_label_dependency ON consumer_label_units
 
 /** Indexed raw effects, not a second mutable source or a consumer cursor counter. */
 export class SourceEffectStore {
-  constructor(private readonly database: Database.Database) {
-    database.exec(TABLES);
+  constructor(
+    private readonly database: Database.Database,
+    mode: "read" | "write" = "write",
+  ) {
+    if (mode === "write") database.exec(TABLES);
   }
 
   recordPost(tweet: PooledTweet, source: ObservationSource): void {
     this.database
       .prepare(
         `INSERT OR IGNORE INTO consumer_post_units
-      (source_ref, post_id, unit_id) VALUES (?, ?, ?)`,
+      (source_ref, post_id, unit_id, author_id) VALUES (?, ?, ?, ?)`,
       )
-      .run(sourceReference(source), tweet.id, unitIdFor(tweet));
+      .run(sourceReference(source), tweet.id, unitIdFor(tweet), tweet.author.id ?? null);
   }
 
   recordResult(row: EnrichmentRow, source: ObservationSource): void {
@@ -108,6 +112,7 @@ export class SourceEffectStore {
     targetSegments: readonly string[];
     changedLabels: readonly string[];
     contractHash: string;
+    authorIds?: readonly string[];
     after?: string;
     limit: number;
   }): { ids: string[]; hasMore: boolean } {
@@ -169,7 +174,11 @@ export class SourceEffectStore {
              JOIN target t ON t.key = s.segment_key
              WHERE l.name IN (SELECT value FROM json_each(@labels))
            )
-      SELECT DISTINCT unit_id FROM affected WHERE unit_id > @after ORDER BY unit_id LIMIT @limit
+      SELECT DISTINCT a.unit_id FROM affected a WHERE a.unit_id > @after
+        AND (@authors IS NULL OR EXISTS (SELECT 1 FROM consumer_post_units u
+          JOIN observation_sources s ON s.source_ref = u.source_ref JOIN target t ON t.key = s.segment_key
+          WHERE u.unit_id = a.unit_id AND u.author_id IN (SELECT value FROM json_each(@authors))))
+        ORDER BY a.unit_id LIMIT @limit
     `,
       )
       .all({
@@ -178,6 +187,34 @@ export class SourceEffectStore {
         target: JSON.stringify(options.targetSegments),
         labels: JSON.stringify(options.changedLabels),
         contract: options.contractHash,
+        authors: options.authorIds === undefined ? null : JSON.stringify(options.authorIds),
+        after: options.after ?? "",
+        limit: limit + 1,
+      });
+    return {
+      ids: rows.slice(0, limit).map((row) => rowSchema.parse(row).unit_id),
+      hasMore: rows.length > limit,
+    };
+  }
+
+  bootstrapUnits(options: {
+    targetSegments: readonly string[];
+    authorIds: readonly string[];
+    after?: string;
+    limit: number;
+  }): { ids: string[]; hasMore: boolean } {
+    const limit = limitSchema.parse(options.limit);
+    const rows = this.database
+      .prepare(
+        `SELECT DISTINCT u.unit_id FROM consumer_post_units u
+      JOIN observation_sources s ON s.source_ref = u.source_ref
+      WHERE u.author_id IN (SELECT value FROM json_each(@authors))
+        AND s.segment_key IN (SELECT value FROM json_each(@keys)) AND u.unit_id > @after
+      ORDER BY u.unit_id LIMIT @limit`,
+      )
+      .all({
+        authors: JSON.stringify(options.authorIds),
+        keys: JSON.stringify(options.targetSegments),
         after: options.after ?? "",
         limit: limit + 1,
       });

@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import { resultIdentity } from "./result-identity.js";
+import { recordedResult } from "./recorded-result.js";
 import { contentActivityAt, latestPost, POST_ORDER } from "./post-state.js";
 
 import {
@@ -345,6 +346,11 @@ export class EnrichStore {
     const latestActivityAt = this.latestActivityAt(unitId);
     if (this.hasCurrentEnrichment(unitId, inputHash)) {
       this.settleDone(unitId, inputHash, latestActivityAt);
+      return;
+    }
+    const saved = recordedResult({ database: this.db, enrich: this, unitId, inputHash });
+    if (saved !== undefined) {
+      this.applyEnrichment(saved);
       return;
     }
     const nowIso = this.now().toISOString();
@@ -822,7 +828,7 @@ export class EnrichStore {
   }
 
   /** A row may project labels only when it exactly matches current membership. */
-  private matchesCurrentUnit(row: EnrichmentRow): boolean {
+  matchesCurrentUnit(row: EnrichmentRow): boolean {
     if (!isCurrentEnrichmentRow(row)) return false;
     if (row.taxonomy_version !== this.taxonomyVersion || row.contract_hash !== this.contractHash) {
       return false;
