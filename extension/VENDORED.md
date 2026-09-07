@@ -22,8 +22,9 @@ this directory, excluding the modifications below.
 - `lib/pool-sync.js` — **new**: persistent observation queue and batched flush to
   the pool Space's `/api/ingest` with backoff. Queue admission and sampling state
   are saved together. Storage errors and queue overflow leave staged work pending.
-  A batch leaves the queue only after a complete server acknowledgment. Explicitly
-  rejected records are saved in a bounded local rejection archive, so one invalid
+  A batch leaves the queue only after the server's `added`, `duplicates`, and
+  `rejected` counts account for every record. No extra success flag is required.
+  Explicitly rejected records are saved in a bounded local rejection archive, so one invalid
   post does not block valid work. A full rejection archive blocks removal instead
   of discarding records.
 - `lib/observations.js` — **new**: stable local observation identities, exact
