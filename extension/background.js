@@ -76,25 +76,24 @@ function seenIdsStorage() {
   return (isDevMode && hasSessionStorage) ? chrome.storage.session : chrome.storage.local;
 }
 
-// Staging uses session whenever available (ephemeral — cleared on browser restart).
-// seenIdsStorage() uses session only in dev mode. In production, seenIds goes to
-// local for persistence while WAL entries stay in session (they only need to survive
-// SW suspension, not browser restart). Firefox without session falls back to local.
+// Staged observations must survive a browser restart as well as worker sleep.
 function stagingStorage() {
-  return hasSessionStorage ? chrome.storage.session : chrome.storage.local;
+  return chrome.storage.local;
 }
+let recoveryRunning = false;
+const activeStagedPayloads = new Set();
 
 async function stagePayload(endpoint, data, metadata = {}) {
   const key = `stg_${Date.now()}_${stageSeq++}`;
   try {
     await stagingStorage().set({
-      [key]: { endpoint, data, ...metadata, stagedAt: Date.now() },
+      [key]: { endpoint, data, stagedAt: Date.now(), ...metadata },
     });
     return key;
   } catch (e) {
     console.warn('[xTap] Failed to stage payload (quota?):', e.message);
     emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: null, status: 'STAGE_FAILED', reason: e.message });
-    return null;
+    throw e;
   }
 }
 
@@ -108,6 +107,13 @@ async function clearStagedPayload(key) {
 }
 
 async function recoverStagedPayloads() {
+  if (recoveryRunning) return;
+  recoveryRunning = true;
+  try { await replayStagedPayloads(); }
+  finally { recoveryRunning = false; }
+}
+
+async function replayStagedPayloads() {
   let store;
   try {
     store = await stagingStorage().get(null);
@@ -122,19 +128,18 @@ async function recoverStagedPayloads() {
   });
   if (keys.length === 0) return;
 
-  const now = Date.now();
-  const TTL = 24 * 60 * 60 * 1000;
   let recoveredCount = 0;
 
   for (const key of keys) {
+    if (activeStagedPayloads.has(key)) continue;
     const entry = store[key];
     let produced = false;
     try {
-      if (!entry || !entry.data || (entry.stagedAt && now - entry.stagedAt > TTL)) {
-        await clearStagedPayload(key);
+      if (!entry || !entry.data || !Number.isFinite(entry.stagedAt)) {
+        console.error(`[xTap] Invalid staged payload retained: ${key}`);
         continue;
       }
-      const tweets = extractTweets(entry.endpoint, entry.data);
+      const tweets = extractTweets(entry.endpoint, entry.data, entry.stagedAt);
       for (const tweet of tweets) tweet.source_endpoint = entry.endpoint;
       if (tweets.length > 0) {
         await recordScrapeReceipts({
@@ -142,12 +147,13 @@ async function recoverStagedPayloads() {
           url: entry.requestUrl,
           sourceTabId: entry.sourceTabId,
         }, tweets);
-        enqueueTweets(tweets, entry.endpoint);
+        await enqueueTweets(tweets, entry.endpoint);
         recoveredCount += tweets.length;
         produced = true;
       }
     } catch (e) {
-      console.warn(`[xTap] Recovery parse error for ${key}:`, e.message);
+      console.warn(`[xTap] Recovery failed for ${key}; staged data retained:`, e.message);
+      continue;
     }
     // Persist buffer before clearing WAL entry — if SW dies mid-recovery,
     // already-cleared entries must have their tweets in durable storage.
@@ -615,9 +621,10 @@ function emitTraceEvent(event) {
   }
 }
 
-function enqueueTweets(tweets, endpoint = 'unknown') {
+async function enqueueTweets(tweets, endpoint = 'unknown') {
+  // Persist observation delivery before lifetime post-ID dedup or local state changes.
+  await poolEnqueue(tweets);
   let newCount = 0;
-  const poolBatch = [];
   let queuedCount = 0;
   let backfillCount = 0;
   let skippedCount = 0;
@@ -648,7 +655,6 @@ function enqueueTweets(tweets, endpoint = 'unknown') {
       newCount++;
     }
     buffer.push(tweet);
-    if (!isImageBackfill) poolBatch.push(tweet);
     queuedCount++;
     emitTraceEvent({
       timestamp: Date.now(),
@@ -691,9 +697,6 @@ function enqueueTweets(tweets, endpoint = 'unknown') {
     console.warn(`[xTap] Buffer overflow: dropped ${droppedTotal} tweets (${droppedBackfillCount} image backfill, ${droppedOldestCount} oldest; cap: ${MAX_BUFFER_SIZE})`);
     emitTraceEvent({ timestamp: Date.now(), endpoint, tweetId: null, status: 'BUFFER_OVERFLOW', reason: `dropped ${droppedTotal}` });
   }
-
-  // Pool sync is additive: local saving above is untouched.
-  poolEnqueue(poolBatch);
 
   if (skippedCount > 0 || backfillCount > 0 || droppedBackfillCount > 0) {
     console.log(`[xTap] Dedup: ${newCount} new, ${backfillCount} image backfill, ${skippedCount} duplicates skipped, ${droppedBackfillCount} backfill dropped (seenIds: ${seenIds.size})`);
@@ -826,12 +829,15 @@ async function handleGraphqlResponse(msg) {
     return;
   }
 
+  const observedAt = Date.now();
   const stageKey = await stagePayload(msg.endpoint, msg.data, {
     requestUrl: msg.url,
     sourceTabId: msg.sourceTabId,
+    stagedAt: observedAt,
   });
+  activeStagedPayloads.add(stageKey);
   try {
-    const tweets = extractTweets(msg.endpoint, msg.data);
+    const tweets = extractTweets(msg.endpoint, msg.data, observedAt);
     for (const tweet of tweets) tweet.source_endpoint = msg.endpoint;
     if (tweets.length > 0) {
       const missingAuthor = tweets.filter(tweet => !tweet.author?.username).length;
@@ -841,7 +847,7 @@ async function handleGraphqlResponse(msg) {
       if (missingText > 0) warning += ` | ${missingText} missing text`;
       console.log(`[xTap] ${msg.endpoint}: ${tweets.length} tweets${warning}`);
       await recordScrapeReceipts(msg, tweets);
-      enqueueTweets(tweets, msg.endpoint);
+      await enqueueTweets(tweets, msg.endpoint);
       if (await saveState()) await clearStagedPayload(stageKey);
     } else {
       await clearStagedPayload(stageKey);
@@ -850,7 +856,9 @@ async function handleGraphqlResponse(msg) {
   } catch (error) {
     console.error(`[xTap] Parse error for ${msg.endpoint}:`, error, '| data keys:', Object.keys(msg.data || {}).join(', '));
     emitTraceEvent({ timestamp: Date.now(), endpoint: msg.endpoint, tweetId: null, status: 'PARSER_ERROR', reason: error.message });
-    await clearStagedPayload(stageKey);
+    // Keep the original response and observation time until durable delivery succeeds.
+  } finally {
+    activeStagedPayloads.delete(stageKey);
   }
 }
 
@@ -886,8 +894,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'POOL_FLUSH_NOW') {
     (async () => {
-      await poolFlush();
-      sendResponse(poolStatus());
+      try {
+        await ready;
+        await poolFlush();
+        await recoverStagedPayloads();
+        sendResponse(poolStatus());
+      } catch (error) {
+        sendResponse({ ...poolStatus(), lastError: error.message });
+      }
     })();
     return true;
   }
@@ -1064,7 +1078,12 @@ if (typeof chrome.storage.session?.setAccessLevel === 'function') {
 // Periodic pool flush that survives service-worker sleep.
 chrome.alarms.create('xtap-pool-flush', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'xtap-pool-flush') poolFlush();
+  if (alarm.name === 'xtap-pool-flush') {
+    ready.then(async () => {
+      await poolFlush();
+      await recoverStagedPayloads();
+    }).catch(error => console.error('[xTap] Pool recovery failed:', error.message));
+  }
 });
 
 // Graceful degradation: if restoreState fails (e.g. storage unavailable), continue

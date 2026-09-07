@@ -63,8 +63,10 @@ export async function ingestBatch(
   const now = deps.now();
   parsed.data.tweets.forEach((candidate, index) => {
     const result = validateTweet(candidate);
-    if (result.ok) stamped.push(stampTweet(result.tweet, username, now));
-    else rejected.push({ index, reason: result.reason });
+    if (!result.ok) rejected.push({ index, reason: result.reason });
+    else if (Date.parse(result.tweet.captured_at) > now.getTime() + 5 * 60_000)
+      rejected.push({ index, reason: "captured_at is more than five minutes in the future" });
+    else stamped.push(stampTweet(result.tweet, username, now));
   });
 
   const { accepted, skippedDuplicates } = deps.store.classify(stamped);
@@ -72,9 +74,10 @@ export async function ingestBatch(
     return { ok: true, added: 0, duplicates: skippedDuplicates, rejected };
   }
 
+  let sourceKey: string;
   try {
     const days = [...new Set(accepted.map((tweet) => tweet.captured_at.slice(0, 10)))].sort();
-    await deps.log.appendTweets(
+    sourceKey = await deps.log.appendTweets(
       accepted,
       `pool: ${username} +${String(accepted.length)} tweets (${days.join(", ")})`,
     );
@@ -83,7 +86,10 @@ export async function ingestBatch(
     return { ok: false, status: 500, error: `failed to persist to raw Bucket: ${message}` };
   }
 
-  deps.store.insert(accepted);
-  deps.enrich?.registerTweets(accepted);
+  deps.store.database.transaction(() => {
+    deps.store.observations.recordBatch(accepted, sourceKey);
+    deps.store.insert(accepted);
+    deps.enrich?.registerTweets(accepted);
+  })();
   return { ok: true, added: accepted.length, duplicates: skippedDuplicates, rejected };
 }

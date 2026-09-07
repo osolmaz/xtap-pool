@@ -19,6 +19,7 @@ afterEach(() => {
 describe("classify + insert", () => {
   it("accepts new tweets and skips exact duplicates", () => {
     const tweet = makePooled();
+    store.observations.recordBatch([tweet], "source-1");
     store.insert([tweet]);
     const { accepted, skippedDuplicates } = store.classify([tweet, makePooled({ id: "101" })]);
     expect(accepted.map((entry) => entry.id)).toEqual(["101"]);
@@ -36,13 +37,12 @@ describe("classify + insert", () => {
     expect(page.records[0]?.tweet.text).toBe("new");
   });
 
-  it("keeps the freshest capture when a batch contains the same tweet twice", () => {
+  it("preserves distinct observations of one post within a batch", () => {
     const older = makePooled({ captured_at: "2026-05-21T00:00:00.000Z", text: "older" });
     const newer = makePooled({ captured_at: "2026-05-23T00:00:00.000Z", text: "newer" });
     const { accepted, skippedDuplicates } = store.classify([older, newer]);
-    expect(accepted).toHaveLength(1);
-    expect(accepted[0]?.text).toBe("newer");
-    expect(skippedDuplicates).toBe(1);
+    expect(accepted.map((entry) => entry.text)).toEqual(["older", "newer"]);
+    expect(skippedDuplicates).toBe(0);
   });
 
   it("stale re-inserts do not overwrite fresher rows", () => {

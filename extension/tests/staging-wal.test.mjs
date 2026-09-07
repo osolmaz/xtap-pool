@@ -20,6 +20,7 @@ const testSource = bgSource
   .replace(/\/\/ --- Init ---[\s\S]*$/,
     `var _internals = {
       stagePayload, clearStagedPayload, recoverStagedPayloads,
+      handleGraphqlResponse, readyResolve,
       saveState, restoreState, enqueueTweets,
       stagingStorage, seenIdsStorage,
       get buffer() { return buffer; },
@@ -65,8 +66,9 @@ function createMockStorage(opts = {}) {
  */
 function setup(opts = {}) {
   const sessionStore = createMockStorage(opts.sessionOpts);
-  const localStore = createMockStorage(opts.localOpts);
+  const localStore = opts.localStore || createMockStorage(opts.localOpts);
   const receiptCalls = [];
+  const poolCalls = [];
 
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
@@ -86,7 +88,10 @@ function setup(opts = {}) {
         return Promise.resolve();
       }
     },
-    poolEnqueue() {},
+    async poolEnqueue(tweets) {
+      if (opts.poolEnqueue) await opts.poolEnqueue(tweets);
+      poolCalls.push(structuredClone(tweets));
+    },
     chrome: {
       runtime: {
         getManifest: () => ({}), // no update_url → isDevMode = true
@@ -112,6 +117,7 @@ function setup(opts = {}) {
   env.sessionStore = sessionStore;
   env.localStore = localStore;
   env.receiptCalls = receiptCalls;
+  env.poolCalls = poolCalls;
   return env;
 }
 
@@ -145,15 +151,14 @@ describe('stagePayload + clearStagedPayload', () => {
     await env.clearStagedPayload(null); // must not throw
   });
 
-  it('returns null on quota error', async () => {
-    const env = setup({ sessionOpts: { throwOnStagingWrite: true } });
-    const key = await env.stagePayload('HomeTimeline', { foo: 1 });
-    assert.equal(key, null);
+  it('rejects on quota error instead of claiming an unstaged response is safe', async () => {
+    const env = setup({ localOpts: { throwOnStagingWrite: true } });
+    await assert.rejects(env.stagePayload('HomeTimeline', { foo: 1 }), /QuotaExceeded/);
   });
 
   it('emits STAGE_FAILED trace event on quota error', async () => {
-    const env = setup({ sessionOpts: { throwOnStagingWrite: true } });
-    await env.stagePayload('HomeTimeline', { foo: 1 });
+    const env = setup({ localOpts: { throwOnStagingWrite: true } });
+    await assert.rejects(env.stagePayload('HomeTimeline', { foo: 1 }), /QuotaExceeded/);
     const failEvents = env.traceEvents.filter(e => e.status === 'STAGE_FAILED');
     assert.equal(failEvents.length, 1);
     assert.equal(failEvents[0].endpoint, 'HomeTimeline');
@@ -209,7 +214,7 @@ describe('recoverStagedPayloads', () => {
     assert.equal(env.buffer[0].id, '2');
   });
 
-  it('discards entries older than 24h', async () => {
+  it('delivers staged entries even after more than 24 hours offline', async () => {
     const env = setup({
       extractTweets: (_ep, data) => data?.tweets || [],
     });
@@ -225,7 +230,8 @@ describe('recoverStagedPayloads', () => {
 
     await env.recoverStagedPayloads();
 
-    assert.equal(env.buffer.length, 0);
+    assert.equal(env.buffer.length, 1);
+    assert.equal(env.poolCalls[0][0].id, '1');
     const stored = await env.stagingStorage().get(null);
     assert.equal(stored[oldKey], undefined);
   });
@@ -250,7 +256,7 @@ describe('recoverStagedPayloads', () => {
     assert.deepEqual(env.receiptCalls[0].tweets.map(tweet => tweet.id), ['1']);
   });
 
-  it('clears key even on parse error', async () => {
+  it('retains the original response on parse error for repair and retry', async () => {
     const env = setup({
       extractTweets: () => { throw new Error('parse fail'); },
     });
@@ -259,8 +265,42 @@ describe('recoverStagedPayloads', () => {
     await env.recoverStagedPayloads();
 
     const stored = await env.stagingStorage().get(null);
-    assert.equal(stored[key], undefined);
+    assert.ok(stored[key]);
     assert.equal(env.buffer.length, 0);
+  });
+
+  it('keeps WAL entries and leaves unique-post state unchanged when the pool queue is full', async () => {
+    const env = setup({
+      extractTweets: (_ep, data) => data?.tweets || [],
+      poolEnqueue: async () => { throw new Error('pool queue full'); },
+    });
+    const key = await env.stagePayload('HomeTimeline', { tweets: [{ id: '1', text: 'waiting' }] });
+    await env.recoverStagedPayloads();
+    assert.ok((await env.localStore.get(null))[key]);
+    assert.equal(env.buffer.length, 0);
+    assert.equal(env.seenIds.size, 0);
+  });
+
+  it('delivers repeat observations even when local export dedup knows the post', async () => {
+    const env = setup({ extractTweets: (_ep, data) => data?.tweets || [] });
+    env.seenIds = new Set(['1']);
+    await env.stagePayload('HomeTimeline', { tweets: [{ id: '1', text: 'repeat', metrics: { likes: 20 } }] });
+    await env.recoverStagedPayloads();
+    assert.equal(env.buffer.length, 0);
+    assert.equal(env.poolCalls[0][0].metrics.likes, 20);
+  });
+
+  it('restores staged responses from local storage after browser restart with their original time', async () => {
+    const first = setup();
+    const observedAt = Date.now() - 6 * 60 * 60_000;
+    const key = await first.stagePayload('HomeTimeline', { tweets: [{ id: '1' }] }, { stagedAt: observedAt });
+    const recovered = setup({
+      localStore: first.localStore,
+      extractTweets: (_ep, data, time) => data.tweets.map(tweet => ({ ...tweet, captured_at: new Date(time).toISOString() })),
+    });
+    await recovered.recoverStagedPayloads();
+    assert.equal(recovered.poolCalls[0][0].captured_at, new Date(observedAt).toISOString());
+    assert.equal((await recovered.localStore.get(null))[key], undefined);
   });
 
   it('keeps WAL entry when saveState fails', async () => {
@@ -343,7 +383,7 @@ describe('saveState / restoreState buffer persistence', () => {
 // ---------------------------------------------------------------------------
 
 describe('buffer overflow', () => {
-  it('drops oldest tweets when over MAX_BUFFER_SIZE', () => {
+  it('drops oldest local exports when over MAX_BUFFER_SIZE without losing pool observations', async () => {
     const env = setup();
 
     // Pre-fill buffer to MAX_BUFFER_SIZE - 1
@@ -352,7 +392,7 @@ describe('buffer overflow', () => {
     }));
 
     // Enqueue 2 more → total MAX_BUFFER_SIZE + 1 → overflow drops 1 oldest
-    env.enqueueTweets([
+    await env.enqueueTweets([
       { id: 'new1', text: 'new 1' },
       { id: 'new2', text: 'new 2' },
     ], 'test');
@@ -361,16 +401,17 @@ describe('buffer overflow', () => {
     assert.equal(env.buffer[0].id, 'pre1'); // pre0 was dropped
     assert.equal(env.buffer[env.buffer.length - 1].id, 'new2');
     assert.equal(env.buffer[env.buffer.length - 2].id, 'new1');
+    assert.equal(env.poolCalls[0].length, 2);
   });
 
-  it('emits BUFFER_OVERFLOW trace event', () => {
+  it('emits BUFFER_OVERFLOW trace event', async () => {
     const env = setup();
 
     env.buffer = Array.from({ length: env.MAX_BUFFER_SIZE }, (_, i) => ({
       id: `pre${i}`, text: `pre ${i}`,
     }));
 
-    env.enqueueTweets([{ id: 'overflow', text: 'overflow' }], 'test');
+    await env.enqueueTweets([{ id: 'overflow', text: 'overflow' }], 'test');
 
     const overflowEvents = env.traceEvents.filter(e => e.status === 'BUFFER_OVERFLOW');
     assert.equal(overflowEvents.length, 1);

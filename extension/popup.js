@@ -70,7 +70,7 @@ function renderPool(state) {
   } else if (state.connected) {
     const who = state.username ? ` as @${state.username}` : '';
     poolStatusEl.textContent =
-      `Connected${who} — ${state.queued} queued, ${state.synced} synced` +
+      `Connected${who} — ${state.queued} observations queued, ${state.synced} synced, ${state.sampled} sampled out` +
       (state.paused ? ' (paused)' : '');
     poolStatusEl.className = 'status connected';
   } else {

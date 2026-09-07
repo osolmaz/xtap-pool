@@ -150,6 +150,35 @@ describe('normalizeTweet', () => {
     assert.equal(t.metrics.views, null);
   });
 
+  it('preserves real zero counters and never fabricates missing counters', () => {
+    const raw = makeRawTweet({ views: { count: '0' } });
+    raw.legacy.favorite_count = 0;
+    delete raw.legacy.retweet_count;
+    delete raw.legacy.reply_count;
+    const t = normalizeTweet(raw);
+    assert.equal(t.metrics.format, 'exact-v1');
+    assert.equal(t.metrics.likes, 0);
+    assert.equal(t.metrics.views, 0);
+    assert.equal(t.metrics.retweets, null);
+    assert.equal(t.metrics.replies, null);
+  });
+
+  for (const count of ['1.2K', '12unknown', '-1', '9007199254740992', 1.5]) {
+    it(`does not partially parse or round view count ${count}`, () => {
+      const t = normalizeTweet(makeRawTweet({ views: { count } }));
+      assert.equal(t.metrics.views, null);
+    });
+  }
+
+  it('reuses the original response time when parsing a staged response again', () => {
+    const data = { data: { tweetResult: { result: makeRawTweet() } } };
+    const observedAt = '2026-05-21T00:00:00.000Z';
+    const first = extractTweets('TweetResultByRestId', data, observedAt);
+    const retry = extractTweets('TweetResultByRestId', data, observedAt);
+    assert.equal(first[0].captured_at, observedAt);
+    assert.deepEqual(first, retry);
+  });
+
   it('returns null when legacy is missing', () => {
     const raw = makeRawTweet();
     delete raw.legacy;

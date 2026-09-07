@@ -20,12 +20,11 @@ export class FakeLog implements StorageLog {
       if (lines === undefined) byPath.set(path, [JSON.stringify(tweet)]);
       else lines.push(JSON.stringify(tweet));
     }
-    await this.commitBatch(
+    return this.commitBatch(
       [...byPath].map(([path, lines]) => ({ path, lines })),
       [],
       title,
     );
-    return "segment";
   }
 
   async commitBatch(
@@ -47,7 +46,7 @@ export class FakeLog implements StorageLog {
       paths: [...appends.map((item) => item.path), ...writes.map((item) => item.path)],
       title,
     });
-    return "segment";
+    return `segment-${String(this.commits.length)}`;
   }
 
   async readText(path: string): Promise<string | undefined> {
