@@ -9,6 +9,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BucketLog, sha256 } from "../src/bucket-log.js";
 import type { BucketObject, RawBucketClient } from "../src/bucket-log.js";
 import { DurableIndex } from "../src/durable-index.js";
+import { prepareIndexBootstrap } from "../src/index-bootstrap.js";
+import { runIndexCommand } from "../src/index-command.js";
+import * as rawModule from "../src/bucket-log.js";
+import * as indexModule from "../src/durable-index.js";
 import type {
   BucketFile,
   DurableIndexBucketClient,
@@ -103,6 +107,139 @@ beforeEach(() => {
 });
 
 describe("DurableIndex", () => {
+  it("prepares without publishing and requires a complete explicit cutover", async () => {
+    for (const id of ["1", "2", "3"]) await appendTweet(id);
+    const incumbent = await DurableIndex.bootstrap(options("incumbent"));
+    const manifest = await incumbent.publish();
+    incumbent.close();
+    vi.spyOn(rawModule, "createRawBucketClient").mockReturnValue(raw);
+    vi.spyOn(indexModule, "createDurableIndexBucketClient").mockReturnValue(bucket);
+    const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const env = {
+      RAW_BUCKET: RAW,
+      INDEX_BUCKET: INDEX,
+      HF_TOKEN: "test-token",
+      DATA_DIR: temporary("command"),
+      INDEX_BOOTSTRAP_MAX_SEGMENTS: "1",
+    };
+    try {
+      await runIndexCommand(env);
+      expect(JSON.parse(bucket.files.get("index/current.json")!.toString("utf8"))).toEqual(
+        manifest,
+      );
+      await expect(runIndexCommand({ ...env, INDEX_BOOTSTRAP_MODE: "publish" })).rejects.toThrow(
+        "EXPECTED_DATABASE",
+      );
+      const publishEnv = {
+        ...env,
+        INDEX_BOOTSTRAP_MODE: "publish",
+        INDEX_BOOTSTRAP_EXPECTED_DATABASE: manifest.database.sha256,
+      };
+      await expect(runIndexCommand(publishEnv)).rejects.toThrow("incomplete");
+      await runIndexCommand({ ...env, INDEX_BOOTSTRAP_MAX_SEGMENTS: "500" });
+      await appendTweet("4");
+      await runIndexCommand(publishEnv);
+      expect(JSON.parse(bucket.files.get("index/current.json")!.toString("utf8"))).toMatchObject({
+        counts: { tweets: 4 },
+      });
+      expect(output).toHaveBeenCalledWith(expect.stringContaining('"state":"published"'));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("does not replace an existing bootstrap database", async () => {
+    await appendTweet("1");
+    const config = options("keep-existing");
+    const first = await DurableIndex.bootstrap(config);
+    first.close();
+    await expect(DurableIndex.bootstrap(config)).rejects.toThrow("EEXIST");
+    const retained = DurableIndex.openLocal(config);
+    expect(retained.stats().tweetRows).toBe(1);
+    retained.close();
+  });
+
+  it("resumes a bounded frozen bootstrap without reloading applied segment bodies", async () => {
+    for (const id of ["1", "2", "3"]) await appendTweet(id);
+    const target = await log.createSnapshot();
+    const config = { ...options("bounded"), sourceRevision: target.revision, chunkSize: 1 };
+    const partial = await prepareIndexBootstrap({ ...config, maxSegments: 1 });
+    expect(partial.complete).toBe(false);
+    expect(partial.progress).toMatchObject({ completed: 1, total: 3 });
+    const appliedKey = partial.index.sourceSnapshot().files[0]!.key;
+    partial.index.close();
+    await appendTweet("4");
+    raw.downloads = [];
+    const resumed = await prepareIndexBootstrap(config);
+    expect(resumed.complete).toBe(true);
+    expect(resumed.index.stats().tweetRows).toBe(3);
+    expect(resumed.index.consumerBoundary().source).toBe(target.revision);
+    expect(raw.downloads).not.toContain(appliedKey);
+    expect(bucket.files.size).toBe(0);
+    resumed.index.close();
+    const latest = await log.createSnapshot();
+    await expect(
+      prepareIndexBootstrap({ ...config, sourceRevision: latest.revision }),
+    ).rejects.toThrow("target changed");
+  });
+
+  it("saves completed chunks before a checkpoint interruption and matches a fresh replay", async () => {
+    for (const id of ["1", "2", "3"]) await appendTweet(id);
+    const target = await log.createSnapshot();
+    const config = { ...options("interrupted"), sourceRevision: target.revision, chunkSize: 1 };
+    await expect(
+      prepareIndexBootstrap({
+        ...config,
+        onCheckpoint: async ({ completed }) => {
+          if (completed === 2) throw new Error("stop after saved work");
+        },
+      }),
+    ).rejects.toThrow("stop after saved work");
+    const checkpoint = DurableIndex.openLocal(config);
+    expect(checkpoint.stats().tweetRows).toBe(2);
+    checkpoint.close();
+    const resumed = await prepareIndexBootstrap(config);
+    const fresh = await DurableIndex.bootstrap(options("fresh-comparison"));
+    expect(resumed.index.stats()).toEqual(fresh.stats());
+    expect(resumed.index.consumerBoundary()).toEqual(fresh.consumerBoundary());
+    expect(
+      resumed.index.store.database
+        .prepare("SELECT * FROM post_observations ORDER BY observation_id")
+        .all(),
+    ).toEqual(
+      fresh.store.database.prepare("SELECT * FROM post_observations ORDER BY observation_id").all(),
+    );
+    resumed.index.close();
+    fresh.close();
+  });
+
+  it("stops an aborted bootstrap at a real SQLite boundary", async () => {
+    await appendTweet("1");
+    const target = await log.createSnapshot();
+    const config = { ...options("aborted"), sourceRevision: target.revision };
+    const paused = await prepareIndexBootstrap({ ...config, signal: AbortSignal.abort() });
+    expect(paused.progress.completed).toBe(0);
+    expect(paused.complete).toBe(false);
+    paused.index.close();
+    const resumed = await prepareIndexBootstrap(config);
+    expect(resumed.progress.completed).toBe(1);
+    expect(resumed.complete).toBe(true);
+    resumed.index.close();
+  });
+
+  it("does not scan full SQLite integrity on each source tail", async () => {
+    await appendTweet("1");
+    const index = await DurableIndex.bootstrap(options("bounded-integrity"));
+    const pragma = vi.spyOn(index.store.database, "pragma");
+    await index.advanceToLatest();
+    await appendTweet("2");
+    await index.advanceToLatest();
+    expect(pragma).not.toHaveBeenCalledWith("integrity_check");
+    index.verify();
+    expect(pragma).toHaveBeenCalledWith("integrity_check");
+    index.close();
+  });
+
   it("bootstraps, publishes, restores, and advances exact Bucket snapshots", async () => {
     await appendTweet("1");
     const firstOptions = options("first");
