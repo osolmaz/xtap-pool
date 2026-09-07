@@ -99,6 +99,20 @@ describe("indexed source effects", () => {
     expect(affected(["registry"], ["result", "registry"])).toEqual({ ids: [], hasMore: false });
   });
 
+  it("bounds bootstrap candidates by historical exact author IDs and pinned membership", () => {
+    post("one", { author: { id: "11", username: "a" } });
+    post("two", { id: "101", conversation_id: "second", author: { id: "11", username: "a" } });
+    post("other", { id: "102", author: { id: "22", username: "other" } });
+    post("future", { id: "103", conversation_id: "future", author: { id: "11", username: "a" } });
+    const query = { targetSegments: ["one", "two", "other"], authorIds: ["11"], limit: 1 };
+    expect(store.sourceEffects.bootstrapUnits(query)).toEqual({ ids: ["old:a"], hasMore: true });
+    expect(store.sourceEffects.bootstrapUnits({ ...query, after: "old:a" })).toEqual({
+      ids: ["second:a"],
+      hasMore: false,
+    });
+    expect(store.sourceEffects.bootstrapUnits({ ...query, authorIds: [] }).ids).toEqual([]);
+  });
+
   it("has no content candidates for a receipt-only source difference", () => {
     post("old");
     store.sourceEffects.recordResult(result("old:a"), source("result"));

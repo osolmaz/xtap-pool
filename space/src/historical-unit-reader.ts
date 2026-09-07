@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { z } from "zod";
-import { computeInputHash, enrichmentRowSchema, tweetSchema } from "@xtap-pool/shared";
+import { computeInputHash, tweetSchema } from "@xtap-pool/shared";
 import type { EnrichedUnit, PooledTweet } from "@xtap-pool/shared";
 import { TweetStore } from "./store.js";
 import { EnrichStore } from "./enrich-store.js";
@@ -8,11 +8,12 @@ import { UnitStore } from "./unit-store.js";
 import type { UnitQuery } from "./unit-store.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import type { ConsumerRegistry } from "./consumer-registry.js";
+import { recordedResult } from "./recorded-result.js";
 
 const MAX_POSTS = 2000;
+export class HistoricalReadLimitError extends Error {}
 const unitIdsSchema = z.array(z.string().min(1)).max(200);
 const postIdRow = z.object({ post_id: z.string() });
-const payloadRow = z.object({ payload_json: z.string() });
 const tweetRow = z.object({
   payload_json: z.string(),
   contributor: z.string(),
@@ -84,7 +85,8 @@ export class HistoricalUnitReader {
     `,
       )
       .all({ units: JSON.stringify(ids), keys, limit: MAX_POSTS + 1 });
-    if (postRows.length > MAX_POSTS) throw new Error("historical unit read exceeds the post bound");
+    if (postRows.length > MAX_POSTS)
+      throw new HistoricalReadLimitError("historical unit read exceeds the post bound");
     const postIds = postRows.map((row) => postIdRow.parse(row).post_id);
     if (postIds.length === 0) return [];
     const rows = this.database
@@ -112,7 +114,7 @@ export class HistoricalUnitReader {
       )
       .all({ posts: JSON.stringify(postIds), keys, limit: MAX_POSTS + 1 });
     if (rows.length > MAX_POSTS)
-      throw new Error("historical unit read exceeds the contributor-copy bound");
+      throw new HistoricalReadLimitError("historical unit read exceeds the contributor-copy bound");
     return rows.map((row) => {
       const parsed = tweetRow.parse(row);
       const content: unknown = JSON.parse(parsed.payload_json);
@@ -126,21 +128,14 @@ export class HistoricalUnitReader {
     const members = enrich.unitSemanticMembers(unitId);
     if (members.length === 0) return;
     const hash = computeInputHash(unitId, members);
-    const row = this.database
-      .prepare(
-        `
-      SELECT r.payload_json FROM consumer_results r
-      WHERE r.unit_id = @unit AND r.contract_hash = @contract AND r.input_hash = @input
-        AND EXISTS (SELECT 1 FROM consumer_result_sources s WHERE s.result_hash = r.result_hash
-                    AND s.segment_key IN (SELECT value FROM json_each(@keys)))
-      ORDER BY r.enriched_at DESC, r.result_hash DESC LIMIT 1
-    `,
-      )
-      .get({ unit: unitId, contract: this.contractHash, input: hash, keys });
-    if (row === undefined) return;
-    enrich.applyEnrichment(
-      enrichmentRowSchema.parse(JSON.parse(payloadRow.parse(row).payload_json)),
-    );
+    const row = recordedResult({
+      database: this.database,
+      enrich,
+      unitId,
+      inputHash: hash,
+      sourceKeys: keys,
+    });
+    if (row !== undefined) enrich.applyEnrichment(row);
   }
 
   private applyRegistry(slice: Database.Database, registry: ConsumerRegistry): void {
