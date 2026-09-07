@@ -228,6 +228,16 @@ If new source writes arrive during removal paging, the server finishes the fixed
 
 The normal page limits and wall deadline apply. Signed cursors are limited to 8 KiB, including 100 long history IDs and the removal position. Recovery keeps the original 48-hour page lease and uses immutable metadata in the existing context store. Expiry is explicit; it does not silently clear content or start a full read.
 
+## Exact production-selection follow-up
+
+The earlier complete read used only `ai`. A later run used the actual Our Models selection: 123 authors, `ai,local-models`, `label_mode=any`, and `publication=public-original`. At frozen source `b5ab0341f57f931ea975ff72c1c2e25b5f0e135caa833619889cc10ae3862981`, its first coverage request hit the unchanged 30-second deadline.
+
+The query joined each conversation member to each matching label before checking post bodies. Thus a conversation with both labels repeated the same author and publication checks. `eligibleUnits` now materializes distinct candidate IDs before those checks. The explicit ID bound remains inside the candidate query; cutoff, author, publication, and all-label requirements remain enforced. No schema, cursor, source contract, or deadline changed.
+
+The regression uses a 20-post conversation with both production labels. It verifies identical rows and body-check counts for one label, either label, both required labels, and no labels. A missing required label still excludes the conversation. The existing 12 coverage tests also pass, including metric-only, no-op, privacy, and restart behavior. `npm run check` passed after the fix.
+
+On the same local frozen database, the fixed initial coverage took 14.597 seconds. The earlier unbounded diagnostic took 4.459 and 4.330 seconds for completion queries and 24.792 seconds for observation coverage. These are single local measurements, not cloud latency estimates. The decision boundary remains the existing 30-second request limit, with unchanged row/privacy checks. The complete corrected production-selection canary is still running at this record; do not treat its initial-page success as a complete read or deployment proof.
+
 ## Remaining live gates
 
 Local checks passed: `npm run check` ran 761 Vitest tests in 78 files, 189 extension tests, and 180 native extension tests. This includes 12 coverage-maintenance tests, 13 paged privacy recovery tests, and 14 post-hash contract tests. Coverage was 88.04% lines/statements, 85.75% branches, and 92.08% functions. The duplicate-code check reported zero candidates. The parent must implement and test the Our Models transaction, removal, history, and cursor rules against these schemas. An operator must verify purpose-scoped grants, deployed projection readiness, raw-base retention, current source containment after restore, production unit sizes and deadlines, and the approved history window. The coordinated deployment, live restart/privacy canary, cold/cloud and real metric-delta measurements, and website publication proof remain pending. No production completion is claimed.
