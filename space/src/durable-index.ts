@@ -13,6 +13,8 @@ import { BucketLog, canonicalBytes, sha256 } from "./bucket-log.js";
 import type { BucketSnapshot, BucketSnapshotFile, SourceCounts } from "./bucket-log.js";
 import { EnrichStore } from "./enrich-store.js";
 import { TweetStore } from "./store.js";
+import { ConsumerIndexState, ConsumerBootstrapRequired } from "./consumer-index-state.js";
+import type { ConsumerIndexBoundary } from "./consumer-index-state.js";
 
 const INDEX_SCHEMA_VERSION = 1;
 const CURRENT_MANIFEST_KEY = "index/current.json";
@@ -155,6 +157,7 @@ type SegmentRow = {
 export class DurableIndex {
   readonly store: TweetStore;
   readonly enrichStore: EnrichStore;
+  private readonly consumerState: ConsumerIndexState;
 
   constructor(
     private readonly options: DurableIndexOptions,
@@ -165,6 +168,7 @@ export class DurableIndex {
   ) {
     this.store = store;
     this.enrichStore = enrichStore;
+    this.consumerState = new ConsumerIndexState(store.database, options.contractHash);
   }
 
   static async restore(options: DurableIndexOptions): Promise<DurableIndex> {
@@ -375,10 +379,21 @@ export class DurableIndex {
     };
   }
 
+  consumerBoundary(): ConsumerIndexBoundary {
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new ConsumerBootstrapRequired();
+    return this.consumerState.require(metadata.raw_snapshot_revision);
+  }
+
+  private canAdvanceConsumers(): boolean {
+    return this.consumerState.canAdvance(readMetadata(this.store.database)?.raw_snapshot_revision);
+  }
+
   async advanceToLatest(): Promise<IndexAdvance> {
     const previous = sourceRows(this.store.database);
     const known = [...previous.values()].map(snapshotFileFromRow);
     const metadata = readMetadata(this.store.database);
+    const consumerReady = this.consumerState.canAdvance(metadata?.raw_snapshot_revision);
     const baseRevision =
       metadata?.raw_snapshot_revision ??
       sha256(canonicalBytes({ schema_version: 1, bucket: this.options.rawBucket, files: known }));
@@ -398,6 +413,7 @@ export class DurableIndex {
         consume: (file, segment) => {
           const counts = this.options.log.applySegment(segment, this.store, this.enrichStore);
           rowsApplied += totalSourceRows(counts);
+          this.consumerState.verifySegment(file.key, counts);
           insertSourceRow(this.store.database, file, counts);
           tailFiles.push(file);
           return Promise.resolve();
@@ -415,6 +431,7 @@ export class DurableIndex {
         raw_snapshot_revision: revision,
         contract_hash: this.options.contractHash,
       });
+      this.consumerState.commit(revision, this.enrichStore, consumerReady);
       this.store.database.exec("COMMIT");
       await this.options.progress?.sourceReplay({
         revision,
@@ -451,6 +468,7 @@ export class DurableIndex {
     previous: ReadonlyMap<string, SegmentRow>,
     verifyKnown: boolean,
   ): Promise<IndexAdvance> {
+    const consumerReady = this.canAdvanceConsumers();
     const currentKeys = new Set(snapshot.files.map((file) => file.key));
     const deleted = [...previous.keys()].filter((key) => !currentKeys.has(key));
     if (deleted.length > 0)
@@ -496,6 +514,7 @@ export class DurableIndex {
       for (const item of staged) {
         const counts = this.options.log.applySegment(item.segment, this.store, this.enrichStore);
         rowsApplied += totalSourceRows(counts);
+        this.consumerState.verifySegment(item.file.key, counts);
         insertSourceRow(this.store.database, item.file, counts);
       }
       writeMetadata(this.store.database, {
@@ -504,6 +523,7 @@ export class DurableIndex {
         raw_snapshot_revision: revision,
         contract_hash: this.options.contractHash,
       });
+      this.consumerState.commit(revision, this.enrichStore, consumerReady);
     });
     apply();
     assertDatabaseIntegrity(this.store.database);
@@ -523,6 +543,7 @@ export class DurableIndex {
 
   // eslint-disable-next-line complexity -- Publication verifies every durable stage before replacing the active pointer.
   async publish(): Promise<DurableIndexManifest> {
+    this.consumerBoundary();
     const baselineManifest = await this.bucket.readText(CURRENT_MANIFEST_KEY);
     if (this.options.expectedCurrentDatabaseSha256 !== undefined) {
       if (baselineManifest === undefined) throw new Error("durable index manifest is missing");
@@ -646,28 +667,28 @@ export class DurableIndex {
       staged.push(await this.options.log.loadSegmentByKey(key));
     }
     staged.sort(compareReplayOrder);
-    let rowsApplied = 0;
-    const apply = this.store.database.transaction(() => {
-      for (const item of staged) {
-        const counts = this.options.log.applySegment(item.segment, this.store, this.enrichStore);
-        rowsApplied += totalSourceRows(counts);
-        insertSourceRow(this.store.database, item.file, counts);
-      }
-    });
-    apply();
+    const metadata = readMetadata(this.store.database);
+    if (metadata === undefined) throw new Error("durable index metadata is missing");
+    const consumerReady = this.consumerState.canAdvance(metadata.raw_snapshot_revision);
     const snapshot = await this.options.log.storeSnapshot({
       schema_version: 1,
       bucket: this.options.rawBucket,
-      files: [...sourceRows(this.store.database).values()]
-        .map(snapshotFileFromRow)
-        .sort((left, right) => left.key.localeCompare(right.key)),
+      files: [
+        ...[...existing.values()].map(snapshotFileFromRow),
+        ...staged.map((item) => item.file),
+      ].sort((left, right) => left.key.localeCompare(right.key)),
     });
-    const metadata = readMetadata(this.store.database);
-    if (metadata === undefined) throw new Error("durable index metadata is missing");
-    writeMetadata(this.store.database, {
-      ...metadata,
-      raw_snapshot_revision: snapshot.revision,
-    });
+    let rowsApplied = 0;
+    this.store.database.transaction(() => {
+      for (const item of staged) {
+        const counts = this.options.log.applySegment(item.segment, this.store, this.enrichStore);
+        rowsApplied += totalSourceRows(counts);
+        this.consumerState.verifySegment(item.file.key, counts);
+        insertSourceRow(this.store.database, item.file, counts);
+      }
+      writeMetadata(this.store.database, { ...metadata, raw_snapshot_revision: snapshot.revision });
+      this.consumerState.commit(snapshot.revision, this.enrichStore, consumerReady);
+    })();
     assertDatabaseIntegrity(this.store.database);
     return {
       revision: snapshot.revision,

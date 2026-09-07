@@ -1,4 +1,7 @@
 import type Database from "better-sqlite3";
+import { z } from "zod";
+import { resultIdentity } from "./result-identity.js";
+import { contentActivityAt, latestPost, POST_ORDER } from "./post-state.js";
 
 import {
   computeInputHash,
@@ -104,7 +107,9 @@ export function ensureEnrichmentTables(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS unit_members (
       tweet_id TEXT PRIMARY KEY,
       unit_id TEXT NOT NULL,
-      captured_at TEXT NOT NULL DEFAULT ''
+      captured_at TEXT NOT NULL DEFAULT '',
+      content_hash TEXT NOT NULL DEFAULT '',
+      content_at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_unit_members_unit ON unit_members(unit_id, tweet_id);
     CREATE TABLE IF NOT EXISTS enrich_queue (
@@ -133,6 +138,7 @@ export function ensureEnrichmentTables(db: Database.Database): void {
       contract_hash TEXT,
       model TEXT NOT NULL,
       enriched_at TEXT NOT NULL,
+      result_hash TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (unit_id)
     );
     CREATE TABLE IF NOT EXISTS label_assignments (
@@ -260,17 +266,8 @@ export class EnrichStore {
   registerTweets(tweets: readonly PooledTweet[]): string[] {
     const register = this.db.transaction((batch: readonly PooledTweet[]): string[] => {
       const dirty = new Set<string>();
-      for (const tweet of batch) {
-        const unitId = unitIdFor(tweet);
-        const result = this.registerMembership(tweet, unitId);
-        if (result.dirty) dirty.add(unitId);
-        if (result.previousUnitId !== undefined) {
-          this.clearUnitEnrichment(result.previousUnitId);
-          if (this.unitMemberIds(result.previousUnitId).length > 0) {
-            dirty.add(result.previousUnitId);
-          }
-        }
-      }
+      for (const postId of new Set(batch.map((tweet) => tweet.id)))
+        this.registerPost(postId, dirty);
       for (const unitId of [...dirty]) {
         if (this.unitMemberIds(unitId).length === 0) {
           dirty.delete(unitId);
@@ -283,32 +280,62 @@ export class EnrichStore {
     return register(tweets);
   }
 
+  private registerPost(postId: string, dirty: Set<string>): void {
+    const tweet = latestPost(this.db, postId);
+    if (tweet === undefined) throw new Error("membership requires an indexed post");
+    const unitId = unitIdFor(tweet);
+    const result = this.registerMembership(tweet, unitId);
+    if (result.dirty || !this.hasCurrentQueueContract(unitId)) dirty.add(unitId);
+    if (result.previousUnitId !== undefined) {
+      this.clearUnitEnrichment(result.previousUnitId);
+      if (this.unitMemberIds(result.previousUnitId).length > 0) dirty.add(result.previousUnitId);
+    }
+  }
+
+  private hasCurrentQueueContract(unitId: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM enrich_queue WHERE unit_id = ?
+      AND contract_hash = ? AND taxonomy_version = ?`,
+        )
+        .get(unitId, this.contractHash, this.taxonomyVersion) !== undefined
+    );
+  }
+
   private registerMembership(
     tweet: PooledTweet,
     unitId: string,
   ): { dirty: boolean; previousUnitId?: string } {
     const tweetId = tweet.id;
-    const capturedAt = tweet.captured_at;
-    const existing = this.db
-      .prepare("SELECT unit_id, captured_at FROM unit_members WHERE tweet_id = ?")
-      .get(tweetId) as { unit_id: string; captured_at: string } | undefined;
-    if (existing === undefined) {
-      this.db
-        .prepare("INSERT INTO unit_members (tweet_id, unit_id, captured_at) VALUES (?, ?, ?)")
-        .run(tweetId, unitId, capturedAt);
-      return { dirty: true };
-    }
-    if (existing.captured_at > capturedAt) return { dirty: false };
-    if (existing.unit_id !== unitId) {
-      this.db
-        .prepare("UPDATE unit_members SET unit_id = ?, captured_at = ? WHERE tweet_id = ?")
-        .run(unitId, capturedAt, tweetId);
-      return { dirty: true, previousUnitId: existing.unit_id };
-    }
+    const capturedAt = new Date(tweet.captured_at).toISOString();
+    const row = this.db
+      .prepare("SELECT unit_id, content_hash, content_at FROM unit_members WHERE tweet_id = ?")
+      .get(tweetId);
+    const existing =
+      row === undefined
+        ? undefined
+        : z
+            .object({ unit_id: z.string(), content_hash: z.string(), content_at: z.string() })
+            .parse(row);
+    const content = contentActivityAt(this.db, tweet, existing);
     this.db
-      .prepare("UPDATE unit_members SET captured_at = ? WHERE tweet_id = ?")
-      .run(capturedAt, tweetId);
-    return { dirty: true };
+      .prepare(
+        `INSERT INTO unit_members (tweet_id, unit_id, captured_at, content_hash, content_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(tweet_id) DO UPDATE SET
+      unit_id = excluded.unit_id, captured_at = excluded.captured_at,
+      content_hash = excluded.content_hash, content_at = excluded.content_at`,
+      )
+      .run(tweetId, unitId, capturedAt, content.hash, content.at);
+    return {
+      dirty:
+        existing?.content_hash !== content.hash ||
+        existing.content_at !== content.at ||
+        existing.unit_id !== unitId,
+      ...(existing !== undefined && existing.unit_id !== unitId
+        ? { previousUnitId: existing.unit_id }
+        : {}),
+    };
   }
 
   private refreshQueueForUnit(unitId: string): void {
@@ -436,7 +463,7 @@ export class EnrichStore {
       .prepare(
         `SELECT tweets.json FROM (
            SELECT tweets.rowid, tweets.id,
-                  ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY tweets.captured_at DESC, tweets.contributed_by) AS rn
+                  ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY ${POST_ORDER}) AS rn
            FROM tweets
            JOIN unit_members um ON um.tweet_id = tweets.id
            WHERE um.unit_id = ?
@@ -449,11 +476,7 @@ export class EnrichStore {
 
   private latestActivityAt(unitId: string): string {
     const row = this.db
-      .prepare(
-        `SELECT MAX(tweets.captured_at) AS latest FROM tweets
-         JOIN unit_members um ON um.tweet_id = tweets.id
-         WHERE um.unit_id = ?`,
-      )
+      .prepare(`SELECT MAX(content_at) AS latest FROM unit_members WHERE unit_id = ?`)
       .get(unitId) as { latest: string | null };
     return row.latest ?? this.now().toISOString();
   }
@@ -475,7 +498,7 @@ export class EnrichStore {
       .prepare(
         `SELECT text FROM (
            SELECT id, sort_ts AS ts, text,
-                  ROW_NUMBER() OVER (PARTITION BY id ORDER BY captured_at DESC) AS rn
+                  ROW_NUMBER() OVER (PARTITION BY id ORDER BY ${POST_ORDER}) AS rn
            FROM tweets
            WHERE id IN (SELECT tweet_id FROM unit_members WHERE unit_id = ?)
          ) WHERE rn = 1 ORDER BY ts, id`,
@@ -493,7 +516,7 @@ export class EnrichStore {
       .prepare(
         `SELECT id, text FROM (
            SELECT tweets.id, tweets.text,
-                  ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY tweets.captured_at DESC) AS rn
+                  ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY ${POST_ORDER}) AS rn
            FROM tweets
            JOIN unit_members um ON um.tweet_id = tweets.id
            WHERE um.unit_id = ?
@@ -734,7 +757,8 @@ export class EnrichStore {
    * the queue on replay.
    */
   applyEnrichment(row: EnrichmentRow): void {
-    const apply = this.db.transaction((enrichment: EnrichmentRow) => {
+    const apply = this.db.transaction((input: EnrichmentRow) => {
+      const { row: enrichment, hash } = resultIdentity(input);
       if (this.unitMemberIds(enrichment.unit_id).length === 0) {
         return;
       }
@@ -742,15 +766,7 @@ export class EnrichStore {
       // retained in the append-only Bucket log, but must never erase a current
       // projection or seed registry state during replay.
       if (!this.matchesCurrentUnit(enrichment)) return;
-      const existing = this.db
-        .prepare("SELECT enriched_at, input_hash FROM enrichment WHERE unit_id = ?")
-        .get(enrichment.unit_id) as { enriched_at: string; input_hash: string } | undefined;
-      if (
-        existing?.input_hash === enrichment.input_hash &&
-        existing.enriched_at >= enrichment.enriched_at
-      ) {
-        return;
-      }
+      if (this.hasNewerResult(enrichment, hash)) return;
       // Wipe previous assignments/evidence and rewrite from the new row.
       this.db.prepare("DELETE FROM label_assignments WHERE unit_id = ?").run(enrichment.unit_id);
       this.db.prepare("DELETE FROM label_evidence WHERE unit_id = ?").run(enrichment.unit_id);
@@ -760,6 +776,25 @@ export class EnrichStore {
       this.settleQueueForRow(enrichment);
     });
     apply(row);
+  }
+
+  private hasNewerResult(row: EnrichmentRow, hash: string): boolean {
+    const saved = this.db
+      .prepare("SELECT enriched_at, input_hash, result_hash FROM enrichment WHERE unit_id = ?")
+      .get(row.unit_id);
+    if (saved === undefined) return false;
+    const existing = z
+      .object({
+        enriched_at: z.string(),
+        input_hash: z.string().nullable(),
+        result_hash: z.string(),
+      })
+      .parse(saved);
+    const at = new Date(existing.enriched_at).toISOString();
+    return (
+      existing.input_hash === row.input_hash &&
+      (at > row.enriched_at || (at === row.enriched_at && existing.result_hash >= hash))
+    );
   }
 
   private writeAssignments(
@@ -1425,19 +1460,21 @@ export class EnrichStore {
     return readVisibleAssignments(this.db, unitIds);
   }
 
-  private upsertEnrichmentRow(row: EnrichmentRow): void {
+  private upsertEnrichmentRow(input: EnrichmentRow): void {
+    const { row, hash } = resultIdentity(input);
     this.db
       .prepare(
         `INSERT INTO enrichment
-           (unit_id, taxonomy_version, tweet_ids, input_hash, contract_hash, model, enriched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (unit_id, taxonomy_version, tweet_ids, input_hash, contract_hash, model, enriched_at, result_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (unit_id) DO UPDATE SET
            taxonomy_version = excluded.taxonomy_version,
            tweet_ids = excluded.tweet_ids,
            input_hash = excluded.input_hash,
            contract_hash = excluded.contract_hash,
            model = excluded.model,
-           enriched_at = excluded.enriched_at`,
+           enriched_at = excluded.enriched_at,
+           result_hash = excluded.result_hash`,
       )
       .run(
         row.unit_id,
@@ -1447,6 +1484,7 @@ export class EnrichStore {
         row.contract_hash,
         row.model,
         row.enriched_at,
+        hash,
       );
   }
 }
@@ -1602,7 +1640,7 @@ function selectedUnits(options: UnitSelection): { sql: string; params: unknown[]
 
 function cutoffWhere(cutoff: string | undefined): string {
   if (cutoff === undefined) return "";
-  return " AND (SELECT MAX(t.captured_at) FROM tweets t JOIN unit_members u ON u.tweet_id = t.id WHERE u.unit_id = um.unit_id) <= ?";
+  return " AND (SELECT MAX(u.content_at) FROM unit_members u WHERE u.unit_id = um.unit_id) <= ?";
 }
 
 function authorWhere(authorIds: readonly string[] | undefined, unitIdSql: string): string {

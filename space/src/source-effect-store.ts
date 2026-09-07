@@ -1,13 +1,13 @@
-import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
-import { canonicalJson, unitIdFor } from "@xtap-pool/shared";
+import { unitIdFor } from "@xtap-pool/shared";
+import { resultIdentity } from "./result-identity.js";
 import type { EnrichmentRow, PooledTweet } from "@xtap-pool/shared";
 import { sourceReference } from "./observation-store.js";
 import type { ObservationSource } from "./observation-store.js";
 
 const rowSchema = z.object({ unit_id: z.string() });
-const storedResultSchema = z.object({ result_hash: z.string() });
+const storedResultSchema = z.object({ result_hash: z.string().nullable() });
 const limitSchema = z.number().int().min(1).max(500);
 
 const TABLES = `
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS consumer_results (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS idx_consumer_result_unit ON consumer_results(unit_id, contract_hash, input_hash, enriched_at DESC, result_hash DESC);
 CREATE TABLE IF NOT EXISTS consumer_result_sources (
-  source_ref TEXT PRIMARY KEY, result_hash TEXT NOT NULL,
+  source_ref TEXT PRIMARY KEY, result_hash TEXT,
   segment_key TEXT NOT NULL, operation INTEGER NOT NULL CHECK(operation >= 0),
   logical_path TEXT NOT NULL, position INTEGER NOT NULL CHECK(position >= 0),
   FOREIGN KEY(result_hash) REFERENCES consumer_results(result_hash)
@@ -55,9 +55,7 @@ export class SourceEffectStore {
   }
 
   recordResult(row: EnrichmentRow, source: ObservationSource): void {
-    const normalized = { ...row, enriched_at: new Date(row.enriched_at).toISOString() };
-    const json = canonicalJson(normalized);
-    const hash = createHash("sha256").update(json).digest("hex");
+    const { row: normalized, json, hash } = resultIdentity(row);
     const reference = sourceReference(source);
     this.database.transaction(() => {
       const existing = this.database
@@ -83,6 +81,22 @@ export class SourceEffectStore {
       // Only free-label approvals can change without a new unit result.
       for (const label of row.free_labels) insert.run(hash, label.name);
     })();
+  }
+
+  /** Account for a verified historical row that cannot satisfy the current contract. */
+  recordLegacyResult(source: ObservationSource): void {
+    const reference = sourceReference(source);
+    const existing = this.database
+      .prepare("SELECT result_hash FROM consumer_result_sources WHERE source_ref = ?")
+      .get(reference);
+    if (existing !== undefined && storedResultSchema.parse(existing).result_hash !== null)
+      throw new Error("consumer source reference changed its contents");
+    this.database
+      .prepare(
+        `INSERT INTO consumer_result_sources VALUES (?, NULL, ?, ?, ?, ?)
+      ON CONFLICT(source_ref) DO NOTHING`,
+      )
+      .run(reference, source.segmentKey, source.operation, source.path, source.position);
   }
 
   /** Find candidates from an exact raw-set difference. Comparing their content is separate.
