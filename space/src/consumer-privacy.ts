@@ -62,9 +62,9 @@ export class ConsumerPrivacyEffects {
         AND (@through IS NULL OR key IN (SELECT value FROM json_each(@through)))
     ), withdrawn AS MATERIALIZED (
       SELECT DISTINCT o.post_id FROM additions a
-      JOIN observation_sources s ON s.segment_key = a.key
-      JOIN post_observations o ON o.observation_id = s.observation_id
-      JOIN post_content_versions c ON c.content_hash = o.content_hash
+      CROSS JOIN observation_sources s ON s.segment_key = a.key
+      CROSS JOIN post_observations o ON o.observation_id = s.observation_id
+      CROSS JOIN post_content_versions c ON c.content_hash = o.content_hash
       WHERE ${restricted("c.payload_json")}
       AND EXISTS (SELECT 1 FROM consumer_post_units u JOIN observation_sources os ON os.source_ref = u.source_ref
         WHERE u.post_id = o.post_id AND u.author_id IN (SELECT value FROM json_each(@authors))

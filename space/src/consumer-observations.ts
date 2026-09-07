@@ -150,9 +150,9 @@ export class ConsumerObservationReader {
     ), samples AS MATERIALIZED (
       SELECT o.*, s.source_ref, s.received_at AS source_received_at,
         ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY s.received_at, s.source_ref) AS copy
-      FROM new_ids n JOIN post_observations o ON o.observation_id = n.observation_id
-      JOIN observation_sources s ON s.observation_id = o.observation_id
-      JOIN post_content_versions c ON c.content_hash = o.content_hash
+      FROM new_ids n CROSS JOIN post_observations o ON o.observation_id = n.observation_id
+      CROSS JOIN observation_sources s ON s.observation_id = o.observation_id
+      CROSS JOIN post_content_versions c ON c.content_hash = o.content_hash
       WHERE ${PUBLIC_SAMPLE} AND o.observed_at >= @since AND s.segment_key IN (SELECT value FROM json_each(@target))
         AND (o.post_id, o.observed_at, o.observation_id) > (@post, @at, @id)
     ) SELECT payload_json, source_ref, source_received_at AS received_at FROM samples WHERE copy = 1

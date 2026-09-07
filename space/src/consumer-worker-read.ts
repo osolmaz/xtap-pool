@@ -1,9 +1,8 @@
 import type Database from "better-sqlite3";
-import { selectedObservationThrough } from "./consumer-coverage.js";
+import { updateConsumerCoverage } from "./consumer-coverage-update.js";
 import { ConsumerIndexState } from "./consumer-index-state.js";
 import { ConsumerChangeEngine, historicalSelection } from "./consumer-changes.js";
 import { ConsumerObservationReader } from "./consumer-observations.js";
-import { selectedCompleteThrough } from "./enrich-store.js";
 import { ConsumerPrivacyEffects } from "./consumer-privacy.js";
 import type { ConsumerWorkerTask, ConsumerWorkerResult } from "./consumer-worker-task.js";
 import { ConsumerHttpError } from "./consumer-errors.js";
@@ -16,13 +15,8 @@ export function readConsumerTask(
     new ConsumerIndexState(database, task.contract, "read").require(task.source);
     assertTargetMembership(database, task);
     const selection = historicalSelection(task.target);
-    if (task.operation === "coverage") {
-      return {
-        kind: "coverage",
-        completeThrough: selectedCompleteThrough(database, selection) ?? null,
-        observationsThrough: selectedObservationThrough(database, task.target),
-      };
-    }
+    if (task.operation === "coverage")
+      return updateConsumerCoverage(database, task.target, task.base);
     const privacy = privacyEffects(database, task);
     if (task.operation === "reconcile") return reconciliationPage(privacy, task);
     privacy.assertUnchanged();

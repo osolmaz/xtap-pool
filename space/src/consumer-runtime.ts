@@ -201,7 +201,7 @@ export class ConsumerRuntime {
       return { target, cursor };
     }
     if (cursor.position.kind === "idle") {
-      const next = await this.pin(current, target.context.selection, signal);
+      const next = await this.pin(current, target.context.selection, signal, target);
       const started = this.start(next, target.id, "content");
       if (cursor.privacy !== undefined) started.privacy = cursor.privacy;
       return { target: next, base: target, cursor: started };
@@ -306,6 +306,7 @@ export class ConsumerRuntime {
     current: ConsumerCurrent,
     selection: ConsumerSelection,
     signal: AbortSignal,
+    base?: ResolvedConsumerContext,
   ): Promise<ResolvedConsumerContext> {
     const created = this.now().toISOString();
     const draft: ResolvedConsumerContext = {
@@ -325,7 +326,11 @@ export class ConsumerRuntime {
     };
     const coverage = await this.options.workers.run(
       await this.task(
-        { target: draft, cursor: this.start(draft, null, "bootstrap") },
+        {
+          target: draft,
+          cursor: this.start(draft, null, "bootstrap"),
+          ...(base === undefined ? {} : { base }),
+        },
         current,
         1,
         "coverage",
@@ -375,7 +380,12 @@ export class ConsumerRuntime {
       return await this.normalPage(sequence, current, limit, signal);
     } catch (error) {
       if (!(error instanceof ConsumerHttpError) || error.code !== "privacy_changed") throw error;
-      const checkpoint = await this.pin(current, sequence.target.context.selection, signal);
+      const checkpoint = await this.pin(
+        current,
+        sequence.target.context.selection,
+        signal,
+        sequence.target,
+      );
       return consumerErrorResponse(
         new ConsumerHttpError(409, "privacy_changed", error.message, {
           action: "reconcile",
@@ -430,7 +440,7 @@ export class ConsumerRuntime {
     const cursor = { ...sequence.cursor, privacy: checkpoint.id };
     delete cursor.reconciliation;
     if (checkpoint.context.source !== current.boundary.source) {
-      const next = await this.pin(current, sequence.target.context.selection, signal);
+      const next = await this.pin(current, sequence.target.context.selection, signal, checkpoint);
       cursor.reconciliation = { target: next.id };
     }
     return cursor;
