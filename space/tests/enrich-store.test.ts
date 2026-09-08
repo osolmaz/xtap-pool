@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { computeContractHash, computeInputHash, PROCESSOR_VERSION } from "@xtap-pool/shared";
 import type { EnrichmentRow, LabelAssignment } from "@xtap-pool/shared";
 
-import { EnrichStore, MAX_ATTEMPTS } from "../src/enrich-store.js";
+import { EnrichStore, MAX_ATTEMPTS, selectedCompleteThrough } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 import { makePooled } from "./helpers.js";
 
@@ -391,6 +391,41 @@ describe("status counts", () => {
     expect(only.totals.pending).toBe(1);
     expect(only.totals.completed).toBe(1);
     expect(only.completeThrough).toBe("2026-07-01T00:00:00.000Z");
+  });
+});
+
+describe("selected completion boundary", () => {
+  it.each(["pending", "running", "retrying", "blocked"])(
+    "selects once and keeps completed work strictly before %s work",
+    (status) => {
+      const ids = insertAndRegister(
+        [1, 2, 2, 3].map((day, index) => ({
+          id: String(index + 1),
+          conversation_id: String(index + 1),
+          captured_at: `2026-07-0${String(day)}T00:00:00.000Z`,
+        })),
+      );
+      store.database.prepare("UPDATE enrich_queue SET status = 'done'").run();
+      store.database
+        .prepare("UPDATE enrich_queue SET status = ? WHERE unit_id = ?")
+        .run(status, ids[1]);
+      const prepare = vi.spyOn(store.database, "prepare");
+      expect(selectedCompleteThrough(store.database, {})).toBe("2026-07-01T00:00:00.000Z");
+      expect(prepare).toHaveBeenCalledTimes(1);
+      prepare.mockRestore();
+    },
+  );
+
+  it("handles an empty selection, no completed work, and an all-completed selection", () => {
+    expect(selectedCompleteThrough(store.database, {})).toBeUndefined();
+    insertAndRegister([
+      { id: "1", conversation_id: "one", captured_at: "2026-07-01T00:00:00.000Z" },
+      { id: "2", conversation_id: "two", captured_at: "2026-07-03T00:00:00.000Z" },
+    ]);
+    expect(selectedCompleteThrough(store.database, {})).toBeUndefined();
+    store.database.prepare("UPDATE enrich_queue SET status = 'done'").run();
+    expect(selectedCompleteThrough(store.database, {})).toBe("2026-07-03T00:00:00.000Z");
+    expect(selectedCompleteThrough(store.database, { authorIds: ["missing"] })).toBeUndefined();
   });
 });
 
