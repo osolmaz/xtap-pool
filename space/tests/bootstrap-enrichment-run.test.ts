@@ -93,7 +93,7 @@ describe("enrichment production bootstrap", () => {
     }
     expect(work.prepare("SELECT COUNT(*) AS n FROM worker_queue_plan").get()).toEqual({ n: 5 });
     work.close();
-    expect(await readFile(sourcePath)).toEqual(before);
+    expect((await readFile(sourcePath)).equals(before)).toBe(true);
   });
   it("compacts a verified index to unresolved queue and registry evidence", async () => {
     const directory = await makeFixture();
