@@ -28,8 +28,8 @@ export function selectedObservationThrough(
     taxonomyVersion: context.taxonomy.version,
     contractHash: context.contract,
   });
-  // Start source membership with the observation, not one probe per pinned segment.
-  // Both indexes exist, but the segment-first plan exceeds the real-source deadline.
+  // Read each selected post once and stop at its newest permitted observation.
+  // Scanning every historical counter sample repeats source and visibility checks.
   const row = database
     .prepare(
       `WITH eligible AS MATERIALIZED (${eligible.sql}), permitted AS MATERIALIZED (
@@ -39,17 +39,22 @@ export function selectedObservationThrough(
       AND NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
         WHERE m.unit_id = e.unit_id AND json_type(t.json, '$.is_subscriber_only') IS NOT NULL
           AND json_type(t.json, '$.is_subscriber_only') <> 'false')
-    ) SELECT MAX(o.observed_at) AS latest FROM permitted p JOIN unit_members m ON m.unit_id = p.unit_id
-      JOIN post_observations o ON o.post_id = m.tweet_id
-      JOIN post_content_versions c ON c.content_hash = o.content_hash
-      WHERE (? IS NULL OR o.post_id IN (SELECT value FROM json_each(?)))
-        AND NOT EXISTS (SELECT 1 FROM tweets current WHERE current.id = o.post_id
+    ), selected_posts AS MATERIALIZED (
+      SELECT DISTINCT m.tweet_id AS post_id FROM permitted p JOIN unit_members m ON m.unit_id = p.unit_id
+      WHERE (? IS NULL OR m.tweet_id IN (SELECT value FROM json_each(?)))
+        AND NOT EXISTS (SELECT 1 FROM tweets current WHERE current.id = m.tweet_id
           AND json_type(current.json, '$.is_retweet') IS NOT NULL AND json_type(current.json, '$.is_retweet') <> 'false')
+    ) SELECT MAX((
+      SELECT o.observed_at FROM post_observations o INDEXED BY idx_observation_post_time
+      JOIN post_content_versions c ON c.content_hash = o.content_hash
+      WHERE o.post_id = p.post_id
         AND (json_type(c.payload_json, '$.is_subscriber_only') IS NULL OR json_type(c.payload_json, '$.is_subscriber_only') = 'false')
         AND (json_type(c.payload_json, '$.is_retweet') IS NULL OR json_type(c.payload_json, '$.is_retweet') = 'false')
         AND json_extract(c.payload_json, '$.author.id') IN (SELECT value FROM json_each(?))
         AND EXISTS (SELECT 1 FROM observation_sources s INDEXED BY idx_observation_source_id WHERE s.observation_id = o.observation_id
           AND s.segment_key IN (SELECT json_extract(value, '$.key') FROM json_each(?)))
+      ORDER BY o.observed_at DESC, o.observation_id DESC LIMIT 1
+    )) AS latest FROM selected_posts p
     `,
     )
     .get(
