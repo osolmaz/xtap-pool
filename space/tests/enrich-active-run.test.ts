@@ -85,6 +85,45 @@ async function putPlan(store: MemoryObjects, value: ReturnType<typeof plan>): Pr
 }
 
 describe("active enrichment run history", () => {
+  it("bounds concurrent history reads and verifies the complete chain in generation order", async () => {
+    const source = new MemoryObjects();
+    for (let n = 1; n <= 12; n++) {
+      const value = plan(`2026-09-01T00:00:${String(n).padStart(2, "0")}Z`, SHA);
+      await putPlan(source, value);
+      await activateEnrichmentRun({
+        store: source,
+        runId: value.plan.run_id,
+        planSha256: value.sha256,
+        activatedAt: value.plan.created_at,
+      });
+    }
+    const expected = await resolveActiveEnrichmentRun(source);
+    let active = 0;
+    let maximum = 0;
+    const reads: string[] = [];
+    const store: CheckpointObjectStore = {
+      bucketId: source.bucketId,
+      list: (prefix) => source.list(prefix),
+      read: async (key) => {
+        active++;
+        maximum = Math.max(maximum, active);
+        reads.push(key);
+        await new Promise((resolve) => setTimeout(resolve, reads.length % 3));
+        active--;
+        return source.read(key);
+      },
+      writeImmutable: () => Promise.reject(new Error("read-only")),
+      writePointerHint: () => Promise.reject(new Error("read-only")),
+    };
+    expect(await resolveActiveEnrichmentRun(store)).toEqual(expected);
+    expect(maximum).toBe(8);
+    expect(active).toBe(0);
+    expect(reads.filter((key) => key.endsWith("/plan.json"))).toHaveLength(12);
+    source.files.delete(reads.find((key) => key.endsWith("/plan.json")) ?? "missing");
+    await expect(resolveActiveEnrichmentRun(store)).rejects.toThrow(
+      "required enrichment object is missing",
+    );
+  });
   it("rejects empty history and missing plans, and keeps activation idempotent", async () => {
     const store = new MemoryObjects();
     await expect(resolveActiveEnrichmentRun(store)).rejects.toThrow("history is empty");

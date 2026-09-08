@@ -4,6 +4,7 @@ import { computeInputHash } from "@xtap-pool/shared";
 import { consumerChangesEnvelopeSchema } from "../src/consumer-http-contract.js";
 import { ConsumerRuntime } from "../src/consumer-runtime.js";
 import { updateConsumerCoverage } from "../src/consumer-coverage-update.js";
+import { selectedObservationThrough } from "../src/consumer-coverage.js";
 import {
   BOOTSTRAP,
   consumerFixture,
@@ -135,7 +136,7 @@ describe("source coverage maintenance", () => {
         ],
       },
     };
-    const plan = consumerQueryPlan(f.index.store.database, /SELECT MAX\(o.observed_at\)/u);
+    const plan = consumerQueryPlan(f.index.store.database, /AS latest FROM selected_posts/u);
     const coverage = updateConsumerCoverage(f.index.store.database, target);
     expect(coverage.observationsThrough).toBe(source.observations_through);
     expect(coverage.completeThrough).toBe(source.complete_through);
@@ -427,6 +428,34 @@ describe("source coverage maintenance", () => {
       observationsThrough: null,
     });
   });
+  it("finds the newest permitted observation when later samples are outside the pinned source", async () => {
+    await f.postMany([
+      consumerTweet("100", { captured_at: "2026-09-06T01:00:00.000Z" }),
+      consumerTweet("200", { conversation_id: "100", captured_at: "2026-09-06T02:00:00.000Z" }),
+    ]);
+    const source = await finish(BOOTSTRAP);
+    const pinned = await context(source.cursor);
+    for (let hour = 3; hour < 12; hour++) {
+      await f.post(
+        consumerTweet("100", {
+          captured_at: `2026-09-06T${String(hour).padStart(2, "0")}:00:00.000Z`,
+          metrics: { likes: hour },
+        }),
+        false,
+      );
+    }
+    expect(selectedObservationThrough(f.index.store.database, pinned)).toBe(
+      "2026-09-06T02:00:00.000Z",
+    );
+    expect(selectedObservationThrough(f.index.store.database, pinned, ["100"])).toBe(
+      "2026-09-06T01:00:00.000Z",
+    );
+    expect(selectedObservationThrough(f.index.store.database, pinned, [])).toBeNull();
+    const next = await finish(`/api/changes?after=${source.cursor}`);
+    expect(next.observations_through).toBe("2026-09-06T11:00:00.000Z");
+    await assertFullCoverage(next.cursor, source.cursor);
+  });
+
   it("drops the old observation maximum when one member becomes a retweet", async () => {
     await f.postMany([
       consumerTweet("100", { captured_at: "2026-09-06T01:00:00.000Z" }),

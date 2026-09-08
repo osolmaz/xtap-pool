@@ -5,6 +5,7 @@ import type { CheckpointObjectStore } from "@osolmaz/hf-job-control";
 import { z } from "zod";
 
 import { canonicalPlanBytes, parseEnrichmentRunPlan } from "./enrich-run-plan.js";
+import { mapBatchesInOrder } from "./bounded-concurrency.js";
 
 const RUN_PREFIX = "operations/enrichment/runs";
 const ACTIVATION_PREFIX = `${RUN_PREFIX}/activations`;
@@ -48,23 +49,29 @@ export async function resolveActiveEnrichmentRunEvidence(
   let previous: ActiveEnrichmentRun | null = null;
   let currentKey: string | null = null;
   let currentBytes: Uint8Array | null = null;
-  for (const [index, key] of keys.entries()) {
-    const generation = index + 1;
-    if (key !== activationKey(generation)) {
-      throw new Error("enrichment run activation history is not contiguous");
-    }
-    const value = await requiredObject(store, key);
-    const claim = activeRunSchema.parse(JSON.parse(Buffer.from(value).toString("utf8")));
-    if (claim.generation !== generation) {
-      throw new Error("enrichment run activation generation does not match its path");
-    }
+  const claims = await mapBatchesInOrder({
+    inputs: keys.map((key, index) => ({ key, generation: index + 1 })),
+    concurrency: 8,
+    operation: async ({ key, generation }) => {
+      if (key !== activationKey(generation)) {
+        throw new Error("enrichment run activation history is not contiguous");
+      }
+      const value = await requiredObject(store, key);
+      const claim = activeRunSchema.parse(JSON.parse(Buffer.from(value).toString("utf8")));
+      if (claim.generation !== generation) {
+        throw new Error("enrichment run activation generation does not match its path");
+      }
+      await verifyPlan(store, claim);
+      return { key, value, claim };
+    },
+  });
+  for (const { key, value, claim } of claims) {
     if (claim.previous_plan_sha256 !== previous?.plan_sha256 && previous !== null) {
       throw new Error("enrichment run activation predecessor mismatch");
     }
     if (previous === null && claim.previous_plan_sha256 !== null) {
       throw new Error("first enrichment run activation must not have a predecessor");
     }
-    await verifyPlan(store, claim);
     previous = claim;
     currentKey = key;
     currentBytes = Uint8Array.from(value);

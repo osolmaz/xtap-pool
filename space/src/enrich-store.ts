@@ -1626,7 +1626,8 @@ function selectedUnits(options: UnitSelection): { sql: string; params: unknown[]
   const cutoffParams = options.cutoff === undefined ? [] : [options.cutoff];
   const authorParams = options.authorIds ?? [];
   return {
-    sql: `SELECT DISTINCT um.unit_id FROM unit_members um
+    sql: `WITH unit_ids AS MATERIALIZED (SELECT DISTINCT unit_id FROM unit_members)
+          SELECT um.unit_id FROM unit_ids um
           WHERE 1 = 1${cutoffSql}${publicationSql}${authorSql}`,
     params: [...cutoffParams, ...authorParams],
   };
