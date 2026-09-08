@@ -1729,27 +1729,20 @@ export function selectedCompleteThrough(
   options: UnitSelection,
 ): string | undefined {
   const selectedSql = selectedUnits(options);
-  const nonDone = database
-    .prepare(
-      `SELECT MIN(latest_activity_at) AS threshold FROM enrich_queue q
-         WHERE unit_id IN (${selectedSql.sql}) AND status != 'done'`,
-    )
-    .get(...selectedSql.params) as { threshold: string | null };
-  if (nonDone.threshold === null) {
-    const doneMax = database
-      .prepare(
-        `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
-           WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'`,
-      )
-      .get(...selectedSql.params) as { m: string | null };
-    return doneMax.m ?? undefined;
-  }
+  // Materialize the selected queue once. Repeating the full selection for the
+  // pending boundary and the completed maximum can exceed the HTTP deadline.
   const row = database
     .prepare(
-      `SELECT MAX(latest_activity_at) AS m FROM enrich_queue q
-         WHERE unit_id IN (${selectedSql.sql}) AND status = 'done'
-           AND latest_activity_at < ?`,
+      `WITH selected AS MATERIALIZED (
+         SELECT latest_activity_at, status FROM enrich_queue
+         WHERE unit_id IN (${selectedSql.sql})
+       ), boundary AS (
+         SELECT MIN(CASE WHEN status != 'done' THEN latest_activity_at END) AS threshold
+         FROM selected
+       )
+       SELECT MAX(latest_activity_at) AS m FROM selected CROSS JOIN boundary
+       WHERE status = 'done' AND (threshold IS NULL OR latest_activity_at < threshold)`,
     )
-    .get(...selectedSql.params, nonDone.threshold) as { m: string | null };
+    .get(...selectedSql.params) as { m: string | null };
   return row.m ?? undefined;
 }
