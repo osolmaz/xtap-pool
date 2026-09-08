@@ -71,6 +71,20 @@ The configuration-change check now loads only newly verified config or mixed seg
 
 At 12:46 UTC, the raw log had 138 new mixed segments since 12:30. The first three and last three were checksum-verified and inspected; all six contained append operations only. This matches the failure in the live refresh logs. Regression tests cover append-only mixed batches, genuine dedicated and mixed configuration writes, late-arriving files, unchanged old files, irrelevant tweet files, and failed segment verification.
 
+## Final recovery and resumed schedules
+
+The configuration-tail fix passed 776 tests, 88.15% configured coverage, zero DRY candidates, review with no findings, and CI. Source `cfd46b156aeec2c30225e63f9873c295fb247731` is deployed as Space revision `2b422fa8b081389ab28f930053b3257e8564eee2`.
+
+The earlier catch-up completed all 1,194 pending entries in 202 provider calls, at a receipt cost of $2.0000476. All 308,130 queue positions and 29,629 registry positions were complete. Public index `8ec8e961756db809db65897a1129a7af00e7442ba626c8c699a47b25837ddc6e` was published, and checkpoint sequence 237 retained the outputs. The physical Job exceeded its configured 2,700-second timeout and was canceled. Hugging Face omitted its terminal timestamp; the observed cancellation bounds CPU cost conservatively at $0.025. This is not an invoice. The unused inference reservation was released.
+
+Canonical cloud handoff Job `6aa00b2c32d5d0c22c5ad683` passed. Its result was reused after checking the current activation, immutable plan, and exact checkpoint pointer hashes; replaying all checkpoint history again locally was unnecessary. The new image's read-only restore Job `6aa00e0b32d5d0c22c5ad6c9` recovered sequence 237, all completed work, and 232 claimed segments with zero orphan segments and zero provider calls.
+
+Three full-selection metadata requests then passed in 17.192, 17.950, and 14.115 seconds. Their content pages took 10.278, 4.472, and 11.999 seconds. All stayed below 30 seconds. The verified source was complete through September 8 at 10:14:55 UTC. This source boundary is distinct from the live Our Models publication boundary.
+
+Our Models recovery Job `6aa00f6632d5d0c22c5ad716` completed in 78.315 seconds. A separate-directory restore proved progression from source sequence 2 to 4 and from 112 to 302 source records, preserving the first page and all 1,117,337 cache entries with zero provider calls. The failed intermediate attempt remains recorded.
+
+Both schedules are active again. xTap schedule `6aa00dfa900620b5c77e22ed` started continuation Job `6aa00f2432d5d0c22c5ad70d`; Our Models schedule `6a9fcc6ae686246ca69aa578` started catch-up Job `6aa01065900620b5c77e2385`. The latter retains the approved $180 cumulative inference limit under the $200 task approval. Counted settled cost before these active attempts is $3.7983566, including provider receipts and conservative CPU estimates. Their active reservations are not money spent. Our Models backlog completion has not yet been established.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
