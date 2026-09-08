@@ -65,6 +65,12 @@ Canonical schedule `6a9ffde3b012ba1d5b8f2bea` is active on the unchanged six-hou
 
 The live Space logs explain this failure: new mixed enrichment segments started full `configuration-refresh` scans at 12:34 UTC. Those scans held the same lock used by consumer reads. They continued while xTap made valid progress: its checkpoint reached sequence 41 and queue completion rose from 306,936 to 307,164. The reader must inspect only new segments for actual configuration writes, rather than treating every mixed segment as a configuration change, before retrying the Our Models recovery check.
 
+## Limit configuration refresh to real writes
+
+The configuration-change check now loads only newly verified config or mixed segments and examines their operations. Append-only enrichment, attempt, and registry batches do not start a full configuration refresh. Real configuration writes still take the existing validated reload path. Missing or corrupt new segments fail the check instead of being treated as unchanged.
+
+At 12:46 UTC, the raw log had 138 new mixed segments since 12:30. The first three and last three were checksum-verified and inspected; all six contained append operations only. This matches the failure in the live refresh logs. Regression tests cover append-only mixed batches, genuine dedicated and mixed configuration writes, late-arriving files, unchanged old files, irrelevant tweet files, and failed segment verification.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
