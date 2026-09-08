@@ -35,6 +35,14 @@ Activation history reads now use the existing bounded batch helper with concurre
 
 The first enrichment Job failed because the initial deployment did not include the required revision handoff. Canonical stage preparation corrected that deployment error. The subsequent read-only Job `6a9fdb2b8e5f7b7fd14cb6d7` found that the active bootstrap plan still referenced the index from before the consumer deployment. It stopped before inference or output writes. Recovery must preserve the prior plan and checkpoint, verify whether any outputs exist, and prepare a successor from the verified current index. Both schedules remain suspended only for this active recovery.
 
+## Classifier work copy size
+
+Preparing a successor exposed another migration defect before activation: the compact classifier database still contained all consumer observation and change-history tables. Its 2,953,281,536-byte file exceeded Node's 2 GiB `readFile` limit. No successor was activated and no inference call was made.
+
+The worker compaction now excludes those eight consumer-only tables from its disposable copy. Publication still restores the verified full base index and applies worker outputs there; the public history and raw source are not removed. A regression test requires the public source file to remain byte-identical and preserves queue and registry work.
+
+On the verified prepared source, the work file falls to 60,850,176 bytes. The source database SHA-256 remains `5cf69cd60e424d83da3ac2e4b6d4161ca154a1873b392abdd56d361e15859eb8`; all 308,130 queue positions, 306,936 completed positions, and 29,629 registry positions remain represented. Full local checks pass with 771 tests, 88.12% configured coverage, and zero Slophammer DRY candidates. The corrected candidate still requires activation and cloud recovery verification.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
