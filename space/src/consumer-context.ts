@@ -86,7 +86,7 @@ export class ConsumerContextStore {
       options.boundary.contract !== this.contract
     )
       throw new Error("consumer metadata does not match its verified source boundary");
-    const source = await this.sources.describe(options.snapshot);
+    const source = this.sources.describe(options.snapshot);
     const context = consumerContextSchema.parse({
       schema_version: 1,
       created_at: now.toISOString(),

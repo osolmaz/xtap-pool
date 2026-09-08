@@ -12,6 +12,11 @@ export const consumerSourceSchema = z
   .strict();
 export type ConsumerSource = z.infer<typeof consumerSourceSchema>;
 type Base = { revision: string; snapshot: BucketSnapshot };
+export class ConsumerSourceNotReady extends Error {
+  constructor() {
+    super("The current source metadata is not prepared yet.");
+  }
+}
 
 /** Compact exact source membership. Bases use the existing immutable raw snapshot store.
  * There is no new mutable head: every context names its base and all additional files.
@@ -21,25 +26,34 @@ export class ConsumerSourceStore {
   private readonly loaded = new Map<string, BucketSnapshot>();
   constructor(private readonly log: Pick<BucketLog, "loadSnapshot" | "storeSnapshot">) {}
 
-  async describe(input: BucketSnapshot): Promise<{ revision: string; source: ConsumerSource }> {
+  /** Run during index startup/refresh, outside the consumer HTTP deadline. */
+  async prepare(input: BucketSnapshot): Promise<void> {
     const snapshot = bucketSnapshotSchema.parse(input);
-    const source =
-      this.base === undefined
-        ? undefined
-        : { base: this.base.revision, additions: difference(this.base.snapshot, snapshot) };
-    if (
-      source === undefined ||
-      source.additions.length > MAX_ADDITIONS ||
-      canonicalBytes(source).byteLength > MAX_DESCRIPTOR_BYTES
-    ) {
-      const saved = await this.log.storeSnapshot(snapshot);
-      if (saved.revision !== sha256(canonicalBytes(snapshot)))
-        throw new Error("consumer source base changed during storage");
-      this.base = saved;
-      this.remember(saved.revision, saved.snapshot);
-      return { revision: saved.revision, source: { base: saved.revision, additions: [] } };
-    }
+    if (this.descriptor(snapshot) !== undefined) return;
+    const saved = await this.log.storeSnapshot(snapshot);
+    if (saved.revision !== sha256(canonicalBytes(snapshot)))
+      throw new Error("consumer source base changed during storage");
+    this.base = saved;
+    this.remember(saved.revision, saved.snapshot);
+  }
+
+  describe(input: BucketSnapshot): { revision: string; source: ConsumerSource } {
+    const snapshot = bucketSnapshotSchema.parse(input);
+    const source = this.descriptor(snapshot);
+    if (source === undefined) throw new ConsumerSourceNotReady();
     return { revision: sha256(canonicalBytes(snapshot)), source };
+  }
+
+  private descriptor(snapshot: BucketSnapshot): ConsumerSource | undefined {
+    if (this.base === undefined) return undefined;
+    const source = {
+      base: this.base.revision,
+      additions: difference(this.base.snapshot, snapshot),
+    };
+    return source.additions.length > MAX_ADDITIONS ||
+      canonicalBytes(source).byteLength > MAX_DESCRIPTOR_BYTES
+      ? undefined
+      : source;
   }
 
   async resolve(revision: string, input: ConsumerSource): Promise<BucketSnapshot> {

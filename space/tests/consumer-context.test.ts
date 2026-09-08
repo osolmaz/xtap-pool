@@ -48,27 +48,26 @@ const options = () => ({
   completeThrough: null,
   observationsThrough: null,
 });
-const store = (delta = 0, targetContract = contract) =>
-  new ConsumerContextStore(
-    new ConsumerSourceStore(log),
-    bucket,
-    targetContract,
-    () => new Date(instant + delta),
-  );
-beforeEach(() => {
+let preparedSources: ConsumerSourceStore;
+const store = (delta = 0, targetContract = contract, sources = new ConsumerSourceStore(log)) =>
+  new ConsumerContextStore(sources, bucket, targetContract, () => new Date(instant + delta));
+beforeEach(async () => {
   records.clear();
+  preparedSources = new ConsumerSourceStore(log);
+  await preparedSources.prepare(snapshot);
   vi.clearAllMocks();
 });
+const writer = () => store(0, contract, preparedSources);
 
 describe("immutable consumer contexts", () => {
   it("saves exact selection and source metadata before issuing a durable reference", async () => {
-    const pinned = await store().pin(options());
+    const pinned = await writer().pin(options());
     expect(pinned.context.selection.author_ids).toEqual(["123", "456"]);
     expect(pinned.context.selection.labels).toEqual(["ai"]);
     expect([...records.keys()]).toEqual([`${CONSUMER_CONTEXT_PREFIX}${pinned.id}.json`]);
     expect(pinned.context.complete_through).toBeNull();
     expect(pinned.context.observations_through).toBeNull();
-    expect((await store().pin(options())).id).toBe(pinned.id);
+    expect((await writer().pin(options())).id).toBe(pinned.id);
     expect(await store().read(pinned.id)).toEqual({
       ...pinned,
       context: {
@@ -80,7 +79,7 @@ describe("immutable consumer contexts", () => {
   });
 
   it("rejects corrupt, missing, expired, future, and changed-contract contexts", async () => {
-    const pinned = await store().pin(options());
+    const pinned = await writer().pin(options());
     await expect(store().read("../current")).rejects.toThrow();
     await expect(store().read("f".repeat(64))).rejects.toThrow(/expired/);
     await expect(store(CURSOR_RECOVERY_MS).read(pinned.id)).rejects.toThrow(/expired/);
@@ -97,7 +96,7 @@ describe("immutable consumer contexts", () => {
     expect(records.size).toBe(0);
     expect(log.storeSnapshot).not.toHaveBeenCalled();
     const unavailable = new ConsumerContextStore(
-      new ConsumerSourceStore(log),
+      preparedSources,
       { ...bucket, writeText: () => Promise.resolve() },
       contract,
       () => new Date(instant),
@@ -106,7 +105,7 @@ describe("immutable consumer contexts", () => {
   });
 
   it("does not turn coverage or registry bookkeeping into changed public metadata", async () => {
-    const { context } = await store().pin(options());
+    const { context } = await writer().pin(options());
     const before = consumerMetadataHash(context);
     expect(
       consumerMetadataHash({

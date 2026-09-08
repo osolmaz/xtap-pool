@@ -61,8 +61,8 @@ export async function consumerFixture() {
   const mutex = new Mutex();
   const workers = new ConsumerWorkers();
   const codec = new ConsumerCursorCodec("fixture-signing-key".repeat(3), now);
-  const stores = () =>
-    new ConsumerContextStore(new ConsumerSourceStore(log), bucket, HTTP_CONTRACT, now);
+  let sources = new ConsumerSourceStore(log);
+  const stores = () => new ConsumerContextStore(sources, bucket, HTTP_CONTRACT, now);
   let contexts = stores();
   const options = (): ConsumerRuntimeOptions => ({
     contexts,
@@ -100,9 +100,13 @@ export async function consumerFixture() {
     advanceTime: (milliseconds: number) => {
       time = new Date(time.getTime() + milliseconds);
     },
-    request: (path: string, requestHeaders = headers) =>
-      app().request(path, { headers: requestHeaders }),
+    request: async (path: string, requestHeaders = headers) => {
+      // Model startup/background preparation, outside the HTTP request deadline.
+      await sources.prepare(index.sourceSnapshot());
+      return app().request(path, { headers: requestHeaders });
+    },
     restart: () => {
+      sources = new ConsumerSourceStore(log);
       contexts = stores();
       runtime = new ConsumerRuntime(options());
     },
