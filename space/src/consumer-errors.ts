@@ -1,4 +1,5 @@
 import { ZodError } from "zod";
+import { ConsumerSourceNotReady } from "./consumer-source.js";
 import {
   ConsumerContractChanged,
   ExpiredConsumerCursor,
@@ -30,8 +31,7 @@ export function consumerError(error: unknown): ConsumerHttpError {
     return new ConsumerHttpError(410, "cursor_expired", error.message, {
       action: "explicit_bootstrap",
     });
-  if (error instanceof ConsumerBootstrapRequired)
-    return new ConsumerHttpError(503, "projection_unavailable", error.message);
+  if (isSourceStateError(error)) return sourceStateError(error);
   if (isSourceLimit(error))
     return new ConsumerHttpError(
       413,
@@ -62,6 +62,19 @@ export function consumerErrorResponse(error: unknown): Response {
       },
     },
   );
+}
+
+function isSourceStateError(
+  error: unknown,
+): error is ConsumerSourceNotReady | ConsumerBootstrapRequired {
+  return error instanceof ConsumerSourceNotReady || error instanceof ConsumerBootstrapRequired;
+}
+function sourceStateError(
+  error: ConsumerSourceNotReady | ConsumerBootstrapRequired,
+): ConsumerHttpError {
+  const code =
+    error instanceof ConsumerSourceNotReady ? "source_not_ready" : "projection_unavailable";
+  return new ConsumerHttpError(503, code, error.message);
 }
 
 function isSourceLimit(error: unknown): boolean {

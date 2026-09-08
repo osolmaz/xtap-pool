@@ -144,6 +144,8 @@ function recordLastReceipt(receipt: import("@xtap-pool/shared").EnrichReceipt | 
     lastReceipt = receipt;
   }
 }
+const consumerSources = new ConsumerSourceStore(log);
+await consumerSources.prepare(index.sourceSnapshot());
 applyIndexStats();
 storageState = { state: "ready" };
 enrichStore.releaseClaims();
@@ -153,11 +155,7 @@ const consumerBucket = createDurableIndexBucketClient(
   config.hfToken,
   consumerFetch,
 );
-const consumerContexts = new ConsumerContextStore(
-  new ConsumerSourceStore(log),
-  consumerBucket,
-  contractHash,
-);
+const consumerContexts = new ConsumerContextStore(consumerSources, consumerBucket, contractHash);
 const consumerWorkers = new ConsumerWorkers();
 const consumer = new ConsumerRuntime({
   contexts: consumerContexts,
@@ -320,6 +318,7 @@ async function refreshExternalEnrichment(): Promise<void> {
       }
     }
     await index.advanceToDiscovered(discovered.revision, discovered.snapshot);
+    await consumerSources.prepare(index.sourceSnapshot());
     taxonomy = nextTaxonomy;
     if (configChanged) await Promise.all([membership.reload(), serviceAccounts.reload()]);
     applyIndexStats();
@@ -483,6 +482,7 @@ async function retryUncertainCredentials(): Promise<void> {
       await reloadStorageBackedConfig(storageRecovered);
       if (storageRecovered || storageState.state === "unknown") {
         await index.advanceToLatest();
+        await consumerSources.prepare(index.sourceSnapshot());
         applyIndexStats();
         storageState = { state: "ready" };
       }

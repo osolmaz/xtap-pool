@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { bucketSnapshotSchema, canonicalBytes, sha256 } from "../src/bucket-log.js";
 import type { BucketSnapshot, BucketSnapshotFile } from "../src/bucket-log.js";
-import { ConsumerSourceStore } from "../src/consumer-source.js";
+import { ConsumerSourceNotReady, ConsumerSourceStore } from "../src/consumer-source.js";
+import { consumerError } from "../src/consumer-errors.js";
 
 const files = new Map<string, BucketSnapshot>();
 const log = {
@@ -38,9 +39,16 @@ beforeEach(() => {
 describe("compact verified source membership", () => {
   it("stores an immutable base before a cursor can refer to it and survives restart", async () => {
     const writer = new ConsumerSourceStore(log);
-    const base = await writer.describe(snapshot(900));
+    expect(() => writer.describe(snapshot(900))).toThrow(ConsumerSourceNotReady);
+    expect(consumerError(new ConsumerSourceNotReady())).toMatchObject({
+      status: 503,
+      code: "source_not_ready",
+    });
+    expect(log.storeSnapshot).not.toHaveBeenCalled();
+    await writer.prepare(snapshot(900));
+    const base = writer.describe(snapshot(900));
     const target = snapshot(100, 900);
-    const described = await writer.describe(target);
+    const described = writer.describe(target);
     expect(log.storeSnapshot).toHaveBeenCalledTimes(1);
     expect(described.source.base).toBe(base.revision);
     expect(described.source.additions.map((entry) => entry.key)).toEqual([file(100).key]);
@@ -52,25 +60,30 @@ describe("compact verified source membership", () => {
 
   it("rejects missing or mutated old files rather than using a key watermark or full-read fallback", async () => {
     const store = new ConsumerSourceStore(log);
-    await store.describe(snapshot(1, 2));
-    await expect(store.describe(snapshot(2))).rejects.toThrow(/immutable file/);
+    await store.prepare(snapshot(1, 2));
+    expect(() => store.describe(snapshot(2))).toThrow(/immutable file/);
     const changed = snapshot(1, 2);
     const first = changed.files[0];
     if (first === undefined) throw new Error("missing fixture file");
     first.oid = "c".repeat(64);
-    await expect(store.describe(changed)).rejects.toThrow(/immutable file/);
-    await expect(store.describe({ ...snapshot(1, 2), bucket: "other/raw" })).rejects.toThrow(
+    expect(() => store.describe(changed)).toThrow(/immutable file/);
+    expect(() => store.describe({ ...snapshot(1, 2), bucket: "other/raw" })).toThrow(
       /Bucket changed/,
     );
   });
 
   it("rolls the metadata base only when the explicit additions exceed their bounds", async () => {
     const store = new ConsumerSourceStore(log);
-    await store.describe(snapshot(0));
+    await store.prepare(snapshot(0));
     const bounded = snapshot(...Array.from({ length: 1025 }, (_, i) => i));
-    expect((await store.describe(bounded)).source.additions).toHaveLength(1024);
+    expect(store.describe(bounded).source.additions).toHaveLength(1024);
+    await store.prepare(bounded);
+    expect(log.storeSnapshot).toHaveBeenCalledTimes(1);
     const larger = snapshot(...Array.from({ length: 1026 }, (_, i) => i));
-    const rolled = await store.describe(larger);
+    expect(() => store.describe(larger)).toThrow(ConsumerSourceNotReady);
+    expect(log.storeSnapshot).toHaveBeenCalledTimes(1);
+    await store.prepare(larger);
+    const rolled = store.describe(larger);
     expect(rolled.source.additions).toEqual([]);
     expect(log.storeSnapshot).toHaveBeenCalledTimes(2);
     expect(await new ConsumerSourceStore(log).resolve(rolled.revision, rolled.source)).toEqual(
@@ -80,8 +93,9 @@ describe("compact verified source membership", () => {
 
   it("verifies the full source checksum and rejects duplicate additions", async () => {
     const store = new ConsumerSourceStore(log);
-    const base = await store.describe(snapshot(1));
-    const target = await store.describe(snapshot(1, 2));
+    await store.prepare(snapshot(1));
+    const base = store.describe(snapshot(1));
+    const target = store.describe(snapshot(1, 2));
     await expect(store.resolve("f".repeat(64), target.source)).rejects.toThrow(
       /membership checksum/,
     );
@@ -102,11 +116,13 @@ describe("compact verified source membership", () => {
       ...log,
       storeSnapshot: () => Promise.reject(new Error("storage failed")),
     });
-    await expect(store.describe(snapshot(1))).rejects.toThrow("storage failed");
+    await expect(store.prepare(snapshot(1))).rejects.toThrow("storage failed");
+    expect(() => store.describe(snapshot(1))).toThrow(ConsumerSourceNotReady);
     const changed = new ConsumerSourceStore({
       ...log,
       storeSnapshot: () => Promise.resolve({ revision: "f".repeat(64), snapshot: snapshot(1) }),
     });
-    await expect(changed.describe(snapshot(1))).rejects.toThrow(/changed during storage/);
+    await expect(changed.prepare(snapshot(1))).rejects.toThrow(/changed during storage/);
+    expect(() => changed.describe(snapshot(1))).toThrow(ConsumerSourceNotReady);
   });
 });

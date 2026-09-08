@@ -43,6 +43,16 @@ The worker compaction now excludes those eight consumer-only tables from its dis
 
 On the verified prepared source, the work file falls to 60,850,176 bytes. The source database SHA-256 remains `5cf69cd60e424d83da3ac2e4b6d4161ca154a1873b392abdd56d361e15859eb8`; all 308,130 queue positions, 306,936 completed positions, and 29,629 registry positions remain represented. Full local checks pass with 771 tests, 88.12% configured coverage, and zero Slophammer DRY candidates. The corrected candidate still requires activation and cloud recovery verification.
 
+## Prepare source metadata before consumer requests
+
+The corrected worker copy was activated as generation 87, run `xtap-b0e01d0c7828c30def3948bcb4251e68`. Its read-only cloud restore passed. The following production retry failed with `fetch failed` after 243 seconds, before any provider calls or output changes. Its checkpoint remains at sequence one. The same run can resume; its plan and prior source files remain intact.
+
+Full-selection HTTP reads still exceeded the 30-second deadline after the SQL changes. A read-only cloud check on cpu-basic measured coverage at 8.220 seconds and privacy at 0.287 seconds against the published index. A separate local check of immutable source preparation uploaded and verified 16,260,675 bytes in 17.187 seconds. These are different executions, not an end-to-end latency measurement. They identify full snapshot preparation as additional work in the first HTTP request.
+
+Source bases are now prepared during verified index startup and the existing background refresh, before storage readiness is restored. Consumer requests only describe an already prepared base and its bounded additions. A missing or oversized base returns `503 source_not_ready` without uploading a snapshot. The existing background refresh prepares the next base; it does not require another API, store, schema version, or longer HTTP deadline. Ingest requests do not perform this preparation.
+
+Regression tests require no snapshot writes from cold, bounded, or oversized descriptions; explicit preparation and rollover; restart recovery; and unchanged immutable-file and checksum validation. Deployment must still prove full-selection metadata and content pages within the existing deadline before Our Models recovery Jobs resume.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
