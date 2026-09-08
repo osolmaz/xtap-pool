@@ -12,6 +12,7 @@ import { consumerFetch, withConsumerDeadline } from "./consumer-deadline.js";
 import { createApp } from "./app.js";
 import type { AppReadiness } from "./app.js";
 import { loadConfig } from "./config.js";
+import { hasConfigurationWrites } from "./configuration-tail.js";
 import { BucketLog, createRawBucketClient } from "./bucket-log.js";
 import type { BucketSnapshot } from "./bucket-log.js";
 import type { StorageState } from "./storage-state.js";
@@ -263,14 +264,6 @@ async function primeStorageTextCache(snapshot: BucketSnapshot, stage: string): P
   });
 }
 
-function hasConfigurationTail(base: BucketSnapshot, final: BucketSnapshot): boolean {
-  const baseKeys = new Set(base.files.map((file) => file.key));
-  return final.files.some(
-    (file) =>
-      !baseKeys.has(file.key) && (file.key.includes("/config/") || file.key.includes("/mixed/")),
-  );
-}
-
 function applyIndexStats(): void {
   const stats = index.stats();
   rebuilt = { files: stats.tweetFiles, tweets: stats.tweetRows };
@@ -304,7 +297,7 @@ async function refreshExternalEnrichment(): Promise<void> {
     if (!storageCredentialOk(storageCredential)) return;
     const baseSnapshot = index.sourceSnapshot();
     const discovered = await log.discoverSnapshot(baseSnapshot.files);
-    const configChanged = hasConfigurationTail(baseSnapshot, discovered.snapshot);
+    const configChanged = await hasConfigurationWrites(log, baseSnapshot, discovered.snapshot);
     let nextTaxonomy = taxonomy;
     if (configChanged) {
       await primeStorageTextCache(discovered.snapshot, "configuration-refresh");
