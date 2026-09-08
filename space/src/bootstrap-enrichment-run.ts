@@ -158,6 +158,16 @@ export async function compactEnrichmentWorkDatabase(options: {
             SELECT unit_id FROM worker_queue_plan WHERE initial_status <> 'done'
           );
         DELETE FROM recent_errors;
+        -- Consumer history belongs to the public index, not the classifier work copy.
+        -- Publication restores the verified full base and applies worker outputs there.
+        DROP TABLE IF EXISTS consumer_index_state;
+        DROP TABLE IF EXISTS consumer_label_units;
+        DROP TABLE IF EXISTS consumer_post_units;
+        DROP TABLE IF EXISTS consumer_result_sources;
+        DROP TABLE IF EXISTS consumer_results;
+        DROP TABLE IF EXISTS observation_sources;
+        DROP TABLE IF EXISTS post_observations;
+        DROP TABLE IF EXISTS post_content_versions;
         DROP TABLE keep_units;
         INSERT INTO tweets_fts(tweets_fts) VALUES ('rebuild');
       `);

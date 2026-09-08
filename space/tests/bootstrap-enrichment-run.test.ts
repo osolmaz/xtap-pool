@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,10 @@ import {
 } from "../src/bootstrap-enrichment-run.js";
 import { EnrichmentCheckpointAdapter } from "../src/enrich-checkpoint.js";
 import { createEmptyEnrichmentState } from "../src/enrich-state.js";
+import { ObservationStore } from "../src/observation-store.js";
+import { SourceEffectStore } from "../src/source-effect-store.js";
+import { ConsumerIndexState } from "../src/consumer-index-state.js";
+import { makePooled } from "./helpers.js";
 
 const directories: string[] = [];
 const CREATED_AT = "2026-08-19T12:00:00.000Z";
@@ -48,6 +52,49 @@ afterEach(async () => {
 });
 
 describe("enrichment production bootstrap", () => {
+  it("excludes consumer history only from the worker copy and leaves the public source byte-identical", async () => {
+    const directory = await makeFixture();
+    const sourcePath = join(directory, "source.sqlite");
+    const source = new Database(sourcePath);
+    const observations = new ObservationStore(source);
+    const effects = new SourceEffectStore(source);
+    new ConsumerIndexState(source, "contract");
+    const tweet = makePooled({ id: "1", text: "model history ".repeat(1000) });
+    const reference = {
+      segmentKey: "segments/tweet.json",
+      operation: 0,
+      path: "tweets.jsonl",
+      position: 0,
+    };
+    observations.record(tweet, reference);
+    effects.recordPost(tweet, reference);
+    source.close();
+    const before = await readFile(sourcePath);
+    const result = await compactEnrichmentWorkDatabase({
+      sourcePath,
+      destinationPath: join(directory, "work.sqlite"),
+      registryBaselineScanned: 7,
+    });
+    expect(result).toMatchObject({ queueTotal: 5, queueBaselineDone: 2, retainedTweets: 4 });
+    const work = new Database(join(directory, "work.sqlite"), { readonly: true });
+    for (const name of [
+      "consumer_index_state",
+      "consumer_label_units",
+      "consumer_post_units",
+      "consumer_result_sources",
+      "consumer_results",
+      "observation_sources",
+      "post_observations",
+      "post_content_versions",
+    ]) {
+      expect(
+        work.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name),
+      ).toBeUndefined();
+    }
+    expect(work.prepare("SELECT COUNT(*) AS n FROM worker_queue_plan").get()).toEqual({ n: 5 });
+    work.close();
+    expect(await readFile(sourcePath)).toEqual(before);
+  });
   it("compacts a verified index to unresolved queue and registry evidence", async () => {
     const directory = await makeFixture();
     const result = await compactEnrichmentWorkDatabase({
