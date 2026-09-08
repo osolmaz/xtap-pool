@@ -50,7 +50,10 @@ describe("incremental consumer HTTP", () => {
     ]);
     expect(final.has_more).toBe(false);
     expect(f.codec.decode(final.cursor).position.kind).toBe("idle");
-    const delta = await page(`/api/changes?after=${final.cursor}`);
+    const boundary = await page(`/api/changes?after=${final.cursor}`);
+    expect(boundary.changes).toEqual([]);
+    expect(boundary.has_more).toBe(true);
+    const delta = await page(`/api/changes?after=${boundary.cursor}`);
     expect(delta.source).not.toBe(final.source);
     expect(delta.changes.map((c) => (c.type === "unit_upsert" ? c.unit.id : c.type))).toEqual([
       "300:a",
@@ -81,7 +84,9 @@ describe("incremental consumer HTTP", () => {
     expect(content.changes).toEqual([]);
     expect(content.complete_through).toBe(old.complete_through);
     expect(content.observations_through).toBe("2026-09-06T06:00:00.000Z");
-    const samples = await page(`/api/changes?after=${content.cursor}`);
+    const comparison = await page(`/api/changes?after=${content.cursor}`);
+    expect(comparison.changes).toEqual([]);
+    const samples = await page(`/api/changes?after=${comparison.cursor}`);
     expect(samples.changes.map((c) => c.type)).toEqual(["observation"]);
     expect(samples.has_more).toBe(false);
     await f.log.writeText("config/service-accounts.json", "{}");
@@ -89,7 +94,9 @@ describe("incremental consumer HTTP", () => {
     const receipt = await page(`/api/changes?after=${samples.cursor}`);
     expect(receipt.complete_through).toBe(old.complete_through);
     expect(receipt.changes).toEqual([]);
-    expect((await page(`/api/changes?after=${receipt.cursor}`)).has_more).toBe(false);
+    const bookkeeping = await page(`/api/changes?after=${receipt.cursor}`);
+    expect(bookkeeping.changes).toEqual([]);
+    expect((await page(`/api/changes?after=${bookkeeping.cursor}`)).has_more).toBe(false);
   });
 
   it("requires explicit scopes and checks revocation on every page", async () => {

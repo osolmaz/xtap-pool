@@ -60,17 +60,19 @@ export class ConsumerCoverageEffects {
   posts(after = ""): string[] {
     return this.database
       .prepare(
-        `SELECT DISTINCT o.post_id FROM json_each(@changed) a
-      JOIN source_segments segment ON segment.key = a.value AND segment.tweet_rows > 0
-      JOIN observation_sources s ON s.segment_key = segment.key
-      JOIN post_observations o ON o.observation_id = s.observation_id
-      WHERE o.post_id > @after AND EXISTS (
+        `WITH changed_posts AS MATERIALIZED (
+      SELECT DISTINCT o.post_id FROM json_each(@changed) a
+      CROSS JOIN source_segments segment ON segment.key = a.value AND segment.tweet_rows > 0
+      CROSS JOIN observation_sources s ON s.segment_key = segment.key
+      CROSS JOIN post_observations o ON o.observation_id = s.observation_id
+      WHERE o.post_id > @after
+    ) SELECT p.post_id FROM changed_posts p WHERE EXISTS (
         SELECT 1 FROM consumer_post_units d JOIN observation_sources ds ON ds.source_ref = d.source_ref
-        WHERE d.post_id = o.post_id AND ds.segment_key IN (SELECT value FROM json_each(@target))
+        WHERE d.post_id = p.post_id AND ds.segment_key IN (SELECT value FROM json_each(@target))
           AND EXISTS (SELECT 1 FROM consumer_post_units member JOIN observation_sources ms ON ms.source_ref = member.source_ref
             WHERE member.unit_id = d.unit_id AND member.author_id IN (SELECT value FROM json_each(@authors))
               AND ms.segment_key IN (SELECT value FROM json_each(@target))))
-      ORDER BY o.post_id LIMIT 100`,
+      ORDER BY p.post_id LIMIT 100`,
       )
       .all({
         changed: JSON.stringify(this.additions),
