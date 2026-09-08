@@ -53,6 +53,18 @@ Source bases are now prepared during verified index startup and the existing bac
 
 Regression tests require no snapshot writes from cold, bounded, or oversized descriptions; explicit preparation and rollover; restart recovery; and unchanged immutable-file and checksum validation. Deployment must still prove full-selection metadata and content pages within the existing deadline before Our Models recovery Jobs resume.
 
+## Verified source-read deployment
+
+Source `35f8318026a3ad56868fd0fc57a42142a50bef3b` from PR 52 is deployed as Space revision `1b4196c0439563b00647610af118bb4d5a245513`. Local checks passed with 771 tests, 88.14% configured coverage, and zero DRY candidates. Pi Reviewer reported no findings and CI passed.
+
+The canonical revision handoff preserved active generation 87 and its sequence-one checkpoint. Read-only cloud Job `6a9ffc91b012ba1d5b8f2bc6` verified the handoff in 157.010 seconds. Restore Job `6a9ffdf48e5f7b7fd14cbca7` completed in 149.624 seconds with zero provider calls, zero orphan segments, and unchanged run objects and public index pointer.
+
+At 12:28 UTC, three full-selection metadata requests returned HTTP 200 in 13.899, 20.001, and 13.689 seconds. Their first content pages returned 112 changes each in 4.051, 5.215, and 5.049 seconds. All six requests stayed below the existing 30-second deadline. These tests used source `4b090d0a65daa4806ba97a5af15e97a00c716f8d5471503cd01602b6e7596711`; they prove bounded initial reads, not full backlog publication.
+
+Canonical schedule `6a9ffde3b012ba1d5b8f2bea` is active on the unchanged six-hour schedule and $10 inference/2,700-second bounds. Catch-up Job `6a9ffef6b012ba1d5b8f2c08` started at 12:26:40 UTC. Our Models cloud recovery Job `6a9fff9eb012ba1d5b8f2c1b` then completed in 82.331 seconds. A separate-directory restore recovered its two committed source pages, 112 pending source records, and all 1,117,337 cache entries without a provider call. The second physical recovery Job, `6aa000b9b012ba1d5b8f2c3e`, failed after two `503` responses and a `429 consumer_busy`; the first Job's saved pages remain intact.
+
+The live Space logs explain this failure: new mixed enrichment segments started full `configuration-refresh` scans at 12:34 UTC. Those scans held the same lock used by consumer reads. They continued while xTap made valid progress: its checkpoint reached sequence 41 and queue completion rose from 306,936 to 307,164. The reader must inspect only new segments for actual configuration writes, rather than treating every mixed segment as a configuration change, before retrying the Our Models recovery check.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.

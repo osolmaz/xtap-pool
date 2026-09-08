@@ -20,7 +20,7 @@ replaceable, checksum-verified SQLite index generations.
 See [Move pool storage to an immutable Bucket log](docs/2026-08-12-bucket-object-log-plan.md)
 for the storage contract and cutover procedure.
 [Incremental consumer reads and engagement history](docs/2026-09-07-incremental-consumer-and-engagement-history-plan.md)
-records the next planned source/API changes; they are not implemented yet.
+describes cursor-based changes and bounded observation history for downstream applications.
 The other implementation plans under [`docs/`](docs/) record earlier design work.
 
 ## Set up a pool
