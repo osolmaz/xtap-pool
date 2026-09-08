@@ -454,20 +454,29 @@ export class ConsumerRuntime {
   ): Promise<Response> {
     const { target, base, cursor } = sequence;
     const metadata = needsMetadata(cursor, target, base);
-    // Even a metadata-only page must run the current privacy and source checks.
-    const task = await this.task(sequence, current, metadata ? 1 : limit, "page");
+    // Pinning a changed source and reading its bodies need separate bounded reads.
+    // Reuse the existing first-page marker even when metadata itself is unchanged.
+    const boundary = needsBoundaryPage(cursor, target, base);
+    // Boundary-only pages still enforce current privacy and source checks.
+    const task = await this.task(sequence, current, boundary ? 1 : limit, "page");
     const result = await this.options.workers.run(
-      { ...task, operation: metadata ? "privacy" : "page" },
+      { ...task, operation: boundary ? "privacy" : "page" },
       signal,
     );
-    if (metadata)
-      return this.changes(sequence, { ...cursor, metadata_sent: true }, [
-        {
-          type: "metadata",
-          taxonomy: target.context.taxonomy,
-          approved: target.context.registry.approved,
-        },
-      ]);
+    if (boundary)
+      return this.changes(
+        sequence,
+        { ...cursor, metadata_sent: true },
+        metadata
+          ? [
+              {
+                type: "metadata",
+                taxonomy: target.context.taxonomy,
+                approved: target.context.registry.approved,
+              },
+            ]
+          : [],
+      );
     if (result.kind === "changes")
       return this.changes(sequence, result.step.cursor, result.step.changes);
     if (result.kind !== "history" || cursor.position.kind !== "history")
@@ -538,6 +547,20 @@ function invalidRoute(): ConsumerHttpError {
     400,
     "cursor_conflict",
     "The cursor or query does not match this operation.",
+  );
+}
+
+function needsBoundaryPage(
+  cursor: ConsumerCursor,
+  target: ResolvedConsumerContext,
+  base?: ResolvedConsumerContext,
+): boolean {
+  return (
+    needsMetadata(cursor, target, base) ||
+    (cursor.position.kind !== "history" &&
+      cursor.metadata_sent !== true &&
+      base !== undefined &&
+      base.context.source !== target.context.source)
   );
 }
 

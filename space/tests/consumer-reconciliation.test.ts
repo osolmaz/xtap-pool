@@ -274,7 +274,9 @@ describe("paged privacy reconciliation", () => {
     const replica = new Replica();
     const source = await finishChanges(BOOTSTRAP, replica);
     await f.post(consumerTweet());
-    const first = await changes(`/api/changes?after=${source.cursor}&limit=1`);
+    const boundary = await changes(`/api/changes?after=${source.cursor}&limit=1`);
+    expect(boundary.changes).toEqual([]);
+    const first = await changes(`/api/changes?after=${boundary.cursor}&limit=1`);
     replica.apply(first.changes);
     expect(f.codec.decode(first.cursor).position.kind).toBe("activation");
     await withdraw("100");
@@ -299,7 +301,9 @@ describe("paged privacy reconciliation", () => {
       consumerTweet("100", { conversation_id: "500", captured_at: "2026-09-06T06:00:00.000Z" }),
     );
     await f.post(consumerTweet("200", { conversation_id: "100" }));
-    const first = await changes(`/api/changes?after=${source.cursor}&limit=1`);
+    const boundary = await changes(`/api/changes?after=${source.cursor}&limit=1`);
+    expect(boundary.changes).toEqual([]);
+    const first = await changes(`/api/changes?after=${boundary.cursor}&limit=1`);
     replica.apply(first.changes);
     expect(replica.units.get("100:a")).toEqual(["200"]);
     await withdraw("100");

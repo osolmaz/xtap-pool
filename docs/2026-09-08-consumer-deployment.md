@@ -87,6 +87,20 @@ Both schedules are active again. xTap schedule `6aa00dfa900620b5c77e22ed` starte
 
 The first continuation attempt, `6aa00f2432d5d0c22c5ad70d`, ended with `fatal: terminated` after 547.208 seconds. The active generation and checkpoint 237 were unchanged, with all work still complete and no successor activated. No AI work was repeated. Its $0.005 conservative CPU estimate was settled and its unused inference reservation released. The same validated schedule started retry `6aa0124d900620b5c77e23da`. Settled counted cost is now $3.8033566, excluding the active attempts. Our Models catch-up remains active and its observed source requests return HTTP 200 on their first attempt.
 
-## Browser delivery
+## Saved continuation and browser delivery
 
-The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
+Job `6aa0124d900620b5c77e23da` reached its physical timeout at September 8 14:38:53 UTC. It had processed 84 additional entries through 14 provider calls for $0.1255376. Its conservative CPU estimate is $0.025 for 2,984.928 seconds. The unused inference and CPU reservations were released. Counted settled cost is $3.9538942, excluding the active Our Models receipt.
+
+The Job advanced to generation 89 and saved the initial checkpoint for `xtap-27c86045f33978c91c9279a0c193b425`. Outer and inner checkpoint hashes verified. All 308,214 queue entries were already complete; 11 registry entries and publication remained. The new run had no output segments or initial progress record. Worker code must publish that record before provider calls, so the preceding Job's final receipt accounts for its inference work. Resume Job `6aa02f9932d5d0c22c5adc0a` uses the existing schedule and checkpoint, with a $10 inference maximum and $0.03 CPU reservation. Those limits are not money spent.
+
+Chrome's registered service worker now reports xTap 0.26.0. After an unsuccessful logged-out test, the operator restored the login and a normal scraper retry recorded 242 observations across 237 posts, including 138 observations of previously known posts. This proves browser collection, not yet delivery of those particular observations through the history API to Our Models.
+
+## Changed-source request deadline
+
+A read-only production request from the Our Models saved idle cursor failed after the client deadline. A second diagnostic request, limited to one change, returned `503 deadline_exceeded` after 31.323 seconds. The Space health check remained successful. The initial full download had completed; this failure concerns the subsequent change-read path.
+
+Source pinning computes coverage before page construction. When taxonomy and approvals were unchanged, the first request also read changed bodies under that same 30-second deadline. The fix returns a privacy-checked boundary-only page after pinning a changed source, using the existing `metadata_sent` cursor marker. Unchanged metadata is not resent. The next request reads bodies against the saved source. An unchanged source still completes in one empty response. No response schema, deadline, compatibility reader, or new state store is added.
+
+Coverage candidate selection now collects distinct changed post IDs before checking selected unit membership. On the existing local September 8 database, a 1,000-segment window returned the same first 100 post IDs in all three comparisons. Baseline times were 2,778, 2,788, and 2,778 ms; candidate times were 980, 981, and 981 ms. The absolute reduction was 1,798–1,807 ms. These are local ARM64 query measurements, not cloud endpoint latency or proof of production recovery. Live change reads must still complete within the existing deadline after deployment.
+
+Regression tests cover boundary-only responses, restart and fixed-source behavior, unchanged-source completion, privacy changes between pages, and deduplicated candidate selection through the existing indexes.
