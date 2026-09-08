@@ -85,6 +85,8 @@ Our Models recovery Job `6aa00f6632d5d0c22c5ad716` completed in 78.315 seconds. 
 
 Both schedules are active again. xTap schedule `6aa00dfa900620b5c77e22ed` started continuation Job `6aa00f2432d5d0c22c5ad70d`; Our Models schedule `6a9fcc6ae686246ca69aa578` started catch-up Job `6aa01065900620b5c77e2385`. The latter retains the approved $180 cumulative inference limit under the $200 task approval. Counted settled cost before these active attempts is $3.7983566, including provider receipts and conservative CPU estimates. Their active reservations are not money spent. Our Models backlog completion has not yet been established.
 
+The first continuation attempt, `6aa00f2432d5d0c22c5ad70d`, ended with `fatal: terminated` after 547.208 seconds. The active generation and checkpoint 237 were unchanged, with all work still complete and no successor activated. No AI work was repeated. Its $0.005 conservative CPU estimate was settled and its unused inference reservation released. The same validated schedule started retry `6aa0124d900620b5c77e23da`. Settled counted cost is now $3.8033566, excluding the active attempts. Our Models catch-up remains active and its observed source requests return HTTP 200 on their first attempt.
+
 ## Browser delivery
 
 The server can now return the saved history. Repeat-observation delivery also requires the updated unpacked extension, version 0.26.0, to be loaded in the browsing Chrome instance. That browser installation has not been verified from this machine. The source folder is `extension/`; reload it through Chrome's extension page if it still runs the earlier version.
