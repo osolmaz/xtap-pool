@@ -104,3 +104,13 @@ Source pinning computes coverage before page construction. When taxonomy and app
 Coverage candidate selection now collects distinct changed post IDs before checking selected unit membership. On the existing local September 8 database, a 1,000-segment window returned the same first 100 post IDs in all three comparisons. Baseline times were 2,778, 2,788, and 2,778 ms; candidate times were 980, 981, and 981 ms. The absolute reduction was 1,798–1,807 ms. These are local ARM64 query measurements, not cloud endpoint latency or proof of production recovery. Live change reads must still complete within the existing deadline after deployment.
 
 Regression tests cover boundary-only responses, restart and fixed-source behavior, unchanged-source completion, privacy changes between pages, and deduplicated candidate selection through the existing indexes.
+
+## Changed-source deployment
+
+PR [#54](https://github.com/osolmaz/xtap-pool/pull/54) passed `npm run check`, SimpleDoc, Pi Reviewer with no findings, and CI run `34251140734`. It merged as `853d3da38cef549f506a65453e452597bb36e763`. The existing Space received that source as `92c4e167b482e979a21ad30aba4938625301e664` at 16:57 UTC. Live change-read verification remains pending while the Space restores its index; the first probe received a database-not-restored response, not a change-read deadline result.
+
+The preceding Job `6aa02f9932d5d0c22c5adc0a` completed generation 89 and published verified index `31760d111d4790d90a3390c71d44467bda469b5efa630a1fa2dc6554525c037a`. It then processed 378 entries in generation 90 through 64 provider calls. Its final receipts report $0.698001 in inference; estimated CPU cost is $0.021. Unused reservations were released. Counted settled cost reached $4.6728952, excluding the active Our Models run.
+
+Read-only handoff Job `6aa03b0b32d5d0c22c5adde5` and new-image restore Job `6aa03ee732d5d0c22c5ade3f` both completed. Each added an estimated $0.0015 in CPU cost and zero provider calls. The restore verified checkpoint 73, 308,510 of 308,861 completed queue entries, all 29,717 registry entries, 72 claimed output segments, and zero orphan segments. It preserved run `xtap-8ad4b8908b14c51d353a14f08b4a9c8d`; no plan was reset.
+
+Canonical schedule `6aa03eb132d5d0c22c5ade37` is active after maintenance. Catch-up Job `6aa03fdb900620b5c77e2ee1` resumed that saved work with the unchanged $10 inference cap and 2,700-second physical limit. Settled cost before that Job is $4.6758952. Its maximum exposure is $10.0225, separate from the active Our Models cumulative $180 inference cap. All remain within the approved $200 task limit. Our Models Job `6aa01065900620b5c77e2385` remains active; these xTap results do not establish that its backlog is published.
