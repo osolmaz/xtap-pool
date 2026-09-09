@@ -129,6 +129,7 @@ export class ConsumerObservationReader {
    * when none is publishable yet; activation later recovers its retained history. */
   changed(options: {
     changedSegments: readonly string[];
+    allChangedSegments: readonly string[];
     baseSegments: readonly string[];
     boundary: HistoricalBoundary;
     selection: HistoricalSelection;
@@ -137,6 +138,7 @@ export class ConsumerObservationReader {
     limit: number;
   }): { observations: ConsumerObservation[]; scanned?: ObservationPosition; hasMore: boolean } {
     const changed = z.array(z.string().min(1)).max(128).parse(options.changedSegments);
+    const allChanged = z.array(z.string().min(1)).max(1024).parse(options.allChangedSegments);
     const since = z.iso.datetime().parse(options.since);
     const limit = Math.min(100, z.number().int().min(1).max(500).parse(options.limit));
     const after = options.after ?? { post_id: "", observed_at: "", id: "" };
@@ -147,6 +149,9 @@ export class ConsumerObservationReader {
       WHERE s.segment_key IN (SELECT value FROM json_each(@changed))
         AND NOT EXISTS (SELECT 1 FROM observation_sources old WHERE old.observation_id = s.observation_id
           AND old.segment_key IN (SELECT value FROM json_each(@base)))
+        AND NOT EXISTS (SELECT 1 FROM observation_sources earlier
+          WHERE earlier.observation_id = s.observation_id AND earlier.segment_key < s.segment_key
+            AND earlier.segment_key IN (SELECT value FROM json_each(@all_changed)))
     ), samples AS MATERIALIZED (
       SELECT o.*, s.source_ref, s.received_at AS source_received_at,
         ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY s.received_at, s.source_ref) AS copy
@@ -160,6 +165,7 @@ export class ConsumerObservationReader {
       )
       .all({
         changed: JSON.stringify(changed),
+        all_changed: JSON.stringify(allChanged),
         base: JSON.stringify(options.baseSegments),
         target: JSON.stringify(options.boundary.segments),
         since,
