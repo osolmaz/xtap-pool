@@ -397,7 +397,7 @@ describe("bounded historical unit reconstruction", () => {
     const keys = [...initialKeys, "sample", "retry-sample"];
     const options = {
       changedSegments: ["sample", "retry-sample"],
-      allChangedSegments: ["sample", "retry-sample"],
+      previousChangedSegments: [],
       baseSegments: initialKeys,
       boundary: { segments: keys, registry: initialRegistry },
       selection,
@@ -410,7 +410,7 @@ describe("bounded historical unit reconstruction", () => {
     const pending = history.changed({
       ...options,
       changedSegments: ["pending-sample"],
-      allChangedSegments: ["pending-sample"],
+      previousChangedSegments: [],
       baseSegments: keys,
       boundary: { ...options.boundary, segments: [...keys, "pending-sample"] },
     });
