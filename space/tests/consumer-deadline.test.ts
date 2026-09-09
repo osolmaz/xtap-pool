@@ -1,7 +1,15 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { consumerStage, withConsumerDeadline } from "../src/consumer-deadline.js";
+import {
+  CONSUMER_DEADLINE_MS,
+  consumerStage,
+  withConsumerDeadline,
+} from "../src/consumer-deadline.js";
 
 afterEach(() => vi.useRealTimers());
+
+it("allows large source reads up to the production deadline", () => {
+  expect(CONSUMER_DEADLINE_MS).toBe(60_000);
+});
 
 function pending(): Promise<never> {
   return new Promise(() => undefined);
