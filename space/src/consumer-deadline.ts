@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ConsumerHttpError } from "./consumer-errors.js";
 
-export const CONSUMER_DEADLINE_MS = 30_000;
+export const CONSUMER_DEADLINE_MS = 60_000;
 type Stage =
   | "waiting for the index"
   | "loading source metadata"
