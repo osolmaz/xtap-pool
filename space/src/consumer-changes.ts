@@ -23,6 +23,7 @@ type PairBatch = {
   before: Map<string, EnrichedUnit>;
   after: Map<string, EnrichedUnit>;
 };
+const OBSERVATION_SEGMENT_BATCH = 32;
 
 /** Pure bounded read steps. Signing, durable context creation, deadlines, and HTTP
  * authorization belong to the caller; this class never acknowledges a partial item. */
@@ -238,7 +239,10 @@ export class ConsumerChangeEngine {
     limit: number,
   ): ConsumerStep {
     if (this.baseBoundary === undefined) throw new InvalidConsumerCursor();
-    const keys = this.changed.slice(position.segment_offset, position.segment_offset + 128);
+    const keys = this.changed.slice(
+      position.segment_offset,
+      position.segment_offset + OBSERVATION_SEGMENT_BATCH,
+    );
     if (keys.length === 0) return { changes: [], cursor: this.move(cursor, { kind: "idle" }) };
     const sample = this.observations.changed({
       changedSegments: keys,
