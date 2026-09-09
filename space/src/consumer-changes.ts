@@ -23,7 +23,7 @@ type PairBatch = {
   before: Map<string, EnrichedUnit>;
   after: Map<string, EnrichedUnit>;
 };
-const OBSERVATION_SEGMENT_BATCH = 4;
+const OBSERVATION_SEGMENT_BATCH = 1;
 
 /** Pure bounded read steps. Signing, durable context creation, deadlines, and HTTP
  * authorization belong to the caller; this class never acknowledges a partial item. */
