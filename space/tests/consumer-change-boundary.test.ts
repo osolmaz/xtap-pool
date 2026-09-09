@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { ConsumerRuntime } from "../src/consumer-runtime.js";
 import { consumerChangesEnvelopeSchema } from "../src/consumer-http-contract.js";
 import { ConsumerCoverageEffects } from "../src/consumer-coverage-effects.js";
 import { BOOTSTRAP, consumerFixture, consumerTweet } from "./consumer-http-fixture.js";
@@ -76,7 +78,37 @@ describe("changed-source request boundaries", () => {
     );
     const response = await f.request(`/api/changes?after=${boundary.cursor}`);
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ error: { code: "privacy_changed" } });
+    const recovery = z
+      .object({
+        error: z.object({
+          code: z.literal("privacy_changed"),
+          recovery: z.object({ cursor: z.string() }),
+        }),
+      })
+      .parse(await response.json());
+    const run = f.workers.run.bind(f.workers);
+    vi.spyOn(f.workers, "run").mockImplementation((task, signal) => {
+      if (task.operation !== "reconcile") return run(task, signal);
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            reject(signal.reason instanceof Error ? signal.reason : new Error("Aborted"));
+          },
+          { once: true },
+        );
+      });
+    });
+    f.setRuntime(new ConsumerRuntime({ ...f.options(), deadlineMs: 1000 }));
+    const timeout = await f.request(`/api/reconcile?cursor=${recovery.error.recovery.cursor}`);
+    expect(timeout.status).toBe(503);
+    expect(await timeout.json()).toMatchObject({
+      error: {
+        code: "deadline_exceeded",
+        message:
+          "The consumer read deadline expired while reading source changes. Retry the same cursor.",
+      },
+    });
   });
 
   it("deduplicates changed posts before checking selected unit membership", async () => {

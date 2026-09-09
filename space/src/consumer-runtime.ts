@@ -378,6 +378,7 @@ export class ConsumerRuntime {
     limit: number,
     signal: AbortSignal,
   ): Promise<Response> {
+    consumerStage("reading source changes");
     if (sequence.reconciliation !== undefined)
       return this.reconcile(sequence, current, limit, signal);
     try {
@@ -457,7 +458,6 @@ export class ConsumerRuntime {
     signal: AbortSignal,
   ): Promise<Response> {
     const { target, base, cursor } = sequence;
-    consumerStage("reading source changes");
     const metadata = needsMetadata(cursor, target, base);
     // Pinning a changed source and reading its bodies need separate bounded reads.
     // Reuse the existing first-page marker even when metadata itself is unchanged.
