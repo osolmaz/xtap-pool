@@ -91,6 +91,9 @@ function observationThrough(
     SELECT e.unit_id FROM eligible e WHERE
       (? IS NULL OR EXISTS (SELECT 1 FROM label_assignments a WHERE a.unit_id = e.unit_id
         AND a.kind = 'free' AND a.name = ? AND a.name IN (SELECT json_extract(value, '$.name') FROM json_each(?))))
+      AND NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
+        WHERE m.unit_id = e.unit_id AND json_type(t.json, '$.is_subscriber_only') IS NOT NULL
+          AND json_type(t.json, '$.is_subscriber_only') <> 'false')
     ), selected_posts AS MATERIALIZED (
       SELECT DISTINCT m.tweet_id AS post_id FROM permitted p JOIN unit_members m ON m.unit_id = p.unit_id
       WHERE (? IS NULL OR m.tweet_id IN (SELECT value FROM json_each(?)))

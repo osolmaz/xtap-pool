@@ -159,10 +159,20 @@ describe("source coverage maintenance", () => {
   it("uses the indexed current selection for both semantic coverage clocks", async () => {
     await f.postMany([
       consumerTweet("100"),
-      consumerTweet("200"),
-      consumerTweet("300", { author: { id: "22", username: "other" } }),
+      consumerTweet("200", {
+        conversation_id: "100",
+        captured_at: "2026-09-06T05:00:00.000Z",
+        is_subscriber_only: "yes",
+      }),
+      consumerTweet("300", {
+        conversation_id: "100",
+        captured_at: "2026-09-06T04:00:00.000Z",
+      }),
+      consumerTweet("400", { captured_at: "2026-09-06T01:00:00.000Z" }),
+      consumerTweet("500", { author: { id: "22", username: "other" } }),
     ]);
     const source = await finish(BOOTSTRAP);
+    expect(source.observations_through).toBe("2026-09-06T01:00:00.000Z");
     const pinned = await context(source.cursor);
     const database = f.index.store.database;
     const plan = consumerQueryPlan(
