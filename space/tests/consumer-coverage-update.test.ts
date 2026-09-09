@@ -5,6 +5,8 @@ import { consumerChangesEnvelopeSchema } from "../src/consumer-http-contract.js"
 import { ConsumerRuntime } from "../src/consumer-runtime.js";
 import { updateConsumerCoverage } from "../src/consumer-coverage-update.js";
 import { selectedObservationThrough } from "../src/consumer-coverage.js";
+import { selectedCompleteThrough } from "../src/enrich-store.js";
+import { historicalSelection } from "../src/consumer-changes.js";
 import {
   BOOTSTRAP,
   consumerFixture,
@@ -46,7 +48,17 @@ async function context(cursor: string) {
 }
 async function assertFullCoverage(cursor: string, previous?: string) {
   const pinned = await context(cursor);
-  const full = updateConsumerCoverage(f.index.store.database, pinned);
+  const database = f.index.store.database;
+  const full = updateConsumerCoverage(database, pinned);
+  // Compare full selection and explicitly selected post coverage.
+  expect(full.completeThrough).toBe(
+    selectedCompleteThrough(database, historicalSelection(pinned)) ?? null,
+  );
+  const allPosts = database
+    .prepare("SELECT DISTINCT tweet_id FROM unit_members")
+    .all()
+    .map((row) => z.object({ tweet_id: z.string() }).parse(row).tweet_id);
+  expect(full.observationsThrough).toBe(selectedObservationThrough(database, pinned, allPosts));
   expect(pinned.context.complete_through).toBe(full.completeThrough);
   expect(pinned.context.observations_through).toBe(full.observationsThrough);
   if (previous !== undefined) {

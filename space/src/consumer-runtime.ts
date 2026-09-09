@@ -8,7 +8,7 @@ import type {
 import { consumerHistoryUntil, consumerMetadataHash } from "./consumer-context.js";
 import type { ConsumerCursor, ConsumerCursorCodec, RemovalPosition } from "./consumer-cursor.js";
 import { ConsumerHttpError, consumerErrorResponse } from "./consumer-errors.js";
-import { abortable, withConsumerDeadline } from "./consumer-deadline.js";
+import { abortable, consumerStage, withConsumerDeadline } from "./consumer-deadline.js";
 import { HARD_PAGE_BYTES, OversizedConsumerSource } from "./consumer-page.js";
 import type { ConsumerWorkers } from "./consumer-workers.js";
 import type { ConsumerWorkerTask } from "./consumer-worker-task.js";
@@ -80,10 +80,12 @@ export class ConsumerRuntime {
     authorize: () => void,
   ): Promise<Response> {
     try {
+      consumerStage("waiting for the index");
       return await this.options.locked(async () => {
         signal.throwIfAborted();
         authorize();
         const current = this.options.current();
+        consumerStage("loading source metadata");
         const sequence = await this.sequence(route, query, current, signal);
         signal.throwIfAborted();
         const response = await this.page(sequence, current, limit, signal);
@@ -324,6 +326,7 @@ export class ConsumerRuntime {
         history_since: created,
       },
     };
+    consumerStage("calculating source coverage");
     const coverage = await this.options.workers.run(
       await this.task(
         {
@@ -339,6 +342,7 @@ export class ConsumerRuntime {
     );
     if (coverage.kind !== "coverage") throw new Error("invalid coverage worker result");
     signal.throwIfAborted();
+    consumerStage("saving source metadata");
     return abortable(
       this.options.contexts.pin({
         ...current,
@@ -453,6 +457,7 @@ export class ConsumerRuntime {
     signal: AbortSignal,
   ): Promise<Response> {
     const { target, base, cursor } = sequence;
+    consumerStage("reading source changes");
     const metadata = needsMetadata(cursor, target, base);
     // Pinning a changed source and reading its bodies need separate bounded reads.
     // Reuse the existing first-page marker even when metadata itself is unchanged.
