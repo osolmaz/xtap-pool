@@ -158,7 +158,7 @@ describe("bounded consumer change steps", () => {
       kind: "observations",
       segment_offset: 0,
     });
-    for (let offset = 32; offset <= 1056; offset += 32) {
+    for (let offset = 4; offset <= 1056; offset += 4) {
       page = engine.step(page.cursor, 200);
       expect(page.cursor.position).toEqual({
         kind: "observations",
@@ -174,7 +174,7 @@ describe("bounded consumer change steps", () => {
     post(tweet());
     result(tweet());
     const base = context();
-    for (let index = 0; index < 31; index++) source();
+    for (let index = 0; index < 3; index++) source();
     const updated = tweet("100", {
       captured_at: "2026-09-06T06:00:00.000Z",
       metrics: { likes: 40 },
@@ -188,7 +188,7 @@ describe("bounded consumer change steps", () => {
     expect(first.changes.filter((change) => change.type === "observation")).toHaveLength(1);
     expect(first.cursor.position).toEqual({
       kind: "observations",
-      segment_offset: 32,
+      segment_offset: 4,
     });
     const second = engine.step(first.cursor, 200);
     expect(second.changes).toEqual([]);
