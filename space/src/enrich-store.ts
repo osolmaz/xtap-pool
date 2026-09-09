@@ -1536,6 +1536,7 @@ function nullable<T>(value: T | undefined): T | null {
 }
 
 type UnitSelection = {
+  unitIds?: readonly string[] | undefined;
   authorIds?: readonly string[] | undefined;
   labels?: readonly string[] | undefined;
   labelMode?: "any" | "all" | undefined;
@@ -1544,7 +1545,6 @@ type UnitSelection = {
 };
 
 type EligibleUnitOptions = UnitSelection & {
-  unitIds?: readonly string[];
   taxonomyVersion: number;
   contractHash: string;
 };
@@ -1626,10 +1626,16 @@ function selectedUnits(options: UnitSelection): { sql: string; params: unknown[]
   const cutoffParams = options.cutoff === undefined ? [] : [options.cutoff];
   const authorParams = options.authorIds ?? [];
   return {
-    sql: `WITH unit_ids AS MATERIALIZED (SELECT DISTINCT unit_id FROM unit_members)
+    sql: `WITH unit_ids AS MATERIALIZED (SELECT DISTINCT unit_id FROM unit_members${
+      options.unitIds === undefined ? "" : " WHERE unit_id IN (SELECT value FROM json_each(?))"
+    })
           SELECT um.unit_id FROM unit_ids um
           WHERE 1 = 1${cutoffSql}${authorSql}${publicationSql}`,
-    params: [...cutoffParams, ...authorParams],
+    params: [
+      ...(options.unitIds === undefined ? [] : [JSON.stringify(options.unitIds)]),
+      ...cutoffParams,
+      ...authorParams,
+    ],
   };
 }
 
