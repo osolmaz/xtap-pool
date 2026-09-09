@@ -173,6 +173,31 @@ describe("bounded consumer change steps", () => {
     });
   });
 
+  it("does not repeat one observation across segment batch boundaries", () => {
+    post(tweet());
+    result(tweet());
+    const base = context();
+    for (let index = 0; index < 31; index++) source();
+    const updated = tweet("100", {
+      captured_at: "2026-09-06T06:00:00.000Z",
+      metrics: { likes: 40 },
+    });
+    post(updated);
+    post(updated);
+    const target = context();
+    const engine = new ConsumerChangeEngine(store.database, target, base);
+    const content = engine.step(cursor(target, base), 200);
+    const first = engine.step(content.cursor, 200);
+    expect(first.changes.filter((change) => change.type === "observation")).toHaveLength(1);
+    expect(first.cursor.position).toEqual({
+      kind: "observations",
+      segment_offset: 32,
+    });
+    const second = engine.step(first.cursor, 200);
+    expect(second.changes).toEqual([]);
+    expect(second.cursor.position).toEqual({ kind: "idle" });
+  });
+
   it("does no content reconstruction for receipt-only or metric-only source changes", () => {
     post(tweet());
     result(tweet());

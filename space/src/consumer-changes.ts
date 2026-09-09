@@ -246,6 +246,7 @@ export class ConsumerChangeEngine {
     if (keys.length === 0) return { changes: [], cursor: this.move(cursor, { kind: "idle" }) };
     const sample = this.observations.changed({
       changedSegments: keys,
+      allChangedSegments: this.changed,
       baseSegments: this.baseBoundary.segments,
       boundary: this.targetBoundary,
       selection: this.selection,
