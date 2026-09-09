@@ -148,6 +148,31 @@ describe("bounded consumer change steps", () => {
     expect(second.cursor.position.kind).toBe("idle");
   });
 
+  it("advances observation scans in bounded segment batches", () => {
+    const base = context();
+    for (let index = 0; index < 65; index++) source();
+    const target = context();
+    const engine = new ConsumerChangeEngine(store.database, target, base);
+    const content = engine.step(cursor(target, base), 200);
+    expect(content.cursor.position).toEqual({
+      kind: "observations",
+      segment_offset: 0,
+    });
+    const first = engine.step(content.cursor, 200);
+    expect(first.cursor.position).toEqual({
+      kind: "observations",
+      segment_offset: 32,
+    });
+    const second = engine.step(first.cursor, 200);
+    expect(second.cursor.position).toEqual({
+      kind: "observations",
+      segment_offset: 64,
+    });
+    expect(engine.step(second.cursor, 200).cursor.position).toEqual({
+      kind: "idle",
+    });
+  });
+
   it("does no content reconstruction for receipt-only or metric-only source changes", () => {
     post(tweet());
     result(tweet());
