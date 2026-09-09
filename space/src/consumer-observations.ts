@@ -138,10 +138,7 @@ export class ConsumerObservationReader {
     limit: number;
   }): { observations: ConsumerObservation[]; scanned?: ObservationPosition; hasMore: boolean } {
     const changed = z.array(z.string().min(1)).max(128).parse(options.changedSegments);
-    const previousChanged = z
-      .array(z.string().min(1))
-      .max(1024)
-      .parse(options.previousChangedSegments);
+    const previousChanged = z.array(z.string().min(1)).parse(options.previousChangedSegments);
     const since = z.iso.datetime().parse(options.since);
     const limit = Math.min(100, z.number().int().min(1).max(500).parse(options.limit));
     const after = options.after ?? { post_id: "", observed_at: "", id: "" };
