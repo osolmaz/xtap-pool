@@ -105,6 +105,14 @@ Coverage candidate selection now collects distinct changed post IDs before check
 
 Regression tests cover boundary-only responses, restart and fixed-source behavior, unchanged-source completion, privacy changes between pages, and deduplicated candidate selection through the existing indexes.
 
+## September 9 verification
+
+At 02:17 UTC, the Space health check passed with storage ready. A change request from the actual Our Models saved cursor still returned `503 deadline_exceeded` after 31.568 seconds, before returning any page. PR #54 is therefore insufficient to establish bounded live change reads. Do not treat its deployment or recovery checks as end-to-end success. Further diagnosis must measure source preparation and coverage separately on the current source before another repair is accepted.
+
+Both earlier catch-up Jobs completed: xTap `6aa03fdb900620b5c77e2ee1` at September 8 17:46 UTC, and Our Models `6aa01065900620b5c77e2385` at 18:38 UTC. Our Models continued automatically under the same logical run. Checkpoint 8949, written September 9 at 02:16 UTC, reports 4,582 calls and $19.5950914 in cumulative inference cost, with one $0.051519 call reservation. Story output remains unset. Physical Job completion did not mean backlog publication.
+
+The live Our Models digest still reports artifact `4e0c744c880378c27391eb2d2bda65c32b9338e7e1a6454beb3439dc5930db9f`, generated September 8 at 06:46 UTC and complete through September 7 at 23:05:38.154 UTC. No current pending count or defensible completion ETA was established. No new paid Job or source reset was launched during this verification.
+
 ## Changed-source deployment
 
 PR [#54](https://github.com/osolmaz/xtap-pool/pull/54) passed `npm run check`, SimpleDoc, Pi Reviewer with no findings, and CI run `34251140734`. It merged as `853d3da38cef549f506a65453e452597bb36e763`. The existing Space received that source as `92c4e167b482e979a21ad30aba4938625301e664` at 16:57 UTC. Live change-read verification remains pending while the Space restores its index; the first probe received a database-not-restored response, not a change-read deadline result.
