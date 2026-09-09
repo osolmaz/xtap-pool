@@ -1557,10 +1557,10 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
               AND q.taxonomy_version = ? AND q.status = 'done'`;
   const unitWhere =
     options.unitIds === undefined ? "" : " AND um.unit_id IN (SELECT value FROM json_each(?))";
-  const selection = `${cutoffWhere(options.cutoff)}${publicationWhere(
+  const selection = `${cutoffWhere(options.cutoff)}${authorWhere(options.authorIds, "um.unit_id")}${publicationWhere(
     options.publication,
     "um.unit_id",
-  )}${authorWhere(options.authorIds, "um.unit_id")}`;
+  )}`;
   // A unit can have many members and match several labels. Deduplicate before
   // reading post bodies for publication/author checks, not after those checks.
   const selected = (sql: string) =>
@@ -1628,7 +1628,7 @@ function selectedUnits(options: UnitSelection): { sql: string; params: unknown[]
   return {
     sql: `WITH unit_ids AS MATERIALIZED (SELECT DISTINCT unit_id FROM unit_members)
           SELECT um.unit_id FROM unit_ids um
-          WHERE 1 = 1${cutoffSql}${publicationSql}${authorSql}`,
+          WHERE 1 = 1${cutoffSql}${authorSql}${publicationSql}`,
     params: [...cutoffParams, ...authorParams],
   };
 }

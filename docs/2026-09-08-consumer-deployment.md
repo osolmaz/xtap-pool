@@ -113,6 +113,14 @@ Both earlier catch-up Jobs completed: xTap `6aa03fdb900620b5c77e2ee1` at Septemb
 
 The live Our Models digest still reports artifact `4e0c744c880378c27391eb2d2bda65c32b9338e7e1a6454beb3439dc5930db9f`, generated September 8 at 06:46 UTC and complete through September 7 at 23:05:38.154 UTC. No current pending count or defensible completion ETA was established. No new paid Job or source reset was launched during this verification.
 
+## September 9 request repair
+
+Two read-only cpu-basic Jobs checked verified published database `2cae942abe77a575584fbdb709093324269b878c1bbca6a96e70e9b5e6b6444c`. Direct coverage took 8.611 seconds; the actual forked reader took 9.022 seconds. Saved-context loading took about 1.65 seconds. A separate local context-pin check took 6.555 seconds, including a 4.369-second metadata write and its read-back. A live history request completed, but full-selection and one-author bootstrap requests still hit the 30-second deadline. These checks do not identify a single proven cause on the live Space.
+
+Deadline errors now name the current request stage, without adding a metrics API or exposing request data, so a remaining production failure identifies the operation rather than inviting another speculative query rewrite. An attempted unchanged-context reuse was rejected because it prevented the rolling history window from advancing. Existing context and history behavior remains unchanged.
+
+Selection predicates now check author membership before public-content eligibility. Three local comparisons returned identical clocks and took 7.490, 7.421, and 7.488 seconds before the change, versus 6.546, 6.577, and 6.687 seconds after it. The absolute reduction was 0.801–0.944 seconds on 307,594 current units. A separate indexed-candidate approach needed 115,472 IDs but gave only a small additional benefit; it was dropped in favor of the simpler predicate order. A 64 MiB SQLite cache was also slower in all three comparisons and was not adopted. None of these local measurements establishes live request success; the saved-cursor production check remains mandatory.
+
 ## Changed-source deployment
 
 PR [#54](https://github.com/osolmaz/xtap-pool/pull/54) passed `npm run check`, SimpleDoc, Pi Reviewer with no findings, and CI run `34251140734`. It merged as `853d3da38cef549f506a65453e452597bb36e763`. The existing Space received that source as `92c4e167b482e979a21ad30aba4938625301e664` at 16:57 UTC. Live change-read verification remains pending while the Space restores its index; the first probe received a database-not-restored response, not a change-read deadline result.
