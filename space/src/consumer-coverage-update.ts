@@ -1,9 +1,14 @@
 import type Database from "better-sqlite3";
 import { canonicalJson } from "@xtap-pool/shared";
 import type { ResolvedConsumerContext } from "./consumer-context.js";
+import { ConsumerBootstrapRequired, ConsumerIndexState } from "./consumer-index-state.js";
 import { historicalSelection } from "./consumer-changes.js";
 import { selectedCompleteThrough } from "./enrich-store.js";
-import { selectedObservationThrough } from "./consumer-coverage.js";
+import {
+  selectedCurrentCoverageUnitIds,
+  selectedCurrentObservationThrough,
+  selectedObservationThrough,
+} from "./consumer-coverage.js";
 import { ConsumerCoverageEffects } from "./consumer-coverage-effects.js";
 
 export type ConsumerCoverage = {
@@ -61,6 +66,27 @@ function metricCoverage(
 }
 
 function recalculate(
+  database: Database.Database,
+  target: ResolvedConsumerContext,
+): ConsumerCoverage {
+  try {
+    new ConsumerIndexState(database, target.context.contract, "read").require(
+      target.context.source,
+    );
+  } catch (error) {
+    if (error instanceof ConsumerBootstrapRequired) return historicalCoverage(database, target);
+    throw error;
+  }
+  const unitIds = selectedCurrentCoverageUnitIds(database, target);
+  return {
+    kind: "coverage",
+    mode: "semantic",
+    completeThrough: selectedCompleteThrough(database, { unitIds }) ?? null,
+    observationsThrough: selectedCurrentObservationThrough(database, target, unitIds),
+  };
+}
+
+function historicalCoverage(
   database: Database.Database,
   target: ResolvedConsumerContext,
 ): ConsumerCoverage {

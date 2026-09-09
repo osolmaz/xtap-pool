@@ -156,6 +156,26 @@ describe("source coverage maintenance", () => {
     expect(plan.some((line) => line.includes("segment_key=? AND observation_id=?"))).toBe(false);
   });
 
+  it("uses the indexed current selection for both semantic coverage clocks", async () => {
+    await f.postMany([
+      consumerTweet("100"),
+      consumerTweet("200"),
+      consumerTweet("300", { author: { id: "22", username: "other" } }),
+    ]);
+    const source = await finish(BOOTSTRAP);
+    const pinned = await context(source.cursor);
+    const database = f.index.store.database;
+    const plan = consumerQueryPlan(
+      database,
+      /WITH candidates AS MATERIALIZED|AS latest FROM selected_posts/u,
+    );
+    const coverage = updateConsumerCoverage(database, pinned);
+    expect(coverage.completeThrough).toBe(source.complete_through);
+    expect(coverage.observationsThrough).toBe(source.observations_through);
+    expect(plan.some((line) => line.includes("idx_consumer_post_units_author"))).toBe(true);
+    expect(plan.some((line) => line.includes("observation_sources"))).toBe(false);
+  });
+
   it("does zero body reads for twenty no-op polls and twenty harmless revisions, including restart and replay", async () => {
     await f.postMany(Array.from({ length: 250 }, (_, n) => consumerTweet(String(100 + n))));
     let source = await finish(BOOTSTRAP);
