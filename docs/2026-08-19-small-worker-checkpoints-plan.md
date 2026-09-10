@@ -2,7 +2,7 @@
 title: Add small worker checkpoints
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-08-19
-updated: 2026-08-29
+updated: 2026-09-10
 tags: [enrichment, sqlite, checkpoints, hugging-face, resume]
 ---
 
@@ -34,10 +34,10 @@ process only missing units or registry candidates. It will not open the public
 index. The large index will be restored and updated once, during final
 publication for the logical run.
 
-When a physical Job completes that logical run, it will activate the verified
-successor and continue it in the same physical Job while useful work and the
-original physical-attempt time and cost budgets remain. It will not leave unused
-budget only because one frozen plan finished.
+When a physical Job completes that logical run, it activates the verified
+successor and exits. The next scheduled Job restores that successor and
+processes only its unresolved work. One physical Job therefore runs one logical
+plan and does not start work that can exceed the platform deadline.
 
 ## Requirements
 
@@ -59,9 +59,10 @@ The implementation must:
 - Treat the mutable active-run pointer as a startup shortcut only.
 - Resolve the active run from that claim chain so the recurring schedule never pins one completed run forever.
 - Prepare the next compact work database from the already open final publication database, advance that local copy to the latest raw snapshot, carry the completed registry baseline forward while retaining candidates first observed after the frozen plan time, and activate the successor only after its plan and bootstrap checkpoint verify.
-- Continue the verified successor in the same physical Job when it has unresolved queue or registry work and the original physical-attempt budgets still admit work.
-- Carry one command start time and one cumulative $10 inference ceiling across every logical run processed by one physical Job. Successor activation must not reset either ceiling.
-- Stop at a durable boundary without polling or spinning when the active successor has no unresolved work or when the 40-minute worker or $10 inference ceiling is reached.
+- Stop the physical Job after it activates a verified successor, even when that successor has unresolved queue or registry work.
+- Give each physical Job one command start time, one logical run and one $10 inference ceiling.
+- Let the next non-concurrent scheduled Job restore the successor from its verified checkpoint.
+- Stop at a durable boundary without polling or spinning when the logical run completes or when the 40-minute worker or $10 inference ceiling is reached.
 - Repeat no more than one in-flight concurrency batch after interruption.
 - Keep progress monotonic across attempts in one logical run.
 - Build and fully verify the public SQLite index only after work completes.
@@ -852,17 +853,13 @@ Add tests for plan determinism, production import, checkpoint round trips,
 missing-only queue work, registry cursor continuity, deterministic batch replay,
 publication recovery, and resumed-versus-uninterrupted equivalence.
 
-The backlog-drain change also needs direct tests for:
+The single-run Job change also needs direct tests for:
 
-- Continuing a verified successor in the same physical Job.
-- Carrying the original command start time and cumulative inference cost into
-  every successor.
-- Refusing successor work when the remaining physical-attempt time or cost does
-  not admit it.
-- Stopping once when the newest successor has no queue or registry work.
-- Interruption and resume at successor activation and first successor output.
-- No duplicate logical run, result batch, checkpoint, receipt, schedule, or
-  physical Job.
+- Running only one logical plan when its verified successor has work.
+- Passing the physical Job's full time and cost limits to that plan.
+- Propagating interruption without starting another logical run.
+- Restoring the successor in the next scheduled Job without duplicate results,
+  checkpoints, receipts, schedules or physical Jobs.
 
 The bootstrap repair also needs tests for:
 
