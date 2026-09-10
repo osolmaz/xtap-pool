@@ -111,101 +111,32 @@ export type PlannedEnrichmentRunResult = {
   successorHasWork: boolean;
 };
 
-// eslint-disable-next-line complexity -- The loop must gate optional time, cost, reservation, and reported-cost bounds together.
-export async function runBoundedSuccessorDrain(options: {
+export function runSinglePlannedEnrichmentAttempt(options: {
+  commandStartedAtMs: number;
   maxElapsedMs?: number;
   maxCostUsd?: number;
-  maxCostPerCallUsd?: number;
-  now?: () => number;
   run: (budget: PlannedEnrichmentBudget) => Promise<PlannedEnrichmentRunResult>;
-}): Promise<{ logicalRuns: number; providerCostUsd: number }> {
-  const now = options.now ?? Date.now;
-  const commandStartedAtMs = now();
-  let logicalRuns = 0;
-  let providerCostUsd = 0;
-  let successorHasWork = true;
-  let previousRunElapsedMs: number | undefined;
-  while (successorHasWork) {
-    const remainingElapsedMs = remainingWorkerElapsedMs(
-      options.maxElapsedMs,
-      commandStartedAtMs,
-      now(),
-    );
-    const maxCostUsd = remainingWorkerCostUsd(options.maxCostUsd, providerCostUsd);
-    if (
-      logicalRuns > 0 &&
-      !successorBudgetAdmitsWork(
-        remainingElapsedMs,
-        maxCostUsd,
-        options.maxCostPerCallUsd,
-        previousRunElapsedMs,
-      )
-    ) {
-      break;
-    }
-    const runStartedAtMs = now();
-    const result = await options.run({
-      commandStartedAtMs,
-      ...(options.maxElapsedMs === undefined ? {} : { maxElapsedMs: options.maxElapsedMs }),
-      ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
-    });
-    previousRunElapsedMs = Math.max(0, now() - runStartedAtMs);
-    if (!Number.isFinite(result.providerCostUsd) || result.providerCostUsd < 0) {
-      throw new Error("planned enrichment reported invalid provider cost");
-    }
-    if (maxCostUsd !== undefined && result.providerCostUsd > maxCostUsd) {
-      throw new Error("planned enrichment exceeded the remaining physical-attempt cost");
-    }
-    providerCostUsd += result.providerCostUsd;
-    logicalRuns += 1;
-    successorHasWork = result.successorHasWork;
-  }
-  return { logicalRuns, providerCostUsd };
-}
-
-export function remainingWorkerCostUsd(
-  configuredUsd: number | undefined,
-  consumedUsd: number,
-): number | undefined {
-  return configuredUsd === undefined ? undefined : Math.max(0, configuredUsd - consumedUsd);
-}
-
-function successorBudgetAdmitsWork(
-  remainingElapsedMs: number | undefined,
-  remainingCostUsd: number | undefined,
-  maxCostPerCallUsd: number | undefined,
-  previousRunElapsedMs: number | undefined,
-): boolean {
-  if (!successorTimeAdmitsWork(remainingElapsedMs, previousRunElapsedMs)) return false;
-  if (remainingCostUsd === undefined) return true;
-  if (remainingCostUsd <= 0) return false;
-  return maxCostPerCallUsd === undefined || remainingCostUsd >= maxCostPerCallUsd;
-}
-
-function successorTimeAdmitsWork(
-  remainingElapsedMs: number | undefined,
-  previousRunElapsedMs: number | undefined,
-): boolean {
-  if (remainingElapsedMs === undefined) return true;
-  if (remainingElapsedMs <= 0) return false;
-  if (previousRunElapsedMs === undefined || previousRunElapsedMs <= 0) return true;
-  return remainingElapsedMs > previousRunElapsedMs;
+}): Promise<PlannedEnrichmentRunResult> {
+  return options.run({
+    commandStartedAtMs: options.commandStartedAtMs,
+    ...(options.maxElapsedMs === undefined ? {} : { maxElapsedMs: options.maxElapsedMs }),
+    ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
+  });
 }
 
 export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
   options: { deploymentManifest: DeploymentManifest },
 ): Promise<void> {
+  const commandStartedAtMs = Date.now();
   const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
   const config = loadConfig(
     restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
   );
-  await runBoundedSuccessorDrain({
+  await runSinglePlannedEnrichmentAttempt({
+    commandStartedAtMs,
     ...(config.enrichMaxElapsedMs === undefined ? {} : { maxElapsedMs: config.enrichMaxElapsedMs }),
     ...(config.enrichMaxCostUsd === undefined ? {} : { maxCostUsd: config.enrichMaxCostUsd }),
-    ...(config.enrichMaxCostPerCallUsd === undefined
-      ? {}
-      : { maxCostPerCallUsd: config.enrichMaxCostPerCallUsd }),
     run: (budget) => runSinglePlannedEnrichmentRun(env, budget, options.deploymentManifest),
   });
 }

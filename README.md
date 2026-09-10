@@ -194,12 +194,11 @@ the public SQLite database during normal queue or registry work. The completed
 logical run restores the frozen base once, applies its verified result batches,
 and publishes a new checksum-verified index.
 
-After publication activates a verified successor, the same physical Job keeps
-working when that successor has unresolved queue or registry work. The command
-start time and $10 inference ceiling remain shared across every successor in
-that physical Job. The Job stops cleanly when the active successor has no work
-or when the existing 40-minute or $10 ceiling is reached. The next six-hour run
-then resumes the same durable state.
+After publication activates a verified successor, the physical Job stops.
+The next scheduled Job restores that successor and processes only its unresolved
+queue or registry work. This keeps one physical Job tied to one logical run and
+prevents a completed run from starting work that cannot finish before the
+platform timeout.
 
 Run enrichment manually only for local development:
 
@@ -215,8 +214,8 @@ interruption recovery, final publication, successor activation, and the
 required two-Job recovery canary have passed.
 
 The checked-in defaults give each Job a 40-minute worker budget, a 45-minute
-platform timeout, and a $10 inference limit. These are physical-Job limits and
-do not reset when one Job advances to a successor plan. The operator-approved
+platform timeout, and a $10 inference limit. Each scheduled Job runs one logical
+plan and leaves its verified successor for the next Job. The operator-approved
 cumulative ceiling must cover both canary Jobs before either starts. The web
 Space keeps enrichment disabled, and GitHub Actions remains CI-only.
 
