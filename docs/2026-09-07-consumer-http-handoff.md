@@ -2,6 +2,7 @@
 title: Incremental consumer HTTP contract
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-07
+updated: 2026-09-10
 tags: [consumer-api, implementation]
 ---
 
@@ -82,7 +83,7 @@ A final history page has `has_more=false` and `next_cursor=null`. A history curs
 
 Default page limit is 200; maximum is 500. History permits at most 100 IDs and 30 days. The target response size is 2 MiB; the hard serialized limit is 8 MiB. A complete oversized item fails without an acknowledgment cursor. Page sequences last at most 48 hours; sources last at most 30 days from context creation. The earlier deadline applies when a history or change sequence uses an older source. Context cleanup waits 32 days. Raw snapshot bases and raw segments are retained; old full databases are not needed.
 
-The entire read has a 30-second wall deadline, including source/context I/O and mutex wait. SQLite runs in at most two persistent read-only child processes. Deadline cancellation kills a running child, including native SQLite. Requests do not copy or rebuild the database. The database must contain every exact pinned source descriptor and the current verified source boundary.
+Each read has a 60-second wall deadline, including source/context I/O and mutex wait. A request that reaches an exact full-selection coverage calculation gets a five-minute absolute deadline measured from the original request start. No other stage extends its deadline. Clients that can request a fresh source context must allow at least 315 seconds for a response. SQLite runs in at most two persistent read-only child processes. Deadline cancellation kills a running child, including native SQLite. Requests do not copy or rebuild the database. The database must contain every exact pinned source descriptor and the current verified source boundary.
 
 Errors use `{"error":{"code":"...","message":"...","recovery":{}}}`. The recovery field is present only when needed. No error includes an acknowledgment cursor.
 
