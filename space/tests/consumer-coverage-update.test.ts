@@ -183,6 +183,7 @@ describe("source coverage maintenance", () => {
     expect(coverage.completeThrough).toBe(source.complete_through);
     expect(coverage.observationsThrough).toBe(source.observations_through);
     expect(plan.some((line) => line.includes("idx_consumer_post_units_author"))).toBe(true);
+    expect(plan.some((line) => line.includes("idx_tweets_consumer_access"))).toBe(true);
     expect(plan.some((line) => line.includes("observation_sources"))).toBe(false);
   });
 

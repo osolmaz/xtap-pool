@@ -108,6 +108,14 @@ export class TweetStore {
       CREATE INDEX IF NOT EXISTS idx_tweets_sort ON tweets(sort_ts DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_tweets_contributor ON tweets(contributed_by);
       CREATE INDEX IF NOT EXISTS idx_tweets_author ON tweets(author_username);
+      CREATE INDEX IF NOT EXISTS idx_tweets_consumer_access ON tweets(
+        id,
+        json_extract(json, '$.author.id'),
+        json_type(json, '$.is_subscriber_only'),
+        json_extract(json, '$.is_subscriber_only'),
+        json_type(json, '$.is_retweet'),
+        json_extract(json, '$.is_retweet')
+      );
       CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts USING fts5(
         text, author_username, content='tweets', content_rowid='rowid'
       );

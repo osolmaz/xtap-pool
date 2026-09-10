@@ -14,7 +14,7 @@ afterEach(async () => {
   await f.close();
 });
 
-it("checks each selected unit once even when many members match both production labels", async () => {
+it("uses the access index without rereading bodies for multi-label selection", async () => {
   const posts = Array.from({ length: 20 }, (_, n) =>
     consumerTweet(String(100 + n), { conversation_id: "100" }),
   );
@@ -53,8 +53,7 @@ it("checks each selected unit once even when many members match both production 
   try {
     const one = select(["ai"]);
     expect(one.rows).toEqual([{ unit_id: unit }]);
-    expect(one.reads).toBeGreaterThan(0);
-    expect(one.reads).toBeLessThanOrEqual(20 * 4 + 1);
+    expect(one.reads).toBe(0);
     expect(select(["ai", "local-models"])).toEqual(one);
     expect(select(["ai", "local-models"], "all")).toEqual(one);
     expect(select([])).toEqual(one);
