@@ -65,10 +65,11 @@ export class ConsumerRuntime {
         "Consumer read capacity is full. Retry the same cursor.",
       );
     this.active++;
+    const deadline = this.options.deadlineMs;
     return withConsumerDeadline(
       (signal) => this.lockedRead(route, query, limit, signal, authorize),
       request.signal,
-      this.options.deadlineMs,
+      deadline === undefined ? {} : { milliseconds: deadline, coverageMilliseconds: deadline },
     );
   }
 

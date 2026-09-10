@@ -34,7 +34,7 @@ it.each(["context", "snapshot"])(
             ? index.readText("index/consumer-contexts/fixture.json")
             : raw.download("v1/snapshots/fixture.json"),
         new AbortController().signal,
-        20,
+        { milliseconds: 20 },
       ),
     ).rejects.toThrow();
     expect(calls).toHaveLength(1);

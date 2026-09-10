@@ -182,7 +182,7 @@ describe("readonly consumer processes", () => {
             });
           }),
         new AbortController().signal,
-        30,
+        { milliseconds: 30 },
       ),
     ).rejects.toThrow();
     expect(Date.now() - start).toBeLessThan(500);
@@ -201,7 +201,7 @@ describe("readonly consumer processes", () => {
       withConsumerDeadline(
         () => consumerFetch("https://example.invalid"),
         new AbortController().signal,
-        20,
+        { milliseconds: 20 },
       ),
     ).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledOnce();

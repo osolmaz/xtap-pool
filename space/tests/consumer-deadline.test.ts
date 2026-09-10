@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
+  CONSUMER_COVERAGE_DEADLINE_MS,
   CONSUMER_DEADLINE_MS,
   consumerStage,
   withConsumerDeadline,
@@ -7,23 +8,26 @@ import {
 
 afterEach(() => vi.useRealTimers());
 
-it("allows large source reads up to the production deadline", () => {
+it("extends only the bounded production coverage stage", () => {
   expect(CONSUMER_DEADLINE_MS).toBe(60_000);
+  expect(CONSUMER_COVERAGE_DEADLINE_MS).toBe(5 * 60_000);
 });
 
 function pending(): Promise<never> {
   return new Promise(() => undefined);
 }
 
-it("reports the stage where a read exhausted its unchanged deadline", async () => {
+it("reports the stage where a read exhausted its coverage deadline", async () => {
   vi.useFakeTimers();
+  let signal: AbortSignal | undefined;
   const read = withConsumerDeadline(
-    () => {
+    (active) => {
+      signal = active;
       consumerStage("calculating source coverage");
       return pending();
     },
     new AbortController().signal,
-    20,
+    { milliseconds: 20, coverageMilliseconds: 50 },
   );
   const checked = expect(read).rejects.toMatchObject({
     code: "deadline_exceeded",
@@ -31,6 +35,8 @@ it("reports the stage where a read exhausted its unchanged deadline", async () =
       "The consumer read deadline expired while calculating source coverage. Retry the same cursor.",
   });
   await vi.advanceTimersByTimeAsync(20);
+  expect(signal?.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(30);
   await checked;
 });
 
@@ -43,7 +49,7 @@ it("keeps stage names separate for concurrent requests", async () => {
         return pending();
       },
       new AbortController().signal,
-      20,
+      { milliseconds: 20, coverageMilliseconds: 50 },
     ),
   );
   const checked = Promise.all([
