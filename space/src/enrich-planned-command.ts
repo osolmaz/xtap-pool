@@ -124,6 +124,7 @@ export async function runBoundedSuccessorDrain(options: {
   let logicalRuns = 0;
   let providerCostUsd = 0;
   let successorHasWork = true;
+  let previousRunElapsedMs: number | undefined;
   while (successorHasWork) {
     const remainingElapsedMs = remainingWorkerElapsedMs(
       options.maxElapsedMs,
@@ -133,15 +134,22 @@ export async function runBoundedSuccessorDrain(options: {
     const maxCostUsd = remainingWorkerCostUsd(options.maxCostUsd, providerCostUsd);
     if (
       logicalRuns > 0 &&
-      !successorBudgetAdmitsWork(remainingElapsedMs, maxCostUsd, options.maxCostPerCallUsd)
+      !successorBudgetAdmitsWork(
+        remainingElapsedMs,
+        maxCostUsd,
+        options.maxCostPerCallUsd,
+        previousRunElapsedMs,
+      )
     ) {
       break;
     }
+    const runStartedAtMs = now();
     const result = await options.run({
       commandStartedAtMs,
       ...(options.maxElapsedMs === undefined ? {} : { maxElapsedMs: options.maxElapsedMs }),
       ...(maxCostUsd === undefined ? {} : { maxCostUsd }),
     });
+    previousRunElapsedMs = Math.max(0, now() - runStartedAtMs);
     if (!Number.isFinite(result.providerCostUsd) || result.providerCostUsd < 0) {
       throw new Error("planned enrichment reported invalid provider cost");
     }
@@ -166,11 +174,22 @@ function successorBudgetAdmitsWork(
   remainingElapsedMs: number | undefined,
   remainingCostUsd: number | undefined,
   maxCostPerCallUsd: number | undefined,
+  previousRunElapsedMs: number | undefined,
 ): boolean {
-  if (remainingElapsedMs !== undefined && remainingElapsedMs <= 0) return false;
+  if (!successorTimeAdmitsWork(remainingElapsedMs, previousRunElapsedMs)) return false;
   if (remainingCostUsd === undefined) return true;
   if (remainingCostUsd <= 0) return false;
   return maxCostPerCallUsd === undefined || remainingCostUsd >= maxCostPerCallUsd;
+}
+
+function successorTimeAdmitsWork(
+  remainingElapsedMs: number | undefined,
+  previousRunElapsedMs: number | undefined,
+): boolean {
+  if (remainingElapsedMs === undefined) return true;
+  if (remainingElapsedMs <= 0) return false;
+  if (previousRunElapsedMs === undefined || previousRunElapsedMs <= 0) return true;
+  return remainingElapsedMs > previousRunElapsedMs;
 }
 
 export async function runPlannedEnrichmentCommand(

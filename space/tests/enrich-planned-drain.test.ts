@@ -66,6 +66,23 @@ describe("bounded successor drain", () => {
     expect(calls).toBe(1);
   });
 
+  it("does not start a successor that cannot fit the previous run time", async () => {
+    let now = 0;
+    let calls = 0;
+    const result = await runBoundedSuccessorDrain({
+      maxElapsedMs: 1_000,
+      now: () => now,
+      run: () => {
+        calls += 1;
+        now += 600;
+        return Promise.resolve({ providerCostUsd: 0, successorHasWork: true });
+      },
+    });
+
+    expect(result).toEqual({ logicalRuns: 1, providerCostUsd: 0 });
+    expect(calls).toBe(1);
+  });
+
   it("does not enter a successor without one call reservation", async () => {
     let calls = 0;
     const result = await runBoundedSuccessorDrain({
