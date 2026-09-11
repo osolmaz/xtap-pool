@@ -12,25 +12,40 @@ const unitRow = z.object({ unit_id: z.string() });
 export function selectedCurrentCoverageUnitIds(
   database: Database.Database,
   target: ResolvedConsumerContext,
+  options: {
+    unitIds?: readonly string[];
+    after?: string;
+  } = {},
 ): string[] {
+  if (options.unitIds?.length === 0) return [];
   const context = target.context;
   const authors = JSON.stringify(context.selection.author_ids);
   return database
     .prepare(
       `WITH candidates AS MATERIALIZED (
-      SELECT DISTINCT unit_id FROM consumer_post_units
-      WHERE author_id IN (SELECT value FROM json_each(@authors))
+      SELECT DISTINCT u.unit_id FROM consumer_post_units u
+      JOIN enrich_queue q ON q.unit_id = u.unit_id
+      WHERE u.author_id IN (SELECT value FROM json_each(@authors))
+        AND (@unit_ids IS NULL OR u.unit_id IN (SELECT value FROM json_each(@unit_ids)))
+        AND (@after IS NULL OR q.latest_activity_at > @after)
     ) SELECT c.unit_id FROM candidates c WHERE
       NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
         WHERE m.unit_id = c.unit_id AND (
           json_extract(t.json, '$.author.id') IS NULL
           OR json_extract(t.json, '$.author.id') NOT IN (SELECT value FROM json_each(@authors))
-          OR json_extract(t.json, '$.is_subscriber_only') = 1))
+          OR (json_type(t.json, '$.is_subscriber_only') IS NOT NULL
+            AND json_type(t.json, '$.is_subscriber_only') <> 'false')))
       AND EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
-        WHERE m.unit_id = c.unit_id AND COALESCE(json_extract(t.json, '$.is_retweet'), 0) != 1)
+        WHERE m.unit_id = c.unit_id AND (
+          json_type(t.json, '$.is_retweet') IS NULL
+          OR json_type(t.json, '$.is_retweet') = 'false'))
       ORDER BY c.unit_id`,
     )
-    .all({ authors })
+    .all({
+      authors,
+      unit_ids: options.unitIds === undefined ? null : JSON.stringify(options.unitIds),
+      after: options.after ?? null,
+    })
     .map((row) => unitRow.parse(row).unit_id);
 }
 
@@ -60,7 +75,17 @@ export function selectedCurrentObservationThrough(
   target: ResolvedConsumerContext,
   unitIds: readonly string[],
 ): string | null {
+  if (unitIds.length === 0) return null;
   return observationThrough(database, target, unitIds, undefined, true);
+}
+
+export function selectedUnitObservationThrough(
+  database: Database.Database,
+  target: ResolvedConsumerContext,
+  unitIds: readonly string[],
+): string | null {
+  if (unitIds.length === 0) return null;
+  return observationThrough(database, target, unitIds, undefined, false);
 }
 
 function observationThrough(
@@ -83,6 +108,7 @@ function observationThrough(
     : `AND EXISTS (SELECT 1 FROM observation_sources s INDEXED BY idx_observation_source_id
           WHERE s.observation_id = o.observation_id
             AND s.segment_key IN (SELECT json_extract(value, '$.key') FROM json_each(?)))`;
+  const privacySql = coveragePrivacySql(currentSource);
   // Read each selected post once and stop at its newest permitted observation.
   // Scanning every historical counter sample repeats source and visibility checks.
   const row = database
@@ -91,9 +117,7 @@ function observationThrough(
     SELECT e.unit_id FROM eligible e WHERE
       (? IS NULL OR EXISTS (SELECT 1 FROM label_assignments a WHERE a.unit_id = e.unit_id
         AND a.kind = 'free' AND a.name = ? AND a.name IN (SELECT json_extract(value, '$.name') FROM json_each(?))))
-      AND NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
-        WHERE m.unit_id = e.unit_id AND json_type(t.json, '$.is_subscriber_only') IS NOT NULL
-          AND json_type(t.json, '$.is_subscriber_only') <> 'false')
+      ${privacySql}
     ), selected_posts AS MATERIALIZED (
       SELECT DISTINCT m.tweet_id AS post_id FROM permitted p JOIN unit_members m ON m.unit_id = p.unit_id
       WHERE (? IS NULL OR m.tweet_id IN (SELECT value FROM json_each(?)))
@@ -122,4 +146,11 @@ function observationThrough(
       ...(currentSource ? [] : [JSON.stringify(target.snapshot.files)]),
     );
   return z.object({ latest: z.string().nullable() }).parse(row).latest;
+}
+
+function coveragePrivacySql(currentSource: boolean): string {
+  if (currentSource) return "";
+  return `AND NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
+        WHERE m.unit_id = e.unit_id AND json_type(t.json, '$.is_subscriber_only') IS NOT NULL
+          AND json_type(t.json, '$.is_subscriber_only') <> 'false')`;
 }

@@ -32,29 +32,30 @@ export class ConsumerCoverageEffects {
     this.targetKeys = JSON.stringify([...current]);
   }
 
-  hasNewResults(contract: string): boolean {
-    return (
-      this.database
-        .prepare(
-          `SELECT 1 FROM json_each(@changed) a
+  newResultUnits(contract: string, after = ""): string[] {
+    return this.database
+      .prepare(
+        `SELECT DISTINCT r.unit_id FROM json_each(@changed) a
       JOIN source_segments segment ON segment.key = a.value AND segment.enrichment_rows > 0
       JOIN consumer_result_sources s ON s.segment_key = segment.key
       JOIN consumer_results r ON r.result_hash = s.result_hash
-      WHERE r.contract_hash = @contract AND EXISTS (
+      WHERE r.contract_hash = @contract AND r.unit_id > @after AND EXISTS (
         SELECT 1 FROM consumer_post_units d JOIN observation_sources ds ON ds.source_ref = d.source_ref
         WHERE d.unit_id = r.unit_id AND d.author_id IN (SELECT value FROM json_each(@authors))
           AND ds.segment_key IN (SELECT value FROM json_each(@target))) AND NOT EXISTS (
         SELECT 1 FROM consumer_result_sources old WHERE old.result_hash = r.result_hash
-          AND old.segment_key IN (SELECT value FROM json_each(@base))) LIMIT 1`,
-        )
-        .get({
-          changed: JSON.stringify(this.additions),
-          base: this.baseKeys,
-          contract,
-          authors: this.authors,
-          target: this.targetKeys,
-        }) !== undefined
-    );
+          AND old.segment_key IN (SELECT value FROM json_each(@base)))
+      ORDER BY r.unit_id LIMIT 100`,
+      )
+      .all({
+        changed: JSON.stringify(this.additions),
+        base: this.baseKeys,
+        contract,
+        authors: this.authors,
+        target: this.targetKeys,
+        after,
+      })
+      .map((row) => z.object({ unit_id: z.string() }).parse(row).unit_id);
   }
 
   posts(after = ""): string[] {
@@ -81,6 +82,44 @@ export class ConsumerCoverageEffects {
         target: this.targetKeys,
       })
       .map((row) => z.object({ post_id: z.string() }).parse(row).post_id);
+  }
+
+  units(posts: readonly string[]): string[] {
+    if (posts.length === 0) return [];
+    return this.database
+      .prepare(
+        `SELECT DISTINCT u.unit_id FROM consumer_post_units u
+      JOIN observation_sources s ON s.source_ref = u.source_ref
+      WHERE u.post_id IN (SELECT value FROM json_each(@posts))
+        AND s.segment_key IN (SELECT value FROM json_each(@target))
+      ORDER BY u.unit_id`,
+      )
+      .all({ posts: JSON.stringify(posts), target: this.targetKeys })
+      .map((row) => z.object({ unit_id: z.string() }).parse(row).unit_id);
+  }
+
+  unitsObservedAt(units: readonly string[], observedAt: string): boolean {
+    if (units.length === 0) return false;
+    return (
+      this.database
+        .prepare(
+          `SELECT 1 FROM consumer_post_units u
+      JOIN observation_sources membership ON membership.source_ref = u.source_ref
+      JOIN post_observations o ON o.post_id = u.post_id
+      WHERE u.unit_id IN (SELECT value FROM json_each(@units))
+        AND membership.segment_key IN (SELECT value FROM json_each(@base))
+        AND o.observed_at = @observed_at AND EXISTS (
+          SELECT 1 FROM observation_sources source
+          WHERE source.observation_id = o.observation_id
+            AND source.segment_key IN (SELECT value FROM json_each(@base)))
+      LIMIT 1`,
+        )
+        .get({
+          units: JSON.stringify(units),
+          base: this.baseKeys,
+          observed_at: observedAt,
+        }) !== undefined
+    );
   }
 
   unchanged(post: string): boolean {

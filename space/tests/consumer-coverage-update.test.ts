@@ -254,6 +254,29 @@ describe("source coverage maintenance", () => {
     );
   }, 15000);
 
+  it("limits normal new-content coverage to the forward time window", async () => {
+    await f.postMany(
+      Array.from({ length: 250 }, (_, n) =>
+        consumerTweet(String(100 + n), {
+          captured_at: "2026-09-06T01:00:00.000Z",
+        }),
+      ),
+    );
+    const source = await finish(BOOTSTRAP);
+    const started = probe.events().length;
+    await f.post(
+      consumerTweet("999", {
+        captured_at: "2026-09-06T05:00:00.000Z",
+      }),
+    );
+    const next = await finish(`/api/changes?after=${source.cursor}`);
+    expect(next.complete_through).toBe("2026-09-06T05:00:00.000Z");
+    expect(next.observations_through).toBe("2026-09-06T05:00:00.000Z");
+    expect(readsSince(started, "coverage").at(-1)?.mode).toBe("semantic");
+    expect(bodyIds(started, "coverage")).toEqual(["999"]);
+    await assertFullCoverage(next.cursor, source.cursor);
+  });
+
   it("keeps the maximum for delayed samples and recalculates a corrected content-run clock", async () => {
     await f.post(consumerTweet("100", { captured_at: "2026-09-06T01:00:00.000Z" }));
     await f.post(consumerTweet("200", { captured_at: "2026-09-06T00:30:00.000Z" }));
