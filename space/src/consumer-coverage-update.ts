@@ -115,10 +115,10 @@ function coverageCanMoveBackward(
 ): boolean {
   const boundary = base.context.complete_through;
   if (boundary === null) return semanticUnits.size > 0;
-  if (semanticUnits.size === 0 || currentAffectedUnits.length === 0) return false;
+  if (semanticUnits.size === 0) return false;
   const semantic = new Set(semanticUnits);
   const selected = currentAffectedUnits.filter((unit) => semantic.has(unit));
-  if (selected.length === 0) return false;
+  if (selected.length !== semantic.size) return true;
   return (
     database
       .prepare(
