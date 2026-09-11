@@ -304,6 +304,29 @@ describe("source coverage maintenance", () => {
     await assertFullCoverage(source.cursor);
   });
 
+  it("recalculates when a delayed done unit supplied the completion maximum", async () => {
+    await f.post(consumerTweet("100", { captured_at: "2026-09-06T05:00:00.000Z" }));
+    await f.post(consumerTweet("200", { captured_at: "2026-09-06T01:00:00.000Z" }));
+    let source = await finish(BOOTSTRAP);
+    await f.post(
+      consumerTweet("200", {
+        captured_at: "2026-09-06T06:00:00.000Z",
+        metrics: { likes: 6 },
+      }),
+      false,
+    );
+    source = await finish(`/api/changes?after=${source.cursor}`);
+    expect(source.complete_through).toBe("2026-09-06T05:00:00.000Z");
+    expect(source.observations_through).toBe("2026-09-06T06:00:00.000Z");
+    const started = probe.events().length;
+    await f.post(consumerTweet("100", { captured_at: "2026-09-06T04:00:00.000Z" }), false);
+    const next = await finish(`/api/changes?after=${source.cursor}`);
+    expect(next.complete_through).toBe("2026-09-06T04:00:00.000Z");
+    expect(next.observations_through).toBe("2026-09-06T06:00:00.000Z");
+    expect(readsSince(started, "coverage").at(-1)?.mode).toBe("semantic");
+    await assertFullCoverage(next.cursor, source.cursor);
+  });
+
   it("handles mixed edits and counters, pending activation, and withdrawal of the previous maximum", async () => {
     await f.post(consumerTweet());
     await f.post(consumerTweet("200", { captured_at: "2026-09-06T02:00:00.000Z" }));

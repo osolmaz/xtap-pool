@@ -124,7 +124,7 @@ function coverageCanMoveBackward(
       .prepare(
         `SELECT 1 FROM enrich_queue
       WHERE unit_id IN (SELECT value FROM json_each(?))
-        AND status != 'done' AND latest_activity_at <= ? LIMIT 1`,
+        AND latest_activity_at <= ? LIMIT 1`,
       )
       .get(JSON.stringify(selected), boundary) !== undefined
   );
