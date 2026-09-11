@@ -3,14 +3,6 @@ import { z } from "zod";
 import type { ResolvedConsumerContext } from "./consumer-context.js";
 import { restrictedAccessSql } from "./post-state.js";
 
-const proofSchema = z.object({
-  base_hashes: z.string().nullable(),
-  target_hashes: z.string().nullable(),
-  base_hash: z.string().nullable(),
-  base_at: z.string().nullable(),
-  current_hash: z.string(),
-  current_at: z.string(),
-});
 /** Coverage proofs use exact source membership and existing scalar indexes. No
  * queue replay or persisted consumer state is created here. */
 export class ConsumerCoverageEffects {
@@ -74,7 +66,7 @@ export class ConsumerCoverageEffects {
           AND EXISTS (SELECT 1 FROM consumer_post_units member JOIN observation_sources ms ON ms.source_ref = member.source_ref
             WHERE member.unit_id = d.unit_id AND member.author_id IN (SELECT value FROM json_each(@authors))
               AND ms.segment_key IN (SELECT value FROM json_each(@target))))
-      ORDER BY p.post_id LIMIT 100`,
+      ORDER BY p.post_id LIMIT 500`,
       )
       .all({
         changed: JSON.stringify(this.additions),
@@ -123,43 +115,82 @@ export class ConsumerCoverageEffects {
     );
   }
 
-  unchanged(post: string): boolean {
-    const row = this.database
+  semanticPosts(posts: readonly string[]): string[] {
+    if (posts.length === 0) return [];
+    return this.database
       .prepare(
-        `WITH observed AS MATERIALIZED (
-      SELECT o.contributor, o.observed_at, o.content_hash,
-        EXISTS (SELECT 1 FROM observation_sources s WHERE s.observation_id = o.observation_id
-          AND s.segment_key IN (SELECT value FROM json_each(@base))) AS in_base
-      FROM post_observations o WHERE o.post_id = @post AND EXISTS (
-        SELECT 1 FROM observation_sources s WHERE s.observation_id = o.observation_id
-          AND s.segment_key IN (SELECT value FROM json_each(@target)))
-    ), base_latest AS (SELECT contributor, MAX(observed_at) AS at FROM observed WHERE in_base = 1 GROUP BY contributor),
-    target_latest AS (SELECT contributor, MAX(observed_at) AS at FROM observed GROUP BY contributor),
-    base_hashes AS (SELECT DISTINCT o.content_hash FROM observed o JOIN base_latest b
-      ON b.contributor = o.contributor AND b.at = o.observed_at WHERE o.in_base = 1 ORDER BY o.content_hash),
-    target_hashes AS (SELECT DISTINCT o.content_hash FROM observed o JOIN target_latest t
-      ON t.contributor = o.contributor AND t.at = o.observed_at ORDER BY o.content_hash),
-    latest AS MATERIALIZED (SELECT DISTINCT content_hash FROM observed WHERE in_base = 1
-      AND observed_at = (SELECT MAX(observed_at) FROM observed WHERE in_base = 1)),
-    winner AS MATERIALIZED (SELECT c.content_hash FROM latest l JOIN post_content_versions c ON c.content_hash = l.content_hash
-      ORDER BY ${restrictedAccessSql("c.payload_json", "is_subscriber_only")} DESC,
-        ${restrictedAccessSql("c.payload_json", "is_retweet")} DESC, c.content_hash DESC LIMIT 1)
-    SELECT (SELECT GROUP_CONCAT(content_hash) FROM base_hashes) AS base_hashes,
-      (SELECT GROUP_CONCAT(content_hash) FROM target_hashes) AS target_hashes,
-      (SELECT content_hash FROM winner) AS base_hash,
-      (SELECT MIN(observed_at) FROM observed WHERE in_base = 1 AND content_hash = (SELECT content_hash FROM winner)
-        AND observed_at >= COALESCE((SELECT MAX(observed_at) FROM observed
-          WHERE in_base = 1 AND content_hash <> (SELECT content_hash FROM winner)), '')) AS base_at,
-      m.content_hash AS current_hash, m.content_at AS current_at FROM unit_members m WHERE m.tweet_id = @post`,
+        `WITH requested(post_id) AS MATERIALIZED (SELECT value FROM json_each(@posts)),
+    base(key) AS MATERIALIZED (SELECT value FROM json_each(@base)),
+    target(key) AS MATERIALIZED (SELECT value FROM json_each(@target)),
+    observed AS MATERIALIZED (
+      SELECT o.observation_id, o.post_id, o.contributor, o.observed_at, o.content_hash,
+        MAX(CASE WHEN b.key IS NULL THEN 0 ELSE 1 END) AS in_base
+      FROM requested r
+      JOIN post_observations o INDEXED BY idx_observation_post_time ON o.post_id = r.post_id
+      JOIN observation_sources s INDEXED BY idx_observation_source_id
+        ON s.observation_id = o.observation_id
+      JOIN target t ON t.key = s.segment_key
+      LEFT JOIN base b ON b.key = s.segment_key
+      GROUP BY o.observation_id
+    ), base_latest AS (
+      SELECT post_id, contributor, MAX(observed_at) AS at FROM observed
+      WHERE in_base = 1 GROUP BY post_id, contributor
+    ), target_latest AS (
+      SELECT post_id, contributor, MAX(observed_at) AS at FROM observed
+      GROUP BY post_id, contributor
+    ), base_hashes AS MATERIALIZED (
+      SELECT DISTINCT o.post_id, o.content_hash FROM observed o JOIN base_latest b
+        ON b.post_id = o.post_id AND b.contributor = o.contributor AND b.at = o.observed_at
+      WHERE o.in_base = 1
+    ), target_hashes AS MATERIALIZED (
+      SELECT DISTINCT o.post_id, o.content_hash FROM observed o JOIN target_latest t
+        ON t.post_id = o.post_id AND t.contributor = o.contributor AND t.at = o.observed_at
+    ), base_only AS (
+      SELECT post_id, content_hash FROM base_hashes
+      EXCEPT SELECT post_id, content_hash FROM target_hashes
+    ), target_only AS (
+      SELECT post_id, content_hash FROM target_hashes
+      EXCEPT SELECT post_id, content_hash FROM base_hashes
+    ), changed_hashes AS (
+      SELECT post_id FROM base_only UNION SELECT post_id FROM target_only
+    ), base_max AS (
+      SELECT post_id, MAX(observed_at) AS at FROM observed WHERE in_base = 1 GROUP BY post_id
+    ), latest AS MATERIALIZED (
+      SELECT DISTINCT o.post_id, o.content_hash FROM observed o JOIN base_max b
+        ON b.post_id = o.post_id AND b.at = o.observed_at WHERE o.in_base = 1
+    ), ranked_winners AS MATERIALIZED (
+      SELECT l.post_id, c.content_hash, ROW_NUMBER() OVER (
+        PARTITION BY l.post_id ORDER BY
+          ${restrictedAccessSql("c.payload_json", "is_subscriber_only")} DESC,
+          ${restrictedAccessSql("c.payload_json", "is_retweet")} DESC,
+          c.content_hash DESC
+      ) AS position
+      FROM latest l JOIN post_content_versions c ON c.content_hash = l.content_hash
+    ), winners AS MATERIALIZED (
+      SELECT post_id, content_hash FROM ranked_winners WHERE position = 1
+    ), last_different AS (
+      SELECT w.post_id, MAX(o.observed_at) AS at FROM winners w
+      LEFT JOIN observed o ON o.post_id = w.post_id AND o.in_base = 1
+        AND o.content_hash <> w.content_hash GROUP BY w.post_id
+    ), base_activity AS (
+      SELECT w.post_id, MIN(o.observed_at) AS at FROM winners w
+      JOIN observed o ON o.post_id = w.post_id AND o.in_base = 1
+        AND o.content_hash = w.content_hash
+      LEFT JOIN last_different d ON d.post_id = w.post_id
+      WHERE o.observed_at >= COALESCE(d.at, '') GROUP BY w.post_id
+    ), base_posts AS (SELECT DISTINCT post_id FROM base_hashes)
+    SELECT r.post_id FROM requested r
+    LEFT JOIN base_posts b ON b.post_id = r.post_id
+    LEFT JOIN changed_hashes h ON h.post_id = r.post_id
+    LEFT JOIN winners w ON w.post_id = r.post_id
+    LEFT JOIN base_activity a ON a.post_id = r.post_id
+    LEFT JOIN unit_members m ON m.tweet_id = r.post_id
+    WHERE b.post_id IS NULL OR h.post_id IS NOT NULL
+      OR w.content_hash IS NULL OR m.content_hash IS NULL OR w.content_hash <> m.content_hash
+      OR a.at IS NULL OR a.at <> m.content_at
+    ORDER BY r.post_id`,
       )
-      .get({ post, base: this.baseKeys, target: this.targetKeys });
-    if (row === undefined) return false;
-    const proof = proofSchema.parse(row);
-    return (
-      proof.base_hashes !== null &&
-      proof.base_hashes === proof.target_hashes &&
-      proof.base_hash === proof.current_hash &&
-      proof.base_at === proof.current_at
-    );
+      .all({ posts: JSON.stringify(posts), base: this.baseKeys, target: this.targetKeys })
+      .map((row) => z.object({ post_id: z.string() }).parse(row).post_id);
   }
 }

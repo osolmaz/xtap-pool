@@ -255,6 +255,27 @@ describe("source coverage maintenance", () => {
     );
   }, 15000);
 
+  it("batches semantic proofs for one large metric-only revision", async () => {
+    await f.postMany(Array.from({ length: 250 }, (_, n) => consumerTweet(String(100 + n))));
+    const source = await finish(BOOTSTRAP);
+    const affected = Array.from({ length: 250 }, (_, n) => String(100 + n));
+    const at = "2026-09-06T05:00:00.000Z";
+    await f.postMany(
+      affected.map((id) => consumerTweet(id, { captured_at: at, metrics: { likes: 5 } })),
+      false,
+    );
+    const started = probe.events().length;
+    const response = await finish(`/api/changes?after=${source.cursor}`);
+    expect(response.complete_through).toBe(source.complete_through);
+    expect(response.observations_through).toBe(at);
+    expect(response.changes.some((change) => change.type === "unit_upsert")).toBe(false);
+    const coverage = readsSince(started, "coverage");
+    expect(coverage).toHaveLength(1);
+    expect(coverage[0]?.mode).toBe("metrics");
+    expect(coverage[0]?.body_queries).toBeLessThanOrEqual(2);
+    expect(bodyIds(started, "coverage")).toEqual(affected);
+  });
+
   it("limits normal new-content coverage to the forward time window", async () => {
     await f.postMany(
       Array.from({ length: 250 }, (_, n) =>
