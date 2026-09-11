@@ -127,6 +127,30 @@ describe("content activity and deterministic post state", () => {
     },
   );
 
+  it.each([
+    ["is_subscriber_only", false],
+    ["is_subscriber_only", true],
+    ["is_retweet", false],
+    ["is_retweet", true],
+  ] as const)(
+    "chooses a same-time non-boolean restricted %s copy independently of delivery order (%s)",
+    (field, restrictedFirst) => {
+      const publicPost = post(21);
+      const restrictedPost = post(21, { [field]: null });
+      for (const tweet of restrictedFirst
+        ? [restrictedPost, publicPost]
+        : [publicPost, restrictedPost])
+        add(tweet);
+      const latest = latestPost(store.database, "100");
+      if (latest === undefined) throw new Error("missing current post");
+      expect(latest[field]).toBeNull();
+      const projected = currentPostAccess(latest);
+      expect(
+        field === "is_subscriber_only" ? projected.isSubscriberOnly : projected.isRetweet,
+      ).toBe(1);
+    },
+  );
+
   it("normalizes offset timestamps before choosing membership", () => {
     add(post(21, { captured_at: "2026-05-21T03:00:00+03:00" }));
     add(post(21, { conversation_id: "new", captured_at: "2026-05-21T01:00:00Z" }));
