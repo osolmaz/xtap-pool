@@ -9,6 +9,7 @@ import type { UnitQuery } from "./unit-store.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import type { ConsumerRegistry } from "./consumer-registry.js";
 import { recordedResults } from "./recorded-result.js";
+import { restrictedAccessSql } from "./post-state.js";
 
 const MAX_POSTS = 2000;
 export class HistoricalReadLimitError extends Error {}
@@ -105,7 +106,8 @@ export class HistoricalUnitReader {
       ), ranked AS (
         SELECT *, ROW_NUMBER() OVER (
           PARTITION BY post_id, contributor ORDER BY observed_at DESC,
-          COALESCE(json_extract(payload_json, '$.is_subscriber_only'), 0) DESC,
+          ${restrictedAccessSql("payload_json", "is_subscriber_only")} DESC,
+          ${restrictedAccessSql("payload_json", "is_retweet")} DESC,
           content_hash DESC, observation_id DESC
         ) AS position FROM candidates
       )
