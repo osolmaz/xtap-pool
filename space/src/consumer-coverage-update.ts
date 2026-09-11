@@ -90,7 +90,7 @@ function inspectPostEffects(
       observationsThrough,
       selectedObservationThrough(database, target, posts),
     );
-    const semanticPosts = posts.filter((post) => !effects.unchanged(post));
+    const semanticPosts = effects.semanticPosts(posts);
     for (const unit of effects.units(semanticPosts)) semanticUnits.add(unit);
     posts = effects.posts(posts.at(-1));
   }
