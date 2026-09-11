@@ -17,6 +17,13 @@ export type ConsumerCoverage = {
   completeThrough: string | null;
   observationsThrough: string | null;
 };
+
+type EffectSummary = {
+  changedPosts: boolean;
+  observationsThrough: string | null;
+  semanticUnits: Set<string>;
+};
+
 /** Called only on the verified current DB, under the runtime mutex. The base
  * clocks remain valid only while the selected content and completion state do. */
 export function updateConsumerCoverage(
@@ -27,42 +34,132 @@ export function updateConsumerCoverage(
   if (base === undefined || !sameCoverageSelection(base, target))
     return recalculate(database, target);
   const effects = new ConsumerCoverageEffects(database, base, target);
-  if (effects.hasNewResults(target.context.contract)) return recalculate(database, target);
-  let posts = effects.posts();
-  if (posts.length === 0)
-    return {
-      kind: "coverage",
-      mode: "reuse",
-      completeThrough: base.context.complete_through,
-      observationsThrough: base.context.observations_through,
-    };
-  // Prove the whole delta before reading any selected bodies. Attempts cannot
-  // turn done work pending; non-done retry states have the same coverage effect.
-  while (posts.length > 0) {
-    if (!posts.every((post) => effects.unchanged(post))) return recalculate(database, target);
-    posts = effects.posts(posts.at(-1));
-  }
-  return metricCoverage(database, target, base, effects);
+  const resultUnits = collectNewResultUnits(effects, target.context.contract);
+  const summary = inspectPostEffects(database, target, base, effects);
+  const semantic = resultUnits.size > 0 || summary.semanticUnits.size > 0;
+  const unchanged = nonSemanticCoverage(base, summary, semantic);
+  if (unchanged !== null) return unchanged;
+
+  const affectedUnits = new Set([...resultUnits, ...summary.semanticUnits]);
+  const currentAffectedUnits = selectedCurrentCoverageUnitIds(database, target, {
+    unitIds: [...affectedUnits],
+  });
+  if (
+    coverageCanMoveBackward(database, base, summary.semanticUnits, currentAffectedUnits) ||
+    affectedUnitsContainObservationMaximum(base, effects, affectedUnits)
+  )
+    return recalculate(database, target);
+
+  const affectedLatest = selectedCurrentObservationThrough(database, target, currentAffectedUnits);
+  const observationsThrough = later(summary.observationsThrough, affectedLatest);
+  return {
+    kind: "coverage",
+    mode: "semantic",
+    completeThrough: forwardCompleteThrough(database, target, base),
+    observationsThrough,
+  };
 }
-function metricCoverage(
+
+function nonSemanticCoverage(
+  base: ResolvedConsumerContext,
+  summary: EffectSummary,
+  semantic: boolean,
+): ConsumerCoverage | null {
+  if (semantic) return null;
+  return {
+    kind: "coverage",
+    mode: summary.changedPosts ? "metrics" : "reuse",
+    completeThrough: base.context.complete_through,
+    observationsThrough: summary.observationsThrough,
+  };
+}
+
+function inspectPostEffects(
   database: Database.Database,
   target: ResolvedConsumerContext,
   base: ResolvedConsumerContext,
   effects: ConsumerCoverageEffects,
-): ConsumerCoverage {
-  let through = base.context.observations_through;
+): EffectSummary {
+  let observationsThrough = base.context.observations_through;
+  let changedPosts = false;
+  const semanticUnits = new Set<string>();
   let posts = effects.posts();
   while (posts.length > 0) {
-    const latest = selectedObservationThrough(database, target, posts);
-    if (latest !== null && (through === null || latest > through)) through = latest;
+    changedPosts = true;
+    observationsThrough = later(
+      observationsThrough,
+      selectedObservationThrough(database, target, posts),
+    );
+    const semanticPosts = posts.filter((post) => !effects.unchanged(post));
+    for (const unit of effects.units(semanticPosts)) semanticUnits.add(unit);
     posts = effects.posts(posts.at(-1));
   }
-  return {
-    kind: "coverage",
-    mode: "metrics",
-    completeThrough: base.context.complete_through,
-    observationsThrough: through,
-  };
+  return { changedPosts, observationsThrough, semanticUnits };
+}
+
+function collectNewResultUnits(effects: ConsumerCoverageEffects, contract: string): Set<string> {
+  const units = new Set<string>();
+  let page = effects.newResultUnits(contract);
+  while (page.length > 0) {
+    for (const unit of page) units.add(unit);
+    page = effects.newResultUnits(contract, page.at(-1));
+  }
+  return units;
+}
+
+function coverageCanMoveBackward(
+  database: Database.Database,
+  base: ResolvedConsumerContext,
+  semanticUnits: ReadonlySet<string>,
+  currentAffectedUnits: readonly string[],
+): boolean {
+  const boundary = base.context.complete_through;
+  if (boundary === null) return semanticUnits.size > 0;
+  if (semanticUnits.size === 0 || currentAffectedUnits.length === 0) return false;
+  const semantic = new Set(semanticUnits);
+  const selected = currentAffectedUnits.filter((unit) => semantic.has(unit));
+  if (selected.length === 0) return false;
+  return (
+    database
+      .prepare(
+        `SELECT 1 FROM enrich_queue
+      WHERE unit_id IN (SELECT value FROM json_each(?))
+        AND status != 'done' AND latest_activity_at <= ? LIMIT 1`,
+      )
+      .get(JSON.stringify(selected), boundary) !== undefined
+  );
+}
+
+function affectedUnitsContainObservationMaximum(
+  base: ResolvedConsumerContext,
+  effects: ConsumerCoverageEffects,
+  units: ReadonlySet<string>,
+): boolean {
+  const maximum = base.context.observations_through;
+  return maximum !== null && effects.unitsObservedAt([...units], maximum);
+}
+
+function forwardCompleteThrough(
+  database: Database.Database,
+  target: ResolvedConsumerContext,
+  base: ResolvedConsumerContext,
+): string | null {
+  const boundary = base.context.complete_through;
+  if (boundary === null) return recalculate(database, target).completeThrough;
+  const forwardUnits = selectedCurrentCoverageUnitIds(database, target, {
+    after: boundary,
+  });
+  const forward =
+    forwardUnits.length === 0
+      ? null
+      : (selectedCompleteThrough(database, { unitIds: forwardUnits }) ?? null);
+  return later(boundary, forward);
+}
+
+function later(left: string | null, right: string | null): string | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left > right ? left : right;
 }
 
 function recalculate(
