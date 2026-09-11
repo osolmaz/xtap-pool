@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { ResolvedConsumerContext } from "./consumer-context.js";
+import { restrictedAccessSql } from "./post-state.js";
 
 const proofSchema = z.object({
   base_hashes: z.string().nullable(),
@@ -141,8 +142,8 @@ export class ConsumerCoverageEffects {
     latest AS MATERIALIZED (SELECT DISTINCT content_hash FROM observed WHERE in_base = 1
       AND observed_at = (SELECT MAX(observed_at) FROM observed WHERE in_base = 1)),
     winner AS MATERIALIZED (SELECT c.content_hash FROM latest l JOIN post_content_versions c ON c.content_hash = l.content_hash
-      ORDER BY CASE WHEN (SELECT COUNT(*) FROM latest) = 1 THEN 0
-        ELSE COALESCE(json_extract(c.payload_json, '$.is_subscriber_only'), 0) END DESC, c.content_hash DESC LIMIT 1)
+      ORDER BY ${restrictedAccessSql("c.payload_json", "is_subscriber_only")} DESC,
+        ${restrictedAccessSql("c.payload_json", "is_retweet")} DESC, c.content_hash DESC LIMIT 1)
     SELECT (SELECT GROUP_CONCAT(content_hash) FROM base_hashes) AS base_hashes,
       (SELECT GROUP_CONCAT(content_hash) FROM target_hashes) AS target_hashes,
       (SELECT content_hash FROM winner) AS base_hash,

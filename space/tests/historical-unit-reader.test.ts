@@ -230,6 +230,18 @@ describe("bounded historical unit reconstruction", () => {
     }
   });
 
+  it.each(["is_subscriber_only", "is_retweet"] as const)(
+    "keeps a same-time non-boolean restricted %s copy out of a pinned public view",
+    (field) => {
+      const restricted = { ...initial(), [field]: null };
+      addPost(restricted, `restricted-${field}`);
+      addResult(restricted, `restricted-result-${field}`);
+      expect(read([...initialKeys, `restricted-${field}`, `restricted-result-${field}`])).toEqual(
+        [],
+      );
+    },
+  );
+
   it("keeps the same content digest for a later metric-only observation", () => {
     const before = read()[0];
     const later = initial();
