@@ -12,6 +12,7 @@ import type { ResolvedConsumerContext } from "../src/consumer-context.js";
 import type { ConsumerCursor } from "../src/consumer-cursor.js";
 import type { ConsumerChange } from "../src/consumer-page.js";
 import { makePooled } from "./helpers.js";
+import { consumerQueryPlan } from "./consumer-query-plan.js";
 
 const contract = "a".repeat(64);
 const now = "2026-09-07T12:00:00.000Z";
@@ -212,7 +213,12 @@ describe("bounded consumer change steps", () => {
     const content = engine.step(cursor(target, noop), 200);
     expect(content.changes).toEqual([]);
     expect(read).not.toHaveBeenCalled();
+    const plan = consumerQueryPlan(store.database, /WITH base_keys\(key\) AS MATERIALIZED/u);
     const samples = engine.step(content.cursor, 200);
+    expect(plan.join("\n")).toMatch(/MATERIALIZE base_keys/u);
+    expect(plan.join("\n")).toMatch(/MATERIALIZE previous_keys/u);
+    expect(plan.join("\n")).toMatch(/MATERIALIZE target_keys/u);
+    expect(plan.join("\n")).toMatch(/AUTOMATIC (?:PARTIAL )?COVERING INDEX \(key=\?\)/u);
     expect(samples.changes.map((change) => change.type)).toEqual(["observation"]);
     expect(read.mock.calls.every(([ids]) => ids.length === 1)).toBe(true);
     expect(samples.cursor.position.kind).toBe("idle");
