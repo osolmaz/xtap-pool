@@ -142,23 +142,28 @@ export class ConsumerObservationReader {
     const since = z.iso.datetime().parse(options.since);
     const limit = Math.min(100, z.number().int().min(1).max(500).parse(options.limit));
     const after = options.after ?? { post_id: "", observed_at: "", id: "" };
+    // Snapshot boundaries contain tens of thousands of segment keys. Materialize each
+    // boundary once instead of rescanning json_each for every candidate observation.
     const rows = this.database
       .prepare(
-        `WITH new_ids AS MATERIALIZED (
+        `WITH base_keys(key) AS MATERIALIZED (SELECT value FROM json_each(@base)),
+    previous_keys(key) AS MATERIALIZED (SELECT value FROM json_each(@previous_changed)),
+    target_keys(key) AS MATERIALIZED (SELECT value FROM json_each(@target)),
+    new_ids AS MATERIALIZED (
       SELECT DISTINCT s.observation_id FROM observation_sources s
       WHERE s.segment_key IN (SELECT value FROM json_each(@changed))
-        AND NOT EXISTS (SELECT 1 FROM observation_sources old WHERE old.observation_id = s.observation_id
-          AND old.segment_key IN (SELECT value FROM json_each(@base)))
-        AND NOT EXISTS (SELECT 1 FROM observation_sources processed
-          WHERE processed.observation_id = s.observation_id
-            AND processed.segment_key IN (SELECT value FROM json_each(@previous_changed)))
+        AND NOT EXISTS (SELECT 1 FROM observation_sources old JOIN base_keys b ON b.key = old.segment_key
+          WHERE old.observation_id = s.observation_id)
+        AND NOT EXISTS (SELECT 1 FROM observation_sources processed JOIN previous_keys p ON p.key = processed.segment_key
+          WHERE processed.observation_id = s.observation_id)
     ), samples AS MATERIALIZED (
       SELECT o.*, s.source_ref, s.received_at AS source_received_at,
         ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY s.received_at, s.source_ref) AS copy
       FROM new_ids n CROSS JOIN post_observations o ON o.observation_id = n.observation_id
       CROSS JOIN observation_sources s ON s.observation_id = o.observation_id
+      CROSS JOIN target_keys t ON t.key = s.segment_key
       CROSS JOIN post_content_versions c ON c.content_hash = o.content_hash
-      WHERE ${PUBLIC_SAMPLE} AND o.observed_at >= @since AND s.segment_key IN (SELECT value FROM json_each(@target))
+      WHERE ${PUBLIC_SAMPLE} AND o.observed_at >= @since
         AND (o.post_id, o.observed_at, o.observation_id) > (@post, @at, @id)
     ) SELECT payload_json, source_ref, source_received_at AS received_at FROM samples WHERE copy = 1
       ORDER BY post_id, observed_at, observation_id LIMIT @limit`,
