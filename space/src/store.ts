@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { contentHash, normalizeObservation, type PooledTweet } from "@xtap-pool/shared";
 import { ObservationStore } from "./observation-store.js";
 import { SourceEffectStore } from "./source-effect-store.js";
-import { ensureContentColumns, POST_ORDER } from "./post-state.js";
+import { ensureContentColumns, POST_ORDER, restrictedAccessSql } from "./post-state.js";
 
 import { ensureEnrichmentTables } from "./enrich-store.js";
 
@@ -182,9 +182,12 @@ export class TweetStore {
         content_hash = excluded.content_hash
       WHERE excluded.captured_at > tweets.captured_at
         OR (excluded.captured_at = tweets.captured_at AND (
-          COALESCE(json_extract(excluded.json, '$.is_subscriber_only'), 0) > COALESCE(json_extract(tweets.json, '$.is_subscriber_only'), 0)
-          OR (COALESCE(json_extract(excluded.json, '$.is_subscriber_only'), 0) = COALESCE(json_extract(tweets.json, '$.is_subscriber_only'), 0)
-              AND excluded.content_hash > tweets.content_hash)))
+          ${restrictedAccessSql("excluded.json", "is_subscriber_only")} > ${restrictedAccessSql("tweets.json", "is_subscriber_only")}
+          OR (${restrictedAccessSql("excluded.json", "is_subscriber_only")} = ${restrictedAccessSql("tweets.json", "is_subscriber_only")}
+            AND ${restrictedAccessSql("excluded.json", "is_retweet")} > ${restrictedAccessSql("tweets.json", "is_retweet")})
+          OR (${restrictedAccessSql("excluded.json", "is_subscriber_only")} = ${restrictedAccessSql("tweets.json", "is_subscriber_only")}
+            AND ${restrictedAccessSql("excluded.json", "is_retweet")} = ${restrictedAccessSql("tweets.json", "is_retweet")}
+            AND excluded.content_hash > tweets.content_hash)))
     `);
     const insertAll = this.db.transaction((batch: readonly PooledTweet[]) => {
       for (const tweet of batch) {

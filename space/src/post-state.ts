@@ -30,9 +30,18 @@ export function currentPostAccess(tweet: PooledTweet): CurrentPostAccess {
   };
 }
 
-/** One deterministic winner for current and historical copies. Privacy wins ties. */
+export function restrictedAccessSql(
+  jsonSql: string,
+  field: "is_subscriber_only" | "is_retweet",
+): string {
+  return `CASE WHEN json_type(${jsonSql}, '$.${field}') IS NULL
+    OR json_type(${jsonSql}, '$.${field}') = 'false' THEN 0 ELSE 1 END`;
+}
+
+/** One deterministic winner for current and historical copies. Restricted copies win ties. */
 export const POST_ORDER = `tweets.captured_at DESC,
-  COALESCE(json_extract(tweets.json, '$.is_subscriber_only'), 0) DESC,
+  ${restrictedAccessSql("tweets.json", "is_subscriber_only")} DESC,
+  ${restrictedAccessSql("tweets.json", "is_retweet")} DESC,
   tweets.content_hash DESC, tweets.contributed_by`;
 
 /** Add rebuildable derived columns and migrate old indexes in place. */
