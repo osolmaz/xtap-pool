@@ -305,12 +305,11 @@ function identityFilters(query: UnitQuery): Filter[] {
     const placeholders = query.authorIds.map(() => "?").join(",");
     filters.push({
       sql: `NOT EXISTS (
-              SELECT 1 FROM unit_members author_um
-              JOIN tweets author_tweet ON author_tweet.id = author_um.tweet_id
+              SELECT 1 FROM unit_members author_um INDEXED BY idx_unit_members_current_access
               WHERE author_um.unit_id = um.unit_id
                 AND (
-                  json_extract(author_tweet.json, '$.author.id') IS NULL
-                  OR json_extract(author_tweet.json, '$.author.id') NOT IN (${placeholders})
+                  author_um.author_id IS NULL
+                  OR author_um.author_id NOT IN (${placeholders})
                 )
             )`,
       values: query.authorIds,
@@ -396,16 +395,14 @@ function publicationFilters(query: UnitQuery): Filter[] {
   return [
     {
       sql: `NOT EXISTS (
-              SELECT 1 FROM unit_members private_um
-              JOIN tweets private_tweet ON private_tweet.id = private_um.tweet_id
+              SELECT 1 FROM unit_members private_um INDEXED BY idx_unit_members_current_access
               WHERE private_um.unit_id = um.unit_id
-                AND json_extract(private_tweet.json, '$.is_subscriber_only') = 1
+                AND private_um.is_subscriber_only = 1
             )
             AND EXISTS (
-              SELECT 1 FROM unit_members original_um
-              JOIN tweets original_tweet ON original_tweet.id = original_um.tweet_id
+              SELECT 1 FROM unit_members original_um INDEXED BY idx_unit_members_current_access
               WHERE original_um.unit_id = um.unit_id
-                AND COALESCE(json_extract(original_tweet.json, '$.is_retweet'), 0) != 1
+                AND original_um.is_retweet = 0
             )`,
       values: [],
     },

@@ -29,16 +29,13 @@ export function selectedCurrentCoverageUnitIds(
         AND (@unit_ids IS NULL OR u.unit_id IN (SELECT value FROM json_each(@unit_ids)))
         AND (@after IS NULL OR q.latest_activity_at > @after)
     ) SELECT c.unit_id FROM candidates c WHERE
-      NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
+      NOT EXISTS (SELECT 1 FROM unit_members m INDEXED BY idx_unit_members_current_access
         WHERE m.unit_id = c.unit_id AND (
-          json_extract(t.json, '$.author.id') IS NULL
-          OR json_extract(t.json, '$.author.id') NOT IN (SELECT value FROM json_each(@authors))
-          OR (json_type(t.json, '$.is_subscriber_only') IS NOT NULL
-            AND json_type(t.json, '$.is_subscriber_only') <> 'false')))
-      AND EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
-        WHERE m.unit_id = c.unit_id AND (
-          json_type(t.json, '$.is_retweet') IS NULL
-          OR json_type(t.json, '$.is_retweet') = 'false'))
+          m.author_id IS NULL
+          OR m.author_id NOT IN (SELECT value FROM json_each(@authors))
+          OR m.is_subscriber_only = 1))
+      AND EXISTS (SELECT 1 FROM unit_members m INDEXED BY idx_unit_members_current_access
+        WHERE m.unit_id = c.unit_id AND m.is_retweet = 0)
       ORDER BY c.unit_id`,
     )
     .all({
@@ -119,10 +116,10 @@ function observationThrough(
         AND a.kind = 'free' AND a.name = ? AND a.name IN (SELECT json_extract(value, '$.name') FROM json_each(?))))
       ${privacySql}
     ), selected_posts AS MATERIALIZED (
-      SELECT DISTINCT m.tweet_id AS post_id FROM permitted p JOIN unit_members m ON m.unit_id = p.unit_id
+      SELECT DISTINCT m.tweet_id AS post_id FROM permitted p
+      JOIN unit_members m INDEXED BY idx_unit_members_current_access ON m.unit_id = p.unit_id
       WHERE (? IS NULL OR m.tweet_id IN (SELECT value FROM json_each(?)))
-        AND NOT EXISTS (SELECT 1 FROM tweets current WHERE current.id = m.tweet_id
-          AND json_type(current.json, '$.is_retweet') IS NOT NULL AND json_type(current.json, '$.is_retweet') <> 'false')
+        AND m.is_retweet = 0
     ) SELECT MAX((
       SELECT o.observed_at FROM post_observations o INDEXED BY idx_observation_post_time
       JOIN post_content_versions c ON c.content_hash = o.content_hash
@@ -150,7 +147,6 @@ function observationThrough(
 
 function coveragePrivacySql(currentSource: boolean): string {
   if (currentSource) return "";
-  return `AND NOT EXISTS (SELECT 1 FROM unit_members m JOIN tweets t ON t.id = m.tweet_id
-        WHERE m.unit_id = e.unit_id AND json_type(t.json, '$.is_subscriber_only') IS NOT NULL
-          AND json_type(t.json, '$.is_subscriber_only') <> 'false')`;
+  return `AND NOT EXISTS (SELECT 1 FROM unit_members m INDEXED BY idx_unit_members_current_access
+        WHERE m.unit_id = e.unit_id AND m.is_subscriber_only = 1)`;
 }

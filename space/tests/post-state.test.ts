@@ -1,10 +1,11 @@
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { computeInputHash, contentHash } from "@xtap-pool/shared";
 import type { PooledTweet } from "@xtap-pool/shared";
 import { TweetStore } from "../src/store.js";
 import { EnrichStore } from "../src/enrich-store.js";
 import { UnitStore } from "../src/unit-store.js";
-import { latestPost } from "../src/post-state.js";
+import { currentPostAccess, ensureContentColumns, latestPost } from "../src/post-state.js";
 import { makePooled } from "./helpers.js";
 
 let store: TweetStore;
@@ -31,6 +32,14 @@ function add(tweet: PooledTweet): string[] {
 function clock() {
   return store.database
     .prepare("SELECT content_hash, content_at FROM unit_members WHERE tweet_id = '100'")
+    .get();
+}
+function access() {
+  return store.database
+    .prepare(
+      `SELECT author_id, is_subscriber_only, is_retweet
+       FROM unit_members WHERE tweet_id = '100'`,
+    )
     .get();
 }
 beforeEach(() => {
@@ -124,5 +133,73 @@ describe("content activity and deterministic post state", () => {
     expect(store.database.prepare("SELECT unit_id FROM unit_members").get()).toEqual({
       unit_id: "new:someone",
     });
+  });
+
+  it("updates scalar access fields with the deterministic current copy", () => {
+    add(
+      post(21, {
+        author: { id: "11", username: "someone" },
+        is_subscriber_only: true,
+        is_retweet: false,
+      }),
+    );
+    expect(access()).toEqual({ author_id: "11", is_subscriber_only: 1, is_retweet: 0 });
+    add(post(22, { author: { id: "12", username: "someone" } }));
+    expect(access()).toEqual({ author_id: "12", is_subscriber_only: 0, is_retweet: 0 });
+  });
+
+  it("treats every present non-false access flag as restricted", () => {
+    expect(
+      currentPostAccess(
+        post(21, {
+          author: { username: "someone" },
+          is_subscriber_only: 0,
+          is_retweet: null,
+        }),
+      ),
+    ).toEqual({ authorId: null, isSubscriberOnly: 1, isRetweet: 1 });
+  });
+
+  it("backfills current access fields when opening an old index", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      CREATE TABLE tweets (
+        id TEXT NOT NULL,
+        contributed_by TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (id, contributed_by)
+      );
+      CREATE TABLE unit_members (
+        tweet_id TEXT PRIMARY KEY,
+        unit_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL DEFAULT ''
+      );
+      CREATE TABLE enrichment (unit_id TEXT PRIMARY KEY);
+      CREATE INDEX idx_tweets_consumer_access ON tweets(id);
+      INSERT INTO tweets (id, contributed_by, captured_at, json) VALUES
+        ('100', 'alice', '${day(21)}', '{"author":{"id":"11"},"is_subscriber_only":"yes","is_retweet":null}');
+      INSERT INTO unit_members (tweet_id, unit_id, captured_at) VALUES
+        ('100', 'thread:someone', '${day(21)}');
+    `);
+    ensureContentColumns(database);
+    expect(
+      database
+        .prepare(
+          `SELECT author_id, is_subscriber_only, is_retweet
+           FROM unit_members WHERE tweet_id = '100'`,
+        )
+        .get(),
+    ).toEqual({ author_id: "11", is_subscriber_only: 1, is_retweet: 1 });
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'index'
+           AND name IN ('idx_unit_members_current_access', 'idx_tweets_consumer_access')
+           ORDER BY name`,
+        )
+        .all(),
+    ).toEqual([{ name: "idx_unit_members_current_access" }]);
+    database.close();
   });
 });

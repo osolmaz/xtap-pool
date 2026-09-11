@@ -81,13 +81,11 @@ export class ConsumerPostAccess {
     if (ids.length > 2000) throw new Error("post history exceeds the current privacy-check bound");
     const rows = this.database
       .prepare(
-        `SELECT id,
-      MIN(CASE WHEN json_type(json, '$.is_retweet') IS NULL OR json_type(json, '$.is_retweet') = 'false' THEN 1 ELSE 0 END) AS original
-      FROM tweets WHERE id IN (SELECT value FROM json_each(@ids)) GROUP BY id
-      HAVING MAX(CASE WHEN (json_type(json, '$.is_subscriber_only') IS NOT NULL AND json_type(json, '$.is_subscriber_only') <> 'false')
-        OR json_extract(json, '$.author.id') IS NULL
-        OR json_extract(json, '$.author.id') NOT IN (SELECT value FROM json_each(@authors))
-        THEN 1 ELSE 0 END) = 0`,
+        `SELECT tweet_id AS id, CASE WHEN is_retweet = 0 THEN 1 ELSE 0 END AS original
+      FROM unit_members
+      WHERE tweet_id IN (SELECT value FROM json_each(@ids))
+        AND is_subscriber_only = 0
+        AND author_id IN (SELECT value FROM json_each(@authors))`,
       )
       .all({ ids: JSON.stringify(ids), authors: JSON.stringify(authors) });
     return new Map(

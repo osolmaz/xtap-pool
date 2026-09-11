@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import { z } from "zod";
 import { resultIdentity } from "./result-identity.js";
 import { recordedResult } from "./recorded-result.js";
-import { contentActivityAt, latestPost, POST_ORDER } from "./post-state.js";
+import { contentActivityAt, currentPostAccess, latestPost, POST_ORDER } from "./post-state.js";
 
 import {
   computeInputHash,
@@ -110,7 +110,10 @@ export function ensureEnrichmentTables(db: Database.Database): void {
       unit_id TEXT NOT NULL,
       captured_at TEXT NOT NULL DEFAULT '',
       content_hash TEXT NOT NULL DEFAULT '',
-      content_at TEXT NOT NULL DEFAULT ''
+      content_at TEXT NOT NULL DEFAULT '',
+      author_id TEXT,
+      is_subscriber_only INTEGER NOT NULL DEFAULT 0 CHECK (is_subscriber_only IN (0, 1)),
+      is_retweet INTEGER NOT NULL DEFAULT 0 CHECK (is_retweet IN (0, 1))
     );
     CREATE INDEX IF NOT EXISTS idx_unit_members_unit ON unit_members(unit_id, tweet_id);
     CREATE TABLE IF NOT EXISTS enrich_queue (
@@ -320,14 +323,28 @@ export class EnrichStore {
             .object({ unit_id: z.string(), content_hash: z.string(), content_at: z.string() })
             .parse(row);
     const content = contentActivityAt(this.db, tweet, existing);
+    const access = currentPostAccess(tweet);
     this.db
       .prepare(
-        `INSERT INTO unit_members (tweet_id, unit_id, captured_at, content_hash, content_at)
-      VALUES (?, ?, ?, ?, ?) ON CONFLICT(tweet_id) DO UPDATE SET
+        `INSERT INTO unit_members
+        (tweet_id, unit_id, captured_at, content_hash, content_at,
+          author_id, is_subscriber_only, is_retweet)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(tweet_id) DO UPDATE SET
       unit_id = excluded.unit_id, captured_at = excluded.captured_at,
-      content_hash = excluded.content_hash, content_at = excluded.content_at`,
+      content_hash = excluded.content_hash, content_at = excluded.content_at,
+      author_id = excluded.author_id, is_subscriber_only = excluded.is_subscriber_only,
+      is_retweet = excluded.is_retweet`,
       )
-      .run(tweetId, unitId, capturedAt, content.hash, content.at);
+      .run(
+        tweetId,
+        unitId,
+        capturedAt,
+        content.hash,
+        content.at,
+        access.authorId,
+        access.isSubscriberOnly,
+        access.isRetweet,
+      );
     return {
       dirty:
         existing?.content_hash !== content.hash ||
@@ -1648,12 +1665,11 @@ function authorWhere(authorIds: readonly string[] | undefined, unitIdSql: string
   if (authorIds === undefined || authorIds.length === 0) return "";
   const placeholders = authorIds.map(() => "?").join(",");
   return ` AND NOT EXISTS (
-             SELECT 1 FROM unit_members author_um
-             JOIN tweets author_tweet ON author_tweet.id = author_um.tweet_id
+             SELECT 1 FROM unit_members author_um INDEXED BY idx_unit_members_current_access
              WHERE author_um.unit_id = ${unitIdSql}
                AND (
-                 json_extract(author_tweet.json, '$.author.id') IS NULL
-                 OR json_extract(author_tweet.json, '$.author.id') NOT IN (${placeholders})
+                 author_um.author_id IS NULL
+                 OR author_um.author_id NOT IN (${placeholders})
                )
            )`;
 }
@@ -1661,16 +1677,14 @@ function authorWhere(authorIds: readonly string[] | undefined, unitIdSql: string
 function publicationWhere(publication: UnitSelection["publication"], unitIdSql: string): string {
   if (publication !== "public-original") return "";
   return ` AND NOT EXISTS (
-             SELECT 1 FROM unit_members private_um
-             JOIN tweets private_tweet ON private_tweet.id = private_um.tweet_id
+             SELECT 1 FROM unit_members private_um INDEXED BY idx_unit_members_current_access
              WHERE private_um.unit_id = ${unitIdSql}
-               AND json_extract(private_tweet.json, '$.is_subscriber_only') = 1
+               AND private_um.is_subscriber_only = 1
            )
            AND EXISTS (
-             SELECT 1 FROM unit_members original_um
-             JOIN tweets original_tweet ON original_tweet.id = original_um.tweet_id
+             SELECT 1 FROM unit_members original_um INDEXED BY idx_unit_members_current_access
              WHERE original_um.unit_id = ${unitIdSql}
-               AND COALESCE(json_extract(original_tweet.json, '$.is_retweet'), 0) != 1
+               AND original_um.is_retweet = 0
            )`;
 }
 
