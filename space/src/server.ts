@@ -36,7 +36,7 @@ import { UnitStore } from "./unit-store.js";
 const config = loadConfig(process.env);
 const log = new BucketLog(
   config.rawBucket,
-  createRawBucketClient(config.rawBucket, config.hfToken, consumerFetch),
+  createRawBucketClient(config.rawBucket, config.hfToken, { fetcher: consumerFetch }),
   join(config.dataDir, "raw-cache"),
 );
 const mutex = new Mutex();

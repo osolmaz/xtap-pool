@@ -26,7 +26,14 @@ it.each(["context", "snapshot"])(
         }),
     );
     const index = createDurableIndexBucketClient("owner/index", "hf_fixture", consumerFetch);
-    const raw = createRawBucketClient("owner/raw", "hf_fixture", consumerFetch);
+    const retryWaits: number[] = [];
+    const raw = createRawBucketClient("owner/raw", "hf_fixture", {
+      fetcher: consumerFetch,
+      waitBeforeReadRetry: (attempt) => {
+        retryWaits.push(attempt);
+        return Promise.resolve();
+      },
+    });
     await expect(
       withConsumerDeadline<unknown>(
         () =>
@@ -39,6 +46,7 @@ it.each(["context", "snapshot"])(
     ).rejects.toThrow();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.aborted).toBe(true);
+    expect(retryWaits).toEqual([]);
   },
 );
 

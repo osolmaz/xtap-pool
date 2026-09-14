@@ -118,6 +118,11 @@ export type RawBucketClient = RawBucketReader & {
   upload(key: string, content: Uint8Array): Promise<void>;
 };
 
+export type RawBucketTransportOptions = {
+  fetcher?: typeof fetch;
+  waitBeforeReadRetry?: (failedAttempt: number) => Promise<void>;
+};
+
 export type BucketReadProgress = (completed: number, total: number) => Promise<void>;
 
 export type ReadTextOptions = {
@@ -207,10 +212,10 @@ const legacyEnrichmentRowSchema = z
 export function createRawBucketReader(
   rawBucket: string,
   accessToken: string,
-  fetcher?: typeof fetch,
+  options: RawBucketTransportOptions = {},
 ): RawBucketReader {
   const repo = { type: "bucket", name: rawBucket } as const;
-  const transport = fetcher === undefined ? {} : { fetch: fetcher };
+  const transport = options.fetcher === undefined ? {} : { fetch: options.fetcher };
   return {
     async list(prefix): Promise<readonly BucketObject[]> {
       const objects = await retryTransientHubRead(async () => {
@@ -232,7 +237,7 @@ export function createRawBucketReader(
           });
         }
         return listed;
-      });
+      }, options.waitBeforeReadRetry);
       for (const object of objects) {
         if (object.oid === undefined || object.oid.length === 0) {
           throw new Error(`Bucket listing has no immutable object identity: ${object.key}`);
@@ -250,7 +255,7 @@ export function createRawBucketReader(
           xet: false,
         });
         return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
-      });
+      }, options.waitBeforeReadRetry);
     },
   };
 }
@@ -258,12 +263,12 @@ export function createRawBucketReader(
 export function createRawBucketClient(
   rawBucket: string,
   accessToken: string,
-  fetcher?: typeof fetch,
+  options: RawBucketTransportOptions = {},
 ): RawBucketClient {
   const repo = { type: "bucket", name: rawBucket } as const;
-  const transport = fetcher === undefined ? {} : { fetch: fetcher };
+  const transport = options.fetcher === undefined ? {} : { fetch: options.fetcher };
   return {
-    ...createRawBucketReader(rawBucket, accessToken, fetcher),
+    ...createRawBucketReader(rawBucket, accessToken, options),
     async upload(key, content): Promise<void> {
       await uploadFile({
         repo,
