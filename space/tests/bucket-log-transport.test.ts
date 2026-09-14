@@ -66,6 +66,19 @@ it("restarts a partially failed raw Bucket listing without duplicates", async ()
   expect(hub.listFiles).toHaveBeenCalledTimes(2);
 });
 
+it("does not retry a cancelled raw Bucket read", async () => {
+  const cancelled = Object.assign(new Error("consumer deadline expired"), {
+    code: "deadline_exceeded",
+  });
+  hub.downloadFile.mockRejectedValue(cancelled);
+  const reader = createRawBucketReader("owner/raw", "hf_fixture");
+
+  await expect(reader.download("v1/segments/mixed/example.json.gz")).rejects.toThrow(
+    "consumer deadline expired",
+  );
+  expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+});
+
 it("does not retry invalid raw Bucket metadata", async () => {
   hub.listFiles.mockImplementationOnce(() =>
     listing([{ type: "file", path: "v1/segments/mixed/invalid.json.gz", size: 7 }]),
