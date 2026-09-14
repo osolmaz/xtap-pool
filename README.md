@@ -21,8 +21,8 @@ See [Move pool storage to an immutable Bucket log](docs/2026-08-12-bucket-object
 for the storage contract and cutover procedure.
 [Incremental consumer reads and engagement history](docs/2026-09-07-incremental-consumer-and-engagement-history-plan.md)
 describes cursor-based changes and bounded observation history for downstream applications.
-[Replace the durable SQLite index with Lance](docs/2026-09-15-lance-durable-index-plan.md)
-plans the tested object-storage design and two-hour shadow rollout.
+[Make scheduled enrichment Jobs reliable](docs/2026-09-15-enrichment-job-reliability-plan.md)
+describes the current timeout, transfer recovery, and two-hour schedule.
 The other implementation plans under [`docs/`](docs/) record earlier design work.
 
 ## Set up a pool
@@ -215,11 +215,13 @@ and activation. Keep a replacement schedule suspended until bounded restore,
 interruption recovery, final publication, successor activation, and the
 required two-Job recovery canary have passed.
 
-The checked-in defaults give each Job a 40-minute worker budget, a 45-minute
-platform timeout, and a $10 inference limit. Each scheduled Job runs one logical
-plan and leaves its verified successor for the next Job. The operator-approved
-cumulative ceiling must cover both canary Jobs before either starts. The web
-Space keeps enrichment disabled, and GitHub Actions remains CI-only.
+The checked-in defaults give each Job a 40-minute worker budget, a 120-minute
+platform timeout, a 70-minute publication reserve, and a $10 inference limit.
+A Job with less than 70 minutes left saves its completed checkpoint and lets the
+next Job publish it. Each scheduled Job runs one logical plan and leaves its
+verified successor for the next Job. The operator-approved cumulative ceiling
+must cover both canary Jobs before either starts. The web Space keeps enrichment
+disabled, and GitHub Actions remains CI-only.
 
 Use an explicit rebuild only as a recovery operation:
 

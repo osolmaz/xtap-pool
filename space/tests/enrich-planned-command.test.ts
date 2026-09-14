@@ -8,6 +8,7 @@ import { BucketLog } from "../src/bucket-log.js";
 import {
   applyCheckpointToWorkerDatabase,
   applyClaimedWorkerSegments,
+  canStartPlannedPublication,
   applyDurableOutput,
   outputsFromSegment,
   parseSourceSegments,
@@ -28,6 +29,24 @@ import { EnrichStore } from "../src/enrich-store.js";
 import { TweetStore } from "../src/store.js";
 
 const SHA = "a".repeat(64);
+
+it("starts publication only with the full reserved time remaining", () => {
+  const budget = {
+    commandStartedAtMs: 1_000,
+    jobTimeoutMs: 7_200_000,
+    minimumRemainingMs: 4_200_000,
+  };
+  expect(canStartPlannedPublication({ ...budget, nowMs: 1_000 + 3_000_000 })).toBe(true);
+  expect(canStartPlannedPublication({ ...budget, nowMs: 1_001 + 3_000_000 })).toBe(false);
+  expect(() =>
+    canStartPlannedPublication({
+      commandStartedAtMs: 0,
+      nowMs: 0,
+      jobTimeoutMs: undefined,
+      minimumRemainingMs: 4_200_000,
+    }),
+  ).toThrow("physical timeout");
+});
 const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111-8111-111111111111-${"b".repeat(64)}.json.gz`;
 
 class MemoryObjects implements CheckpointObjectStore {

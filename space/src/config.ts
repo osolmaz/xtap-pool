@@ -20,6 +20,8 @@ const configSchema = z.object({
   ENRICH_ENABLED: z.enum(["true", "false"]).default("false"),
   ENRICH_INTERVAL_MS: z.coerce.number().int().positive().default(60000),
   ENRICH_MAX_CONCURRENT_CALLS: z.coerce.number().int().min(1).max(32).default(1),
+  ENRICH_JOB_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  ENRICH_PUBLICATION_MIN_REMAINING_MS: z.coerce.number().int().positive().optional(),
   ENRICH_MAX_ELAPSED_MS: z.coerce.number().int().positive().optional(),
   ENRICH_MAX_ERROR_RATE: z.coerce.number().min(0).max(1).optional(),
   ENRICH_MAX_COST_USD: z.coerce.number().positive().optional(),
@@ -52,6 +54,8 @@ export type SpaceConfig = {
   enrichEnabled: boolean;
   enrichIntervalMs: number;
   enrichMaxConcurrentCalls: number;
+  enrichJobTimeoutMs?: number;
+  enrichPublicationMinRemainingMs?: number;
   enrichMaxElapsedMs?: number;
   enrichMaxErrorRate?: number;
   enrichMaxCostUsd?: number;
@@ -111,6 +115,14 @@ export function loadConfig(env: Record<string, string | undefined>): SpaceConfig
     enrichEnabled: parsed.ENRICH_ENABLED === "true",
     enrichIntervalMs: parsed.ENRICH_INTERVAL_MS,
     enrichMaxConcurrentCalls: parsed.ENRICH_MAX_CONCURRENT_CALLS,
+    ...(parsed.ENRICH_JOB_TIMEOUT_MS === undefined
+      ? {}
+      : { enrichJobTimeoutMs: parsed.ENRICH_JOB_TIMEOUT_MS }),
+    ...(parsed.ENRICH_PUBLICATION_MIN_REMAINING_MS === undefined
+      ? {}
+      : {
+          enrichPublicationMinRemainingMs: parsed.ENRICH_PUBLICATION_MIN_REMAINING_MS,
+        }),
     ...(parsed.ENRICH_MAX_ELAPSED_MS === undefined
       ? {}
       : { enrichMaxElapsedMs: parsed.ENRICH_MAX_ELAPSED_MS }),

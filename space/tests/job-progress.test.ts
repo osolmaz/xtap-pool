@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isMissingProgressPath,
   reportBlockedBestEffort,
+  reportCompleteBestEffort,
   XTapJobProgress,
 } from "../src/job-progress.js";
 
@@ -137,6 +138,18 @@ describe("XTapJobProgress", () => {
     expect(
       stored?.snapshot.tracks.find((track) => track.key === "checkpoint-replay"),
     ).toMatchObject({ status: "completed", completed: 1, total: 1 });
+  });
+
+  it("does not fail completed data work when final progress reporting fails", async () => {
+    const messages: string[] = [];
+
+    await expect(
+      reportCompleteBestEffort(
+        { complete: () => Promise.reject(new Error("progress sequence conflict")) },
+        (message) => messages.push(message),
+      ),
+    ).resolves.toBeUndefined();
+    expect(messages).toEqual(["[xtap-pool job] failed to report complete progress"]);
   });
 
   it("does not let a blocked-status failure replace the work failure", async () => {

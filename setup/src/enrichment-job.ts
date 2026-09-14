@@ -31,8 +31,9 @@ export const ENRICHMENT_JOB_LABELS = {
 } as const;
 
 export const ENRICHMENT_JOB_DEFAULT_VARIABLES: Readonly<Record<string, string>> = {
-  ENRICH_JOB_SCHEDULE: "17 */6 * * *",
-  ENRICH_JOB_TIMEOUT_SECONDS: "2700",
+  ENRICH_JOB_SCHEDULE: "17 */2 * * *",
+  ENRICH_JOB_TIMEOUT_SECONDS: "7200",
+  ENRICH_PUBLICATION_MIN_REMAINING_MS: "4200000",
   ENRICH_MAX_CONCURRENT_CALLS: "32",
   ENRICH_MAX_ELAPSED_MS: "2400000",
   ENRICH_MAX_ERROR_RATE: "0.25",
@@ -73,6 +74,7 @@ const jobVariablesSchema = z
   .object({
     ENRICH_JOB_SCHEDULE: cronSchedule,
     ENRICH_JOB_TIMEOUT_SECONDS: positiveInteger,
+    ENRICH_PUBLICATION_MIN_REMAINING_MS: positiveInteger,
     ENRICH_MAX_CONCURRENT_CALLS: z
       .string()
       .regex(/^(?:[1-9]|[12][0-9]|3[0-2])$/u, "must be an integer from 1 through 32"),
@@ -228,6 +230,13 @@ export function desiredEnrichmentJobForRevision(
   );
   const capacityError = enrichmentJobCapacityError(variables);
   if (capacityError !== undefined) throw new Error(capacityError);
+  const timeoutMs = Number(configured.ENRICH_JOB_TIMEOUT_SECONDS) * 1000;
+  if (
+    Number(configured.ENRICH_MAX_ELAPSED_MS) +
+      Number(configured.ENRICH_PUBLICATION_MIN_REMAINING_MS) >
+    timeoutMs
+  )
+    throw new Error("The enrichment and publication budgets exceed the physical Job timeout.");
   const indexBucket = nonempty.parse(variables.get("INDEX_BUCKET"));
   const namespace = spaceRepo.split("/")[0];
   if (namespace === undefined || namespace.length === 0) {
@@ -238,6 +247,8 @@ export function desiredEnrichmentJobForRevision(
     RAW_BUCKET: rawBucket,
     INDEX_BUCKET: indexBucket,
     ENRICH_ENABLED: "true",
+    ENRICH_JOB_TIMEOUT_MS: String(timeoutMs),
+    ENRICH_PUBLICATION_MIN_REMAINING_MS: configured.ENRICH_PUBLICATION_MIN_REMAINING_MS,
     ENRICH_MAX_CONCURRENT_CALLS: configured.ENRICH_MAX_CONCURRENT_CALLS,
     ENRICH_MAX_ELAPSED_MS: configured.ENRICH_MAX_ELAPSED_MS,
     ENRICH_MAX_ERROR_RATE: configured.ENRICH_MAX_ERROR_RATE,

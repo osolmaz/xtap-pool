@@ -1,12 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, openAsBlob } from "node:fs";
+import { createReadStream, existsSync, openAsBlob } from "node:fs";
 import { copyFile, mkdir, open as openFile, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 import Database from "better-sqlite3";
-import { deleteFiles, downloadFile, listFiles, uploadFile } from "@huggingface/hub";
+import {
+  deleteFiles,
+  downloadFile,
+  fileDownloadInfo,
+  listFiles,
+  uploadFile,
+} from "@huggingface/hub";
+import type { FileDownloadInfoOutput } from "@huggingface/hub";
 import { z } from "zod";
 
 import { BucketLog, canonicalBytes, sha256 } from "./bucket-log.js";
@@ -24,6 +30,7 @@ const RETAINED_PREDECESSORS = 3;
 const PRUNE_GRACE_MS = 24 * 60 * 60 * 1000;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const DATABASE_KEY = /^index\/databases\/([a-f0-9]{64})\.sqlite$/u;
+const LARGE_TRANSFER_ATTEMPTS = 3;
 
 const indexCountsSchema = z
   .object({
@@ -803,49 +810,174 @@ export function createDurableIndexBucketReader(
   };
 }
 
+export type DurableIndexTransferOptions = {
+  waitBeforeRetry?: (failedAttempt: number) => Promise<void>;
+};
+type RemoteFileIdentity = {
+  path: string;
+  size: number;
+  etag: string;
+  downloadInfo: FileDownloadInfoOutput;
+};
+class RemoteFileIdentityError extends Error {}
+type DownloadTransfer = {
+  repo: { type: "bucket"; name: string };
+  accessToken: string;
+  fetcher?: typeof fetch;
+  path: string;
+  destination: string;
+  progress?: ByteProgress;
+  waitBeforeRetry: (failedAttempt: number) => Promise<void>;
+};
+
+async function downloadLargeFile(options: DownloadTransfer): Promise<boolean> {
+  await mkdir(dirname(options.destination), { recursive: true });
+  let identity: RemoteFileIdentity | undefined;
+  for (let attempt = 1; attempt <= LARGE_TRANSFER_ATTEMPTS; attempt += 1) {
+    try {
+      const current = await resolveRemoteIdentity(options);
+      if (current === null) {
+        if (identity === undefined) return false;
+        throw new RemoteFileIdentityError("durable index remote file disappeared during download");
+      }
+      if (identity === undefined) identity = current;
+      else assertSameRemoteIdentity(identity, current);
+      await appendRemoteFile(options, identity, current);
+      return true;
+    } catch (error) {
+      if (error instanceof RemoteFileIdentityError || attempt === LARGE_TRANSFER_ATTEMPTS)
+        throw error;
+      await options.waitBeforeRetry(attempt);
+    }
+  }
+  throw new Error("durable index download exhausted its retry bound");
+}
+
+async function resolveRemoteIdentity(
+  options: DownloadTransfer,
+): Promise<RemoteFileIdentity | null> {
+  const downloadInfo = await fileDownloadInfo({
+    repo: options.repo,
+    accessToken: options.accessToken,
+    ...(options.fetcher === undefined ? {} : { fetch: options.fetcher }),
+    path: options.path,
+  });
+  return downloadInfo === null
+    ? null
+    : {
+        path: options.path,
+        size: downloadInfo.size,
+        etag: downloadInfo.etag,
+        downloadInfo,
+      };
+}
+
+async function appendRemoteFile(
+  options: DownloadTransfer,
+  identity: RemoteFileIdentity,
+  current: RemoteFileIdentity,
+): Promise<void> {
+  const completed = await localFileSize(options.destination);
+  if (completed > identity.size)
+    throw new Error("durable index partial download exceeds the remote file size");
+  await options.progress?.(completed, identity.size);
+  if (completed === identity.size) return;
+  const downloaded = await downloadFile({
+    repo: options.repo,
+    accessToken: options.accessToken,
+    ...(options.fetcher === undefined ? {} : { fetch: options.fetcher }),
+    path: options.path,
+    downloadInfo: current.downloadInfo,
+    xet: false,
+  });
+  if (downloaded === null) throw new Error("durable index remote file disappeared during download");
+  await writeRemoteFileTail(options, downloaded, current, completed);
+  if ((await stat(options.destination)).size !== identity.size)
+    throw new Error("durable index download ended before the remote file size");
+}
+
+async function writeRemoteFileTail(
+  options: DownloadTransfer,
+  downloaded: Blob,
+  current: RemoteFileIdentity,
+  completed: number,
+): Promise<void> {
+  const file = await openFile(options.destination, completed === 0 ? "w" : "a", 0o600);
+  let written = completed;
+  try {
+    for await (const chunk of Readable.fromWeb(downloaded.slice(completed).stream())) {
+      const bytes = downloadChunkBytes(chunk);
+      await writeAllBytes(file, bytes);
+      written += bytes.byteLength;
+      await options.progress?.(written, current.size);
+    }
+  } finally {
+    await file.close();
+  }
+}
+
+async function writeAllBytes(
+  file: Awaited<ReturnType<typeof openFile>>,
+  bytes: Buffer,
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const { bytesWritten } = await file.write(bytes, offset);
+    if (bytesWritten === 0) throw new Error("durable index download could not write bytes");
+    offset += bytesWritten;
+  }
+}
+
+async function localFileSize(path: string): Promise<number> {
+  return existsSync(path) ? (await stat(path)).size : 0;
+}
+
+function downloadChunkBytes(chunk: unknown): Buffer {
+  if (typeof chunk === "string") return Buffer.from(chunk);
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  throw new Error("durable index download returned invalid bytes");
+}
+
 export function createDurableIndexBucketClient(
   indexBucket: string,
   accessToken: string,
   fetcher?: typeof fetch,
+  retryOptions: DurableIndexTransferOptions = {},
 ): DurableIndexBucketClient {
   const repo = { type: "bucket", name: indexBucket } as const;
   const transport = fetcher === undefined ? {} : { fetch: fetcher };
+  const waitBeforeRetry = retryOptions.waitBeforeRetry ?? defaultTransferRetryWait;
   return {
-    async download(path, destination, progress): Promise<boolean> {
-      const blob = await downloadFile({ repo, accessToken, ...transport, path, xet: false });
-      if (blob === null) return false;
-      const downloaded = blob;
-      await mkdir(dirname(destination), { recursive: true });
-      await progress?.(0, downloaded.size);
-      let completed = 0;
-      async function* countedChunks(): AsyncGenerator<Buffer> {
-        for await (const chunk of Readable.fromWeb(downloaded.stream())) {
-          const bytes =
-            typeof chunk === "string"
-              ? Buffer.from(chunk)
-              : chunk instanceof Uint8Array
-                ? Buffer.from(chunk)
-                : undefined;
-          if (bytes === undefined) throw new Error("durable index download returned invalid bytes");
-          completed += bytes.byteLength;
-          await progress?.(completed, downloaded.size);
-          yield bytes;
-        }
-      }
-      await pipeline(Readable.from(countedChunks()), createWriteStream(destination));
-      return true;
+    download(path, destination, progress): Promise<boolean> {
+      return downloadLargeFile({
+        repo,
+        accessToken,
+        ...(fetcher === undefined ? {} : { fetcher }),
+        path,
+        destination,
+        ...(progress === undefined ? {} : { progress }),
+        waitBeforeRetry,
+      });
     },
     async uploadFile(path, source, progress): Promise<void> {
       const total = (await stat(source)).size;
       await progress?.(0, total);
-      await uploadFile({
-        repo,
-        ...transport,
-        accessToken,
-        file: { path, content: await openAsBlob(source) },
-        commitTitle: `Publish ${path}`,
-      });
-      await progress?.(total, total);
+      for (let attempt = 1; attempt <= LARGE_TRANSFER_ATTEMPTS; attempt += 1) {
+        try {
+          await uploadFile({
+            repo,
+            ...transport,
+            accessToken,
+            file: { path, content: await openAsBlob(source) },
+            commitTitle: `Publish ${path}`,
+          });
+          await progress?.(total, total);
+          return;
+        } catch (error) {
+          if (attempt === LARGE_TRANSFER_ATTEMPTS) throw error;
+          await waitBeforeRetry(attempt);
+        }
+      }
     },
     async readText(path): Promise<string | undefined> {
       const blob = await downloadFile({ repo, accessToken, ...transport, path, xet: false });
@@ -889,6 +1021,21 @@ export function createDurableIndexBucketClient(
       });
     },
   };
+}
+
+function assertSameRemoteIdentity(expected: RemoteFileIdentity, actual: RemoteFileIdentity): void {
+  if (
+    actual.path !== expected.path ||
+    actual.size !== expected.size ||
+    actual.etag !== expected.etag
+  )
+    throw new RemoteFileIdentityError("durable index remote file identity changed during download");
+}
+
+async function defaultTransferRetryWait(failedAttempt: number): Promise<void> {
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.min(4_000, 1_000 * 2 ** (failedAttempt - 1))),
+  );
 }
 
 function failClosedBucketClient(reader: DurableIndexBucketReader): DurableIndexBucketClient {

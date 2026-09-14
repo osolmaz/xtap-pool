@@ -207,7 +207,7 @@ describe("doctor", () => {
     );
 
     expect(variableWrites).toEqual([
-      { key: "ENRICH_JOB_SCHEDULE", value: "17 */6 * * *" },
+      { key: "ENRICH_JOB_SCHEDULE", value: "17 */2 * * *" },
       { key: "ENRICH_MAX_ERROR_RATE", value: "0.25" },
       { key: "ENRICH_MAX_COST_USD", value: "10" },
     ]);
@@ -1009,7 +1009,7 @@ function rawSegmentEntries(): AsyncIterable<unknown> {
 function scheduledJobFixture(): ScheduledEnrichmentJob {
   return {
     id: "schedule-1",
-    schedule: "17 */6 * * *",
+    schedule: "17 */2 * * *",
     suspend: true,
     concurrency: false,
     jobSpec: {
@@ -1017,7 +1017,7 @@ function scheduledJobFixture(): ScheduledEnrichmentJob {
       command: ["node", "space/dist/src/enrich-job-main.js"],
       environment: jobEnvironment(),
       flavor: "cpu-upgrade",
-      timeout: 2700,
+      timeout: 7200,
       retry: 0,
       secrets: ["HF_TOKEN", "INFERENCE_TOKEN"],
       labels: {
@@ -1038,6 +1038,8 @@ function jobEnvironment(): Record<string, string> {
     RAW_BUCKET: "alice/xtap-pool-data",
     INDEX_BUCKET: "alice/xtap-pool-bucket",
     ENRICH_ENABLED: "true",
+    ENRICH_JOB_TIMEOUT_MS: "7200000",
+    ENRICH_PUBLICATION_MIN_REMAINING_MS: "4200000",
     ENRICH_MAX_CONCURRENT_CALLS: "32",
     ENRICH_MAX_ELAPSED_MS: "2400000",
     ENRICH_MAX_ERROR_RATE: "0.25",
@@ -1230,8 +1232,9 @@ function variablesResponse(overrides: Record<string, string> | undefined): Respo
     ALLOWED_USERS: "alice",
     POOL_ADMINS: "alice",
     ENRICH_ENABLED: "false",
-    ENRICH_JOB_SCHEDULE: "17 */6 * * *",
-    ENRICH_JOB_TIMEOUT_SECONDS: "2700",
+    ENRICH_JOB_SCHEDULE: "17 */2 * * *",
+    ENRICH_JOB_TIMEOUT_SECONDS: "7200",
+    ENRICH_PUBLICATION_MIN_REMAINING_MS: "4200000",
     ENRICH_MAX_CONCURRENT_CALLS: "32",
     ENRICH_MAX_ELAPSED_MS: "2400000",
     ENRICH_MAX_ERROR_RATE: "0.25",
