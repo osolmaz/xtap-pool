@@ -42,6 +42,9 @@ batches, and verified index pointer.
   must be reported but must not change successful data work into a failed Job.
 - Change the canonical schedule from every six hours to every two hours after
   the canary and deployment checks pass.
+- Quiesce the old schedule from its immutable live Job definition before the
+  updater installs newly required Space variables. Do not require the new
+  contract to exist before the old contract can be suspended safely.
 - Accept the change after six consecutive scheduled Jobs finish cleanly.
 
 ## Design
@@ -161,12 +164,15 @@ start a second physical Job while one matching writer is active.
    command.
 9. Failures before the final checkpoint still fail closed.
 10. Local pause, resume, and publication recovery tests pass.
-11. The merged Space reaches `RUNNING` at the exact reviewed revision.
-12. Setup doctor leaves exactly one active non-concurrent schedule at
+11. An update from the prior schedule succeeds when the new publication-reserve
+    variable is not present yet, while any concurrent, foreign, or changed
+    schedule still fails closed.
+12. The merged Space reaches `RUNNING` at the exact reviewed revision.
+13. Setup doctor leaves exactly one active non-concurrent schedule at
     `17 */2 * * *` with no overlapping Job.
-13. Six consecutive scheduled Jobs complete, retain valid receipts and
+14. Six consecutive scheduled Jobs complete, retain valid receipts and
     checkpoints, and keep the public index healthy.
-14. Observed CPU and inference costs stay within the existing approved limits.
+15. Observed CPU and inference costs stay within the existing approved limits.
 
 ## Verification
 

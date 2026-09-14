@@ -107,7 +107,6 @@ describe("enrichment deployment handoff preparation", () => {
         allowedUsers: ["alice"],
         poolAdmins: ["alice"],
       },
-      variables: new Map(),
       storageToken: "storage-token",
     });
 
@@ -132,7 +131,6 @@ describe("enrichment deployment handoff preparation", () => {
         allowedUsers: ["alice"],
         poolAdmins: ["alice"],
       },
-      variables: new Map(),
       storageToken: "storage-token",
     });
     await expect(production.assertClean()).rejects.toThrow("clean Git worktree");

@@ -104,8 +104,6 @@ describe("Hugging Face enrichment Job", () => {
       assertEnrichmentWritersQuiescent({
         client,
         spaceRepo: desired.spaceRepo,
-        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
-        variables: variables(),
       }),
     ).resolves.toMatch(/^[0-9a-f]{64}$/u);
 
@@ -114,8 +112,6 @@ describe("Hugging Face enrichment Job", () => {
       assertEnrichmentWritersQuiescent({
         client,
         spaceRepo: desired.spaceRepo,
-        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
-        variables: variables(),
       }),
     ).rejects.toThrow("zero active");
   });
@@ -131,8 +127,6 @@ describe("Hugging Face enrichment Job", () => {
         {
           client,
           spaceRepo: current.spaceRepo,
-          rawBucket: current.environment["RAW_BUCKET"] ?? "",
-          variables: variables(),
         },
         { pollIntervalMs: 0, timeoutMs: 100 },
       ),
@@ -172,13 +166,37 @@ describe("Hugging Face enrichment Job", () => {
     );
   });
 
+  it("quiesces the previous schedule before new Space variables exist", async () => {
+    const desired = await desiredFixture();
+    const legacyEnvironment = { ...desired.environment };
+    delete legacyEnvironment["ENRICH_JOB_TIMEOUT_MS"];
+    delete legacyEnvironment["ENRICH_PUBLICATION_MIN_REMAINING_MS"];
+    const fixture = scheduleFixture(desired, "legacy", false);
+    const active = {
+      ...fixture,
+      schedule: "17 */6 * * *",
+      jobSpec: { ...fixture.jobSpec, environment: legacyEnvironment, timeout: 2700 },
+    };
+    const suspended = { ...active, suspend: true };
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([suspended]);
+
+    await expect(
+      quiesceCanonicalEnrichmentSchedule(
+        { client, spaceRepo: desired.spaceRepo },
+        { pollIntervalMs: 0, timeoutMs: 100 },
+      ),
+    ).resolves.toMatchObject({ scheduleId: "legacy", wasActive: true });
+    hubMocks.listScheduledJobs.mockReset().mockResolvedValue([suspended]);
+    await expect(
+      assertEnrichmentWritersQuiescent({ client, spaceRepo: desired.spaceRepo }),
+    ).resolves.toMatch(/^[0-9a-f]{64}$/u);
+  });
+
   it("rejects unsafe canonical schedule maintenance admission", async () => {
     const desired = await desiredFixture();
     const options = {
       client,
       spaceRepo: desired.spaceRepo,
-      rawBucket: desired.environment["RAW_BUCKET"] ?? "",
-      variables: variables(),
     };
 
     await expect(
@@ -201,11 +219,13 @@ describe("Hugging Face enrichment Job", () => {
       "does not declare its source revision",
     );
 
-    const mismatch = scheduleFixture({ ...desired, schedule: "0 0 * * *" }, "mismatch", true);
+    const mismatchSchedule = scheduleFixture(desired, "mismatch", true);
+    const mismatch = {
+      ...mismatchSchedule,
+      jobSpec: { ...mismatchSchedule.jobSpec, command: ["node", "unexpected.js"] },
+    };
     hubMocks.listScheduledJobs.mockResolvedValueOnce([mismatch]);
-    await expect(quiesceCanonicalEnrichmentSchedule(options)).rejects.toThrow(
-      "exact non-concurrent",
-    );
+    await expect(quiesceCanonicalEnrichmentSchedule(options)).rejects.toThrow("valid canonical");
 
     const active = scheduleFixture(desired, "active", false);
     hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([active]);
@@ -223,8 +243,6 @@ describe("Hugging Face enrichment Job", () => {
       {
         client,
         spaceRepo: desired.spaceRepo,
-        rawBucket: desired.environment["RAW_BUCKET"] ?? "",
-        variables: variables(),
       },
       { pollIntervalMs: 0, timeoutMs: 100 },
     );
@@ -243,8 +261,6 @@ describe("Hugging Face enrichment Job", () => {
     const maintenance = await quiesceCanonicalEnrichmentSchedule({
       client,
       spaceRepo: current.spaceRepo,
-      rawBucket: current.environment["RAW_BUCKET"] ?? "",
-      variables: variables(),
     });
 
     await expect(restoreCanonicalEnrichmentSchedule(client, maintenance)).resolves.toBeUndefined();
@@ -278,9 +294,15 @@ describe("Hugging Face enrichment Job", () => {
 
   it("refuses to restore an original schedule after its maintenance state drifts", async () => {
     const desired = await desiredFixture();
-    const maintenance = { desired, scheduleId: "original", wasActive: true };
-    const suspended = scheduleFixture(desired, "original", true);
     const active = scheduleFixture(desired, "original", false);
+    const suspended = scheduleFixture(desired, "original", true);
+    hubMocks.listScheduledJobs.mockResolvedValueOnce([active]).mockResolvedValueOnce([suspended]);
+    const maintenance = await quiesceCanonicalEnrichmentSchedule(
+      { client, spaceRepo: desired.spaceRepo },
+      { pollIntervalMs: 0, timeoutMs: 100 },
+    );
+    hubMocks.listScheduledJobs.mockReset();
+    hubMocks.listJobs.mockReset();
     const replacement = scheduleFixture(desired, "replacement", true);
     const unsafeStates = [
       { schedules: [], jobs: [] },

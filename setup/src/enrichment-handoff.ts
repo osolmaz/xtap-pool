@@ -49,7 +49,6 @@ export function productionEnrichmentHandoffPreparation(options: {
   root: string;
   client: HubClient;
   config: SetupConfig;
-  variables: ReadonlyMap<string, string>;
   storageToken: string;
 }): EnrichmentHandoffPreparation {
   return {
@@ -71,8 +70,6 @@ export function productionEnrichmentHandoffPreparation(options: {
       assertEnrichmentWritersQuiescent({
         client: options.client,
         spaceRepo: options.config.spaceRepo,
-        rawBucket: options.config.rawBucket,
-        variables: options.variables,
       }),
     prepareHandoff: (targetRevision) =>
       runReadOnlyHandoffPreparation({

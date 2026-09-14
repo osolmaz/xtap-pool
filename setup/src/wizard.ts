@@ -138,8 +138,6 @@ async function finishUpdate(
   const scheduleMaintenance = await quiesceCanonicalEnrichmentSchedule({
     client,
     spaceRepo: config.spaceRepo,
-    rawBucket: config.rawBucket,
-    variables,
   });
   try {
     const scheduleSecrets = await updateScheduleSecrets(storageToken);
@@ -149,7 +147,6 @@ async function finishUpdate(
         root,
         client,
         config,
-        variables,
         storageToken,
       }),
     );
