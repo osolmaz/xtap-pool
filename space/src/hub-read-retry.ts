@@ -20,8 +20,15 @@ export async function retryTransientHubRead<T>(
 }
 
 function isRetryableHubReadError(error: unknown): boolean {
+  if (isCancelledRead(error)) return false;
   if (!(error instanceof HubApiError)) return true;
   return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
+}
+
+function isCancelledRead(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
+  return "code" in error && error.code === "deadline_exceeded";
 }
 
 function defaultHubReadRetryWait(failedAttempt: number): Promise<void> {
