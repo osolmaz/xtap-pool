@@ -10,11 +10,14 @@ const hub = vi.hoisted(() => {
     }
   }
 
+  class InvalidApiResponseFormatError extends Error {}
+
   return {
     downloadFile: vi.fn(),
     listFiles: vi.fn(),
     uploadFile: vi.fn(),
     HubApiError,
+    InvalidApiResponseFormatError,
   };
 });
 
@@ -74,6 +77,22 @@ it("restarts a partially failed listing without returning duplicate paths", asyn
   ]);
   expect(hub.listFiles).toHaveBeenCalledTimes(2);
   expect(waits).toEqual([1]);
+});
+
+it("retries a malformed Hub response", async () => {
+  hub.downloadFile
+    .mockRejectedValueOnce(new hub.InvalidApiResponseFormatError("truncated response"))
+    .mockResolvedValueOnce(new Blob(["checkpoint"]));
+  const store = createReadOnlyEnrichmentCheckpointStore({
+    bucket: "owner/index",
+    accessToken: "hf_fixture",
+    waitBeforeReadRetry: () => Promise.resolve(),
+  });
+
+  await expect(store.read("operations/run/plan.json")).resolves.toEqual(
+    new TextEncoder().encode("checkpoint"),
+  );
+  expect(hub.downloadFile).toHaveBeenCalledTimes(2);
 });
 
 it("stops after three transient checkpoint read failures", async () => {
