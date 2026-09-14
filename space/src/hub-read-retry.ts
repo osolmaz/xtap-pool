@@ -20,16 +20,51 @@ export async function retryTransientHubRead<T>(
 }
 
 function isRetryableHubReadError(error: unknown): boolean {
-  if (isCancelledRead(error)) return false;
-  if (!(error instanceof HubApiError)) return true;
-  return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
+  if (error instanceof HubApiError) {
+    return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
+  }
+  return isTransientNetworkError(error);
 }
 
-function isCancelledRead(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error.name === "AbortError" || error.name === "TimeoutError") return true;
-  return "code" in error && error.code === "deadline_exceeded";
+function isTransientNetworkError(error: unknown): boolean {
+  if (error instanceof TypeError && error.message === "fetch failed") return true;
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    if (hasTransientNetworkCode(current)) return true;
+    current = errorCause(current);
+  }
+  return false;
 }
+
+function hasTransientNetworkCode(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    TRANSIENT_NETWORK_CODES.has(error.code)
+  );
+}
+
+function errorCause(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("cause" in error)) return undefined;
+  return error.cause;
+}
+
+const TRANSIENT_NETWORK_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETRESET",
+  "ENETUNREACH",
+  "ESOCKETTIMEDOUT",
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
 
 function defaultHubReadRetryWait(failedAttempt: number): Promise<void> {
   const delayMs = 250 * 2 ** (failedAttempt - 1);
