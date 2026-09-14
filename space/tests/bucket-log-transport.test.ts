@@ -30,15 +30,22 @@ beforeEach(() => {
 });
 
 it("retries a transient raw segment download", async () => {
+  const waits: number[] = [];
   hub.downloadFile
     .mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("read ECONNRESET") }))
     .mockResolvedValueOnce(new Blob(["segment"]));
-  const reader = createRawBucketReader("owner/raw", "hf_fixture");
+  const reader = createRawBucketReader("owner/raw", "hf_fixture", {
+    waitBeforeReadRetry: (attempt) => {
+      waits.push(attempt);
+      return Promise.resolve();
+    },
+  });
 
   await expect(reader.download("v1/segments/mixed/example.json.gz")).resolves.toEqual(
     new TextEncoder().encode("segment"),
   );
   expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+  expect(waits).toEqual([1]);
 });
 
 it("restarts a partially failed raw Bucket listing without duplicates", async () => {
@@ -52,7 +59,9 @@ it("restarts a partially failed raw Bucket listing without duplicates", async ()
         fileEntry("v1/segments/mixed/second.json.gz"),
       ]),
     );
-  const reader = createRawBucketReader("owner/raw", "hf_fixture");
+  const reader = createRawBucketReader("owner/raw", "hf_fixture", {
+    waitBeforeReadRetry: () => Promise.resolve(),
+  });
 
   await expect(reader.list("v1/segments")).resolves.toEqual([
     {
