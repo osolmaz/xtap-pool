@@ -20,10 +20,26 @@ export async function retryTransientHubRead<T>(
 }
 
 function isRetryableHubReadError(error: unknown): boolean {
+  if (isCancelledRead(error)) return false;
   if (error instanceof HubApiError) {
     return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
   }
   return isTransientNetworkError(error);
+}
+
+function isCancelledRead(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    if (
+      (current instanceof Error &&
+        (current.name === "AbortError" || current.name === "TimeoutError")) ||
+      errorCode(current) === "deadline_exceeded"
+    ) {
+      return true;
+    }
+    current = errorCause(current);
+  }
+  return false;
 }
 
 function isTransientNetworkError(error: unknown): boolean {
@@ -37,13 +53,13 @@ function isTransientNetworkError(error: unknown): boolean {
 }
 
 function hasTransientNetworkCode(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string" &&
-    TRANSIENT_NETWORK_CODES.has(error.code)
-  );
+  const code = errorCode(error);
+  return code !== undefined && TRANSIENT_NETWORK_CODES.has(code);
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
 }
 
 function errorCause(error: unknown): unknown {

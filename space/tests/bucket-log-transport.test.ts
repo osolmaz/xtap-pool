@@ -67,6 +67,19 @@ it("restarts a partially failed raw Bucket listing without duplicates", async ()
 });
 
 it("does not retry a cancelled raw Bucket read", async () => {
+  const cancelled = new TypeError("fetch failed", {
+    cause: new DOMException("request was cancelled", "AbortError"),
+  });
+  hub.downloadFile.mockRejectedValue(cancelled);
+  const reader = createRawBucketReader("owner/raw", "hf_fixture");
+
+  await expect(reader.download("v1/segments/mixed/example.json.gz")).rejects.toThrow(
+    "fetch failed",
+  );
+  expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+});
+
+it("does not retry an unknown non-network read failure", async () => {
   hub.downloadFile.mockRejectedValue(new Error("fixture aborted"));
   const reader = createRawBucketReader("owner/raw", "hf_fixture");
 
