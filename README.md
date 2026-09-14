@@ -21,6 +21,8 @@ See [Move pool storage to an immutable Bucket log](docs/2026-08-12-bucket-object
 for the storage contract and cutover procedure.
 [Incremental consumer reads and engagement history](docs/2026-09-07-incremental-consumer-and-engagement-history-plan.md)
 describes cursor-based changes and bounded observation history for downstream applications.
+[Replace the durable SQLite index with Lance](docs/2026-09-15-lance-durable-index-plan.md)
+plans the tested object-storage design and two-hour shadow rollout.
 The other implementation plans under [`docs/`](docs/) record earlier design work.
 
 ## Set up a pool
