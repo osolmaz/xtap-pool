@@ -79,6 +79,26 @@ it("restarts a partially failed listing without returning duplicate paths", asyn
   expect(waits).toEqual([1]);
 });
 
+it("does not retry a fetch failure caused by a consumer deadline", async () => {
+  const deadline = Object.assign(new Error("consumer deadline expired"), {
+    code: "deadline_exceeded",
+  });
+  hub.downloadFile.mockRejectedValue(new TypeError("fetch failed", { cause: deadline }));
+  const waits: number[] = [];
+  const store = createReadOnlyEnrichmentCheckpointStore({
+    bucket: "owner/index",
+    accessToken: "hf_fixture",
+    waitBeforeReadRetry: (attempt) => {
+      waits.push(attempt);
+      return Promise.resolve();
+    },
+  });
+
+  await expect(store.read("operations/run/plan.json")).rejects.toThrow("fetch failed");
+  expect(hub.downloadFile).toHaveBeenCalledTimes(1);
+  expect(waits).toEqual([]);
+});
+
 it("retries a malformed Hub response", async () => {
   hub.downloadFile
     .mockRejectedValueOnce(new hub.InvalidApiResponseFormatError("truncated response"))
