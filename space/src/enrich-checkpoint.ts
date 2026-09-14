@@ -22,6 +22,14 @@ import { canonicalPlanBytes } from "./enrich-run-plan.js";
 
 const METADATA_PATH = "state.json";
 const BITMAP_PATH = "queue-completed.bin";
+const CHECKPOINT_READ_ATTEMPTS = 3;
+
+type EnrichmentCheckpointStoreOptions = {
+  bucket: string;
+  accessToken: string;
+  fetcher?: typeof fetch;
+  waitBeforeReadRetry?: (failedAttempt: number) => Promise<void>;
+};
 
 export type EnrichmentRestoreEvidence = Readonly<Record<string, JsonValue>> & {
   sequence: number;
@@ -29,10 +37,9 @@ export type EnrichmentRestoreEvidence = Readonly<Record<string, JsonValue>> & {
   registry_next_ordinal: number;
 };
 
-export function createEnrichmentCheckpointStore(options: {
-  bucket: string;
-  accessToken: string;
-}): CheckpointObjectStore {
+export function createEnrichmentCheckpointStore(
+  options: EnrichmentCheckpointStoreOptions,
+): CheckpointObjectStore {
   const reader = createCheckpointReader(options);
   const repo = { type: "bucket", name: options.bucket } as const;
   const upload = async (path: string, bytes: Uint8Array): Promise<void> => {
@@ -65,10 +72,9 @@ export function createEnrichmentCheckpointStore(options: {
   };
 }
 
-export function createReadOnlyEnrichmentCheckpointStore(options: {
-  bucket: string;
-  accessToken: string;
-}): CheckpointObjectStore {
+export function createReadOnlyEnrichmentCheckpointStore(
+  options: EnrichmentCheckpointStoreOptions,
+): CheckpointObjectStore {
   return {
     ...createCheckpointReader(options),
     writeImmutable(): Promise<void> {
@@ -123,46 +129,80 @@ export function withCheckpointClaimPrefetch(
   };
 }
 
-function createCheckpointReader(options: {
-  bucket: string;
-  accessToken: string;
-}): Pick<CheckpointObjectStore, "bucketId" | "read" | "list"> {
+function createCheckpointReader(
+  options: EnrichmentCheckpointStoreOptions,
+): Pick<CheckpointObjectStore, "bucketId" | "read" | "list"> {
   const repo = { type: "bucket", name: options.bucket } as const;
+  const transport = options.fetcher === undefined ? {} : { fetch: options.fetcher };
+  const waitBeforeRetry = options.waitBeforeReadRetry ?? defaultCheckpointReadRetryWait;
   return {
     bucketId: options.bucket,
-    async read(path): Promise<Uint8Array | null> {
-      try {
-        const blob = await downloadFile({
-          repo,
-          accessToken: options.accessToken,
-          path,
-          xet: false,
-        });
-        return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
-      } catch (error) {
-        if (error instanceof HubApiError && error.statusCode === 404) return null;
-        throw error;
-      }
-    },
-    async list(prefix): Promise<readonly string[]> {
-      const paths: string[] = [];
-      try {
-        for await (const entry of listFiles({
-          repo,
-          accessToken: options.accessToken,
-          recursive: true,
-          path: prefix,
-          expand: false,
-        })) {
-          if (entry.type === "file") paths.push(entry.path);
+    read(path): Promise<Uint8Array | null> {
+      return retryCheckpointRead(async () => {
+        try {
+          const blob = await downloadFile({
+            repo,
+            ...transport,
+            accessToken: options.accessToken,
+            path,
+            xet: false,
+          });
+          return blob === null ? null : new Uint8Array(await blob.arrayBuffer());
+        } catch (error) {
+          if (error instanceof HubApiError && error.statusCode === 404) return null;
+          throw error;
         }
-      } catch (error) {
-        if (error instanceof HubApiError && error.statusCode === 404) return [];
-        throw error;
-      }
-      return paths.sort();
+      }, waitBeforeRetry);
+    },
+    list(prefix): Promise<readonly string[]> {
+      return retryCheckpointRead(async () => {
+        const paths: string[] = [];
+        try {
+          for await (const entry of listFiles({
+            repo,
+            ...transport,
+            accessToken: options.accessToken,
+            recursive: true,
+            path: prefix,
+            expand: false,
+          })) {
+            if (entry.type === "file") paths.push(entry.path);
+          }
+        } catch (error) {
+          if (error instanceof HubApiError && error.statusCode === 404) return [];
+          throw error;
+        }
+        return paths.sort();
+      }, waitBeforeRetry);
     },
   };
+}
+
+async function retryCheckpointRead<T>(
+  operation: () => Promise<T>,
+  waitBeforeRetry: (failedAttempt: number) => Promise<void>,
+): Promise<T> {
+  for (let attempt = 1; attempt <= CHECKPOINT_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === CHECKPOINT_READ_ATTEMPTS || !isRetryableCheckpointReadError(error)) {
+        throw error;
+      }
+      await waitBeforeRetry(attempt);
+    }
+  }
+  throw new Error("checkpoint read exhausted its retry bound");
+}
+
+function isRetryableCheckpointReadError(error: unknown): boolean {
+  if (!(error instanceof HubApiError)) return true;
+  return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
+}
+
+function defaultCheckpointReadRetryWait(failedAttempt: number): Promise<void> {
+  const delayMs = 250 * 2 ** (failedAttempt - 1);
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 export class EnrichmentCheckpointAdapter implements CheckpointAdapter<EnrichmentRestoreEvidence> {

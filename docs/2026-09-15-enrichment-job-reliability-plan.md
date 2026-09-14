@@ -32,6 +32,8 @@ batches, and verified index pointer.
   and exit cleanly. The next scheduled Job must restore that checkpoint and
   publish it before starting new work.
 - Retry each large download or upload at most three times.
+- Retry transient checkpoint and control-object reads at most three times. Do
+  not retry authorization errors or other permanent Hub responses.
 - Keep a partial download between attempts in the same physical Job.
 - Resume a partial download only after the remote path, byte size, and ETag
   still match the identity recorded before the first byte was written.
@@ -161,24 +163,26 @@ start a second physical Job while one matching writer is active.
    verification.
 5. A remote identity change prevents partial-file reuse.
 6. Downloads and uploads stop after three failed attempts.
-7. The existing SHA-256, SQLite, provenance, count, and pointer checks still
+7. A transient checkpoint read such as `ECONNRESET` is retried, while a
+   permanent Hub response is not retried.
+8. The existing SHA-256, SQLite, provenance, count, and pointer checks still
    protect publication.
-8. A progress completion failure after the final checkpoint does not fail the
+9. A progress completion failure after the final checkpoint does not fail the
    command.
-9. Failures before the final checkpoint still fail closed.
-10. Local pause, resume, and publication recovery tests pass.
-11. An update from the prior schedule succeeds when the new publication-reserve
+10. Failures before the final checkpoint still fail closed.
+11. Local pause, resume, and publication recovery tests pass.
+12. An update from the prior schedule succeeds when the new publication-reserve
     variable is not present yet, while any concurrent, foreign, or changed
     schedule still fails closed.
-12. The updater replaces the prior six-hour schedule and 45-minute timeout
+13. The updater replaces the prior six-hour schedule and 45-minute timeout
     before schedule reconciliation without changing the deployed model,
     taxonomy, or unchanged operating values.
-13. The merged Space reaches `RUNNING` at the exact reviewed revision.
-14. Setup doctor leaves exactly one active non-concurrent schedule at
+14. The merged Space reaches `RUNNING` at the exact reviewed revision.
+15. Setup doctor leaves exactly one active non-concurrent schedule at
     `17 */2 * * *` with no overlapping Job.
-15. Six consecutive scheduled Jobs complete, retain valid receipts and
+16. Six consecutive scheduled Jobs complete, retain valid receipts and
     checkpoints, and keep the public index healthy.
-16. Observed CPU and inference costs stay within the existing approved limits.
+17. Observed CPU and inference costs stay within the existing approved limits.
 
 ## Verification
 
