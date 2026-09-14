@@ -10,11 +10,14 @@ const hub = vi.hoisted(() => {
     }
   }
 
+  class InvalidApiResponseFormatError extends Error {}
+
   return {
     downloadFile: vi.fn(),
     listFiles: vi.fn(),
     uploadFile: vi.fn(),
     HubApiError,
+    InvalidApiResponseFormatError,
   };
 });
 

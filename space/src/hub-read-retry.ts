@@ -1,4 +1,4 @@
-import { HubApiError } from "@huggingface/hub";
+import { HubApiError, InvalidApiResponseFormatError } from "@huggingface/hub";
 
 const HUB_READ_ATTEMPTS = 3;
 
@@ -24,6 +24,7 @@ function isRetryableHubReadError(error: unknown): boolean {
   if (error instanceof HubApiError) {
     return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
   }
+  if (error instanceof InvalidApiResponseFormatError) return true;
   return isTransientNetworkError(error);
 }
 
