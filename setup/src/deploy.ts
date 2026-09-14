@@ -25,6 +25,7 @@ type ConfigureSpaceOptions = {
   initializeGeneratedSecrets?: boolean;
   allowLegacyDatasetRemoval?: boolean;
   retainLegacyDataset?: boolean;
+  reconcileEnrichmentContract?: boolean;
 };
 
 export async function deployPool(
@@ -74,13 +75,17 @@ export async function updateExistingPool(
       initializeGeneratedSecrets: false,
       allowLegacyDatasetRemoval: true,
       retainLegacyDataset: true,
+      reconcileEnrichmentContract: true,
     });
     await uploadSpace(root, client, config.spaceRepo, options.prepareDeploymentManifest);
     await deleteSpaceVariable(client, config.spaceRepo, "DATASET_REPO");
     return;
   }
   await uploadSpace(root, client, config.spaceRepo, options.prepareDeploymentManifest);
-  await configureSpace(client, config, { initializeGeneratedSecrets: false });
+  await configureSpace(client, config, {
+    initializeGeneratedSecrets: false,
+    reconcileEnrichmentContract: true,
+  });
 }
 
 // eslint-disable-next-line complexity -- Configuration validates the legacy cutover gate and applies independent optional defaults.
@@ -110,7 +115,16 @@ export async function configureSpace(
   await setSpaceVariable(client, config.spaceRepo, "POOL_ADMINS", usersValue(config.poolAdmins));
   await setSpaceVariable(client, config.spaceRepo, "ENRICH_ENABLED", "false");
   for (const [key, value] of Object.entries(ENRICHMENT_JOB_DEFAULT_VARIABLES)) {
-    if (!variables.has(key)) await setSpaceVariable(client, config.spaceRepo, key, value);
+    const changedTimingContract =
+      key === "ENRICH_JOB_SCHEDULE" ||
+      key === "ENRICH_JOB_TIMEOUT_SECONDS" ||
+      key === "ENRICH_PUBLICATION_MIN_REMAINING_MS";
+    if (
+      !variables.has(key) ||
+      (options.reconcileEnrichmentContract === true && changedTimingContract)
+    ) {
+      await setSpaceVariable(client, config.spaceRepo, key, value);
+    }
   }
   if (initializeGeneratedSecrets && !variables.has("SECRETS_INITIALIZED")) {
     await setSpaceSecret(client, config.spaceRepo, "POOL_SIGNING_SECRET", randomSecret());
