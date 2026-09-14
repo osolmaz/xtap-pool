@@ -194,8 +194,10 @@ type OwnedEnrichmentJobs = {
 };
 
 export type EnrichmentScheduleMaintenance = {
-  desired: DesiredEnrichmentJob;
+  namespace: string;
+  spaceRepo: string;
   scheduleId: string;
+  scheduleSha256: string;
   wasActive: boolean;
 };
 
@@ -306,17 +308,11 @@ export async function inspectEnrichmentJob(
   };
 }
 
-// eslint-disable-next-line complexity -- Handoff admission checks each independent schedule and writer identity.
 export async function assertEnrichmentWritersQuiescent(options: {
   client: HubClient;
   spaceRepo: string;
-  rawBucket: string;
-  variables: ReadonlyMap<string, string>;
 }): Promise<string> {
-  const namespace = options.spaceRepo.split("/")[0];
-  if (namespace === undefined || namespace.length === 0) {
-    throw new Error(`Invalid Space repository: ${options.spaceRepo}.`);
-  }
+  const namespace = enrichmentNamespace(options.spaceRepo);
   const owned = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
   if (owned.activeJobs.length > 0) {
     throw new Error("Revision handoff requires zero active enrichment Jobs.");
@@ -328,27 +324,15 @@ export async function assertEnrichmentWritersQuiescent(options: {
   if (schedule === undefined) {
     throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
   }
-  const sourceRevision = schedule.jobSpec.labels?.["source_revision"];
-  if (sourceRevision === undefined) {
-    throw new Error("Canonical enrichment schedule does not declare its source revision.");
-  }
-  const desired = desiredEnrichmentJobForRevision(
-    options.spaceRepo,
-    options.rawBucket,
-    options.variables,
-    sourceRevision,
-  );
-  if (!scheduleMatches(schedule, desired)) {
-    throw new Error("Revision handoff requires the exact canonical enrichment schedule.");
-  }
+  assertMaintenanceSchedule(schedule, options.spaceRepo);
   if (!schedule.suspend || schedule.concurrency) {
     throw new Error("Revision handoff requires a suspended non-concurrent enrichment schedule.");
   }
   return createHash("sha256")
     .update(
       canonicalJson({
-        desired_sha256: desiredEnrichmentJobHash(desired),
         schedule_id: schedule.id,
+        schedule_sha256: maintenanceScheduleSha256(schedule),
         suspended: schedule.suspend,
         concurrency: schedule.concurrency,
       }),
@@ -356,20 +340,15 @@ export async function assertEnrichmentWritersQuiescent(options: {
     .digest("hex");
 }
 
-// eslint-disable-next-line complexity -- Maintenance admission validates the exact schedule before and after quiescing it.
+// eslint-disable-next-line complexity -- Maintenance admission validates one unchanged writer before and after suspension.
 export async function quiesceCanonicalEnrichmentSchedule(
   options: {
     client: HubClient;
     spaceRepo: string;
-    rawBucket: string;
-    variables: ReadonlyMap<string, string>;
   },
   wait: { pollIntervalMs?: number; timeoutMs?: number } = {},
 ): Promise<EnrichmentScheduleMaintenance> {
-  const namespace = options.spaceRepo.split("/")[0];
-  if (namespace === undefined || namespace.length === 0) {
-    throw new Error(`Invalid Space repository: ${options.spaceRepo}.`);
-  }
+  const namespace = enrichmentNamespace(options.spaceRepo);
   const before = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
   if (before.schedules.length !== 1) {
     throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
@@ -378,19 +357,11 @@ export async function quiesceCanonicalEnrichmentSchedule(
   if (schedule === undefined) {
     throw new Error("Revision handoff requires exactly one canonical enrichment schedule.");
   }
-  const sourceRevision = schedule.jobSpec.labels?.["source_revision"];
-  if (sourceRevision === undefined) {
-    throw new Error("Canonical enrichment schedule does not declare its source revision.");
+  const timeoutSeconds = assertMaintenanceSchedule(schedule, options.spaceRepo);
+  if (schedule.concurrency) {
+    throw new Error("Revision handoff requires a non-concurrent canonical enrichment schedule.");
   }
-  const desired = desiredEnrichmentJobForRevision(
-    options.spaceRepo,
-    options.rawBucket,
-    options.variables,
-    sourceRevision,
-  );
-  if (!scheduleMatches(schedule, desired) || schedule.concurrency) {
-    throw new Error("Revision handoff requires the exact non-concurrent enrichment schedule.");
-  }
+  const scheduleSha256 = maintenanceScheduleSha256(schedule);
   const wasActive = !schedule.suspend;
   if (wasActive) {
     await suspendScheduledJob({
@@ -399,19 +370,24 @@ export async function quiesceCanonicalEnrichmentSchedule(
       ...hubOptions(options.client),
     });
   }
-  const deadline = Date.now() + (wait.timeoutMs ?? (desired.timeoutSeconds + 300) * 1_000);
+  const deadline = Date.now() + (wait.timeoutMs ?? (timeoutSeconds + 300) * 1_000);
   for (;;) {
     const current = await readOwnedEnrichmentJobs(options.client, namespace, options.spaceRepo);
     const currentSchedule = current.schedules[0];
-    if (
-      current.schedules.length === 1 &&
-      currentSchedule?.id === schedule.id &&
-      currentSchedule.suspend &&
-      !currentSchedule.concurrency &&
-      scheduleMatches(currentSchedule, desired) &&
-      current.activeJobs.length === 0
-    ) {
-      return { desired, scheduleId: schedule.id, wasActive };
+    if (current.schedules.length === 1 && currentSchedule?.id === schedule.id) {
+      assertMaintenanceSchedule(currentSchedule, options.spaceRepo);
+      if (maintenanceScheduleSha256(currentSchedule) !== scheduleSha256) {
+        throw new Error("Canonical enrichment schedule changed during maintenance.");
+      }
+      if (currentSchedule.suspend && current.activeJobs.length === 0) {
+        return {
+          namespace,
+          spaceRepo: options.spaceRepo,
+          scheduleId: schedule.id,
+          scheduleSha256,
+          wasActive,
+        };
+      }
     }
     if (Date.now() >= deadline) {
       throw new Error("Enrichment writers did not quiesce before the deployment deadline.");
@@ -425,14 +401,66 @@ export async function restoreCanonicalEnrichmentSchedule(
   maintenance: EnrichmentScheduleMaintenance,
 ): Promise<void> {
   if (!maintenance.wasActive) return;
-  const inspection = await inspectEnrichmentJob(client, maintenance.desired);
-  const original = inspection.exactSchedules.find(
-    (schedule) => schedule.id === maintenance.scheduleId,
-  );
-  if (inspection.schedules.length !== 1 || inspection.activeJobs.length > 0 || !original?.suspend) {
-    throw new Error("Cannot safely restore the original canonical enrichment schedule.");
+  const owned = await readOwnedEnrichmentJobs(client, maintenance.namespace, maintenance.spaceRepo);
+  requireRestorableMaintenanceSchedule(owned, maintenance);
+  await resumeScheduledJob({
+    namespace: maintenance.namespace,
+    jobId: maintenance.scheduleId,
+    ...hubOptions(client),
+  });
+}
+
+function requireRestorableMaintenanceSchedule(
+  owned: OwnedEnrichmentJobs,
+  maintenance: EnrichmentScheduleMaintenance,
+): ScheduledEnrichmentJob {
+  const unsafe = () =>
+    new Error("Cannot safely restore the original canonical enrichment schedule.");
+  if (owned.schedules.length !== 1 || owned.activeJobs.length > 0) throw unsafe();
+  const original = owned.schedules.find((schedule) => schedule.id === maintenance.scheduleId);
+  if (original === undefined || !original.suspend || original.concurrency) throw unsafe();
+  try {
+    assertMaintenanceSchedule(original, maintenance.spaceRepo);
+  } catch {
+    throw unsafe();
   }
-  await resumeEnrichmentSchedule(client, maintenance.desired, maintenance.scheduleId);
+  if (maintenanceScheduleSha256(original) !== maintenance.scheduleSha256) throw unsafe();
+  return original;
+}
+
+function enrichmentNamespace(spaceRepo: string): string {
+  const namespace = spaceRepo.split("/")[0];
+  if (namespace === undefined || namespace.length === 0) {
+    throw new Error(`Invalid Space repository: ${spaceRepo}.`);
+  }
+  return namespace;
+}
+
+function assertMaintenanceSchedule(schedule: ScheduledEnrichmentJob, spaceRepo: string): number {
+  const sourceRevision = schedule.jobSpec.labels?.["source_revision"];
+  if (sourceRevision === undefined) {
+    throw new Error("Canonical enrichment schedule does not declare its source revision.");
+  }
+  const timeoutSeconds = scheduleTimeout(schedule);
+  const valid = [
+    /^[0-9a-f]{40}$/u.test(sourceRevision),
+    schedule.jobSpec.spaceId === spaceRepo,
+    canonicalJson(schedule.jobSpec.command ?? []) === canonicalJson([...JOB_COMMAND]),
+    schedule.jobSpec.flavor === JOB_FLAVOR,
+    timeoutSeconds !== undefined,
+    scheduleRetries(schedule) === 0,
+    canonicalJson(scheduleSecretNames(schedule)) === canonicalJson([...JOB_SECRET_NAMES].sort()),
+  ];
+  if (!valid.every(Boolean) || timeoutSeconds === undefined) {
+    throw new Error("Revision handoff requires a valid canonical enrichment schedule.");
+  }
+  return timeoutSeconds;
+}
+
+function maintenanceScheduleSha256(schedule: ScheduledEnrichmentJob): string {
+  return createHash("sha256")
+    .update(canonicalJson(actualScheduleProjection(schedule)))
+    .digest("hex");
 }
 
 async function readOwnedEnrichmentJobs(
