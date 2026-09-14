@@ -17,6 +17,7 @@ import {
 import type { EnrichReceipt, PooledTweet } from "@xtap-pool/shared";
 
 import { consumeBatchesInOrder } from "./bounded-concurrency.js";
+import { retryTransientHubRead } from "./hub-read-retry.js";
 import type { EnrichStore } from "./enrich-store.js";
 import type { TweetStore } from "./store.js";
 
@@ -212,33 +213,44 @@ export function createRawBucketReader(
   const transport = fetcher === undefined ? {} : { fetch: fetcher };
   return {
     async list(prefix): Promise<readonly BucketObject[]> {
-      const objects: BucketObject[] = [];
-      for await (const entry of listFiles({
-        repo,
-        ...transport,
-        accessToken,
-        recursive: true,
-        path: prefix,
-        expand: true,
-      })) {
-        if (entry.type !== "file") continue;
-        const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
-        if (oid === undefined || oid.length === 0) {
-          throw new Error(`Bucket listing has no immutable object identity: ${entry.path}`);
+      const objects = await retryTransientHubRead(async () => {
+        const listed: BucketObject[] = [];
+        for await (const entry of listFiles({
+          repo,
+          ...transport,
+          accessToken,
+          recursive: true,
+          path: prefix,
+          expand: true,
+        })) {
+          if (entry.type !== "file") continue;
+          const oid = entry.xetHash ?? entry.lfs?.oid ?? entry.oid;
+          listed.push({
+            key: entry.path,
+            ...(oid === undefined ? {} : { oid }),
+            size: entry.size,
+          });
         }
-        objects.push({ key: entry.path, oid, size: entry.size });
+        return listed;
+      });
+      for (const object of objects) {
+        if (object.oid === undefined || object.oid.length === 0) {
+          throw new Error(`Bucket listing has no immutable object identity: ${object.key}`);
+        }
       }
       return objects;
     },
-    async download(key): Promise<Uint8Array | undefined> {
-      const blob = await downloadFile({
-        repo,
-        accessToken,
-        ...transport,
-        path: key,
-        xet: false,
+    download(key): Promise<Uint8Array | undefined> {
+      return retryTransientHubRead(async () => {
+        const blob = await downloadFile({
+          repo,
+          accessToken,
+          ...transport,
+          path: key,
+          xet: false,
+        });
+        return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
       });
-      return blob === null ? undefined : new Uint8Array(await blob.arrayBuffer());
     },
   };
 }

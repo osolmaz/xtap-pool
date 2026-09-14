@@ -12,6 +12,7 @@ import {
 import { downloadFile, HubApiError, listFiles, uploadFile } from "@huggingface/hub";
 
 import { mapBatchesInOrder } from "./bounded-concurrency.js";
+import { retryTransientHubRead } from "./hub-read-retry.js";
 import {
   enrichmentCheckpointMetadataSchema,
   serializeEnrichmentMetadata,
@@ -22,7 +23,6 @@ import { canonicalPlanBytes } from "./enrich-run-plan.js";
 
 const METADATA_PATH = "state.json";
 const BITMAP_PATH = "queue-completed.bin";
-const CHECKPOINT_READ_ATTEMPTS = 3;
 
 type EnrichmentCheckpointStoreOptions = {
   bucket: string;
@@ -134,11 +134,10 @@ function createCheckpointReader(
 ): Pick<CheckpointObjectStore, "bucketId" | "read" | "list"> {
   const repo = { type: "bucket", name: options.bucket } as const;
   const transport = options.fetcher === undefined ? {} : { fetch: options.fetcher };
-  const waitBeforeRetry = options.waitBeforeReadRetry ?? defaultCheckpointReadRetryWait;
   return {
     bucketId: options.bucket,
     read(path): Promise<Uint8Array | null> {
-      return retryCheckpointRead(async () => {
+      return retryTransientHubRead(async () => {
         try {
           const blob = await downloadFile({
             repo,
@@ -152,10 +151,10 @@ function createCheckpointReader(
           if (error instanceof HubApiError && error.statusCode === 404) return null;
           throw error;
         }
-      }, waitBeforeRetry);
+      }, options.waitBeforeReadRetry);
     },
     list(prefix): Promise<readonly string[]> {
-      return retryCheckpointRead(async () => {
+      return retryTransientHubRead(async () => {
         const paths: string[] = [];
         try {
           for await (const entry of listFiles({
@@ -173,36 +172,9 @@ function createCheckpointReader(
           throw error;
         }
         return paths.sort();
-      }, waitBeforeRetry);
+      }, options.waitBeforeReadRetry);
     },
   };
-}
-
-async function retryCheckpointRead<T>(
-  operation: () => Promise<T>,
-  waitBeforeRetry: (failedAttempt: number) => Promise<void>,
-): Promise<T> {
-  for (let attempt = 1; attempt <= CHECKPOINT_READ_ATTEMPTS; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (attempt === CHECKPOINT_READ_ATTEMPTS || !isRetryableCheckpointReadError(error)) {
-        throw error;
-      }
-      await waitBeforeRetry(attempt);
-    }
-  }
-  throw new Error("checkpoint read exhausted its retry bound");
-}
-
-function isRetryableCheckpointReadError(error: unknown): boolean {
-  if (!(error instanceof HubApiError)) return true;
-  return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
-}
-
-function defaultCheckpointReadRetryWait(failedAttempt: number): Promise<void> {
-  const delayMs = 250 * 2 ** (failedAttempt - 1);
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 export class EnrichmentCheckpointAdapter implements CheckpointAdapter<EnrichmentRestoreEvidence> {
