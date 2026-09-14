@@ -127,6 +127,22 @@ it("stops after three transient checkpoint read failures", async () => {
   expect(hub.downloadFile).toHaveBeenCalledTimes(3);
 });
 
+it("retries a Hub 499 response", async () => {
+  hub.downloadFile
+    .mockRejectedValueOnce(new hub.HubApiError("client closed request", 499))
+    .mockResolvedValueOnce(new Blob(["checkpoint"]));
+  const store = createReadOnlyEnrichmentCheckpointStore({
+    bucket: "owner/index",
+    accessToken: "hf_fixture",
+    waitBeforeReadRetry: () => Promise.resolve(),
+  });
+
+  await expect(store.read("operations/run/plan.json")).resolves.toEqual(
+    new TextEncoder().encode("checkpoint"),
+  );
+  expect(hub.downloadFile).toHaveBeenCalledTimes(2);
+});
+
 it("does not retry a non-transient Hub API response", async () => {
   hub.downloadFile.mockRejectedValue(new hub.HubApiError("unauthorized", 401));
   const store = createReadOnlyEnrichmentCheckpointStore({

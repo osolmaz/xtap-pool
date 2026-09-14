@@ -22,7 +22,12 @@ export async function retryTransientHubRead<T>(
 function isRetryableHubReadError(error: unknown): boolean {
   if (isCancelledRead(error)) return false;
   if (error instanceof HubApiError) {
-    return error.statusCode === 408 || error.statusCode === 429 || error.statusCode >= 500;
+    return (
+      error.statusCode === 408 ||
+      error.statusCode === 429 ||
+      error.statusCode === 499 ||
+      error.statusCode >= 500
+    );
   }
   if (error instanceof InvalidApiResponseFormatError) return true;
   return isTransientNetworkError(error);
