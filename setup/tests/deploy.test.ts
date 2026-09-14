@@ -79,6 +79,51 @@ describe("setup deployment helpers", () => {
     });
   });
 
+  it("replaces stale Space variables with the checked-in enrichment contract", async () => {
+    const requests: { url: string; init: RequestInit }[] = [];
+    const fetchFn: typeof fetch = (input, init) => {
+      requests.push({ url: requestUrl(input), init: init ?? {} });
+      if (init?.method === "GET") {
+        return Promise.resolve(
+          Response.json({
+            ENRICH_JOB_SCHEDULE: { value: "17 */6 * * *" },
+            ENRICH_JOB_TIMEOUT_SECONDS: { value: "2700" },
+            ENRICH_MAX_ELAPSED_MS: { value: "2400000" },
+            LLM_MODEL: { value: "alice/custom-model" },
+            TAXONOMY_VERSION: { value: "7" },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    await configureSpace(
+      { accessToken: "hf_owner", hubUrl: "https://hub.test", fetchFn },
+      {
+        namespace: "alice",
+        spaceRepo: "alice/xtap-pool",
+        rawBucket: "alice/xtap-pool-data",
+        indexBucket: "alice/xtap-pool-bucket",
+        allowedUsers: ["alice"],
+        poolAdmins: ["alice"],
+      },
+      { initializeGeneratedSecrets: false, reconcileEnrichmentContract: true },
+    );
+
+    const writes = requests
+      .slice(1)
+      .map((request) => requestBody(request.init))
+      .filter((body): body is string => body !== undefined)
+      .map(parseVariableWrite);
+    const writtenVariables = Object.fromEntries(writes.map(({ key, value }) => [key, value]));
+    expect(writtenVariables["ENRICH_JOB_SCHEDULE"]).toBe("17 */2 * * *");
+    expect(writtenVariables["ENRICH_JOB_TIMEOUT_SECONDS"]).toBe("7200");
+    expect(writtenVariables["ENRICH_MAX_ELAPSED_MS"]).toBeUndefined();
+    expect(writtenVariables["ENRICH_PUBLICATION_MIN_REMAINING_MS"]).toBe("4200000");
+    expect(writtenVariables["LLM_MODEL"]).toBeUndefined();
+    expect(writtenVariables["TAXONOMY_VERSION"]).toBeUndefined();
+  });
+
   it("blocks a legacy update until the pinned Bucket import is verified", async () => {
     const fetchFn: typeof fetch = (_input, init) =>
       Promise.resolve(
