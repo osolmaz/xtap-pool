@@ -88,10 +88,10 @@ SQLite integrity, provenance, row counts, and immutable manifest before moving
 the public pointer.
 
 Checkpoint, control-object, raw segment, and raw listing reads use the same
-three-attempt rule. They retry transient network failures, retryable Hub
-responses, and malformed or truncated Hub responses. Cancellation, invalid
-source metadata, authorization failures, and other permanent responses fail
-immediately.
+three-attempt rule. They retry transient network failures, Hub responses with
+status 408, 429, 499, or 5xx, and malformed or truncated Hub responses.
+Cancellation, invalid source metadata, authorization failures, and other
+permanent responses fail immediately.
 
 ### Final progress
 
@@ -170,9 +170,9 @@ start a second physical Job while one matching writer is active.
    verification.
 5. A remote identity change prevents partial-file reuse.
 6. Downloads and uploads stop after three failed attempts.
-7. A transient checkpoint or raw source read such as `ECONNRESET`, or a
-   malformed Hub response, is retried. Cancellation, invalid source metadata,
-   and permanent Hub responses are not retried.
+7. A transient checkpoint or raw source read such as `ECONNRESET`, a Hub 499
+   response, or a malformed Hub response is retried. Cancellation, invalid
+   source metadata, and permanent Hub responses are not retried.
 8. The existing SHA-256, SQLite, provenance, count, and pointer checks still
    protect publication.
 9. A progress completion failure after the final checkpoint does not fail the
