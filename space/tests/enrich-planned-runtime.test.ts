@@ -76,9 +76,13 @@ vi.mock("../src/enrich-config.js", async (importOriginal) => {
     loadEnrichTaxonomy: () => Promise.resolve({ labels: [], version: 1, source: "default" }),
   };
 });
-vi.mock("../src/job-progress.js", () => ({
-  XTapJobProgress: { create: () => mocks.progressCreate() },
-}));
+vi.mock("../src/job-progress.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/job-progress.js")>();
+  return {
+    ...actual,
+    XTapJobProgress: { create: () => mocks.progressCreate() },
+  };
+});
 
 import { activateEnrichmentRun } from "../src/enrich-active-run.js";
 import { createEnrichmentBatchResult, enrichmentBatchResultKey } from "../src/enrich-batch.js";

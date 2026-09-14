@@ -62,12 +62,14 @@ describe("Hugging Face enrichment Job", () => {
       namespace: "alice",
       spaceRepo: "alice/xtap-pool",
       sourceRevision: REVISION,
-      schedule: "17 */6 * * *",
-      timeoutSeconds: 2700,
+      schedule: "17 */2 * * *",
+      timeoutSeconds: 7200,
       environment: {
         RAW_BUCKET: "alice/xtap-pool-data",
         INDEX_BUCKET: "alice/xtap-pool-bucket",
         ENRICH_ENABLED: "true",
+        ENRICH_JOB_TIMEOUT_MS: "7200000",
+        ENRICH_PUBLICATION_MIN_REMAINING_MS: "4200000",
         ENRICH_MAX_CONCURRENT_CALLS: "8",
         ENRICH_MAX_COST_USD: "2",
         LLM_MODEL: "zai-org/GLM-5.2:fireworks-ai",
@@ -363,7 +365,7 @@ describe("Hugging Face enrichment Job", () => {
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow("five-field cron");
 
-    invalid.set("ENRICH_JOB_SCHEDULE", "17 */6 * * *");
+    invalid.set("ENRICH_JOB_SCHEDULE", "17 */2 * * *");
     invalid.set("ENRICH_MAX_CONCURRENT_CALLS", "33");
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
@@ -380,6 +382,12 @@ describe("Hugging Face enrichment Job", () => {
     await expect(
       desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", invalid),
     ).rejects.toThrow();
+
+    const short = variables();
+    short.set("ENRICH_JOB_TIMEOUT_SECONDS", "3600");
+    await expect(
+      desiredEnrichmentJob(client, "alice/xtap-pool", "alice/xtap-pool-data", short),
+    ).rejects.toThrow("budgets exceed");
   });
 
   it("rejects a cost limit that cannot admit one concurrent reservation wave", async () => {
@@ -522,7 +530,7 @@ describe("Hugging Face enrichment Job", () => {
           command: ["node", "space/dist/src/enrich-job-main.js"],
           secrets: { HF_TOKEN: "hf_dataset", INFERENCE_TOKEN: "hf_inference" },
           flavor: "cpu-upgrade",
-          timeoutSeconds: 2700,
+          timeoutSeconds: 7200,
         }),
       }),
     );
@@ -614,7 +622,7 @@ describe("Hugging Face enrichment Job", () => {
       receiptTimeoutMs: 100,
     });
 
-    expect(result.hardCeilingUsd).toBeCloseTo(6.0465);
+    expect(result.hardCeilingUsd).toBeCloseTo(6.124);
     expect(result.runs.map(({ jobId }) => jobId)).toEqual(["job-1", "job-2"]);
     expect(result.runs.map(({ receipt }) => receipt.units)).toEqual([7, 0]);
   });
@@ -989,8 +997,9 @@ async function desiredFixture(): Promise<DesiredEnrichmentJob> {
 function variables(): Map<string, string> {
   return new Map([
     ["INDEX_BUCKET", "alice/xtap-pool-bucket"],
-    ["ENRICH_JOB_SCHEDULE", "17 */6 * * *"],
-    ["ENRICH_JOB_TIMEOUT_SECONDS", "2700"],
+    ["ENRICH_JOB_SCHEDULE", "17 */2 * * *"],
+    ["ENRICH_JOB_TIMEOUT_SECONDS", "7200"],
+    ["ENRICH_PUBLICATION_MIN_REMAINING_MS", "4200000"],
     ["ENRICH_MAX_CONCURRENT_CALLS", "8"],
     ["ENRICH_MAX_ELAPSED_MS", "2400000"],
     ["ENRICH_MAX_ERROR_RATE", "0.25"],

@@ -65,6 +65,8 @@ describe("loadConfig", () => {
       INFERENCE_TOKEN: "hf_inference",
       ENRICH_INTERVAL_MS: "5000",
       ENRICH_MAX_CONCURRENT_CALLS: "32",
+      ENRICH_JOB_TIMEOUT_MS: "7200000",
+      ENRICH_PUBLICATION_MIN_REMAINING_MS: "4200000",
       ENRICH_MAX_DISCARDED_ASSIGNMENTS_PER_UNIT: "0.15",
       ENRICH_DISCARDED_ASSIGNMENT_RATE_MIN_UNITS: "200",
       LLM_MODEL: "meta-llama/Llama-4",
@@ -74,6 +76,8 @@ describe("loadConfig", () => {
     expect(config.inferenceToken).toBe("hf_inference");
     expect(config.enrichIntervalMs).toBe(5000);
     expect(config.enrichMaxConcurrentCalls).toBe(32);
+    expect(config.enrichJobTimeoutMs).toBe(7_200_000);
+    expect(config.enrichPublicationMinRemainingMs).toBe(4_200_000);
     expect(config.enrichMaxDiscardedAssignmentsPerUnit).toBe(0.15);
     expect(config.enrichDiscardedAssignmentRateMinUnits).toBe(200);
     expect(config.llmModel).toBe("meta-llama/Llama-4");

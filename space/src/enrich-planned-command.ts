@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { performance } from "node:perf_hooks";
 
 import Database from "better-sqlite3";
 import { z } from "zod";
@@ -69,7 +70,11 @@ import {
 } from "./enrich-worker.js";
 import type { DurableWorkerOutput, WorkerCeilings } from "./enrich-worker.js";
 import { remainingWorkerElapsedMs } from "./enrich-command.js";
-import { reportBlockedBestEffort, XTapJobProgress } from "./job-progress.js";
+import {
+  reportBlockedBestEffort,
+  reportCompleteBestEffort,
+  XTapJobProgress,
+} from "./job-progress.js";
 import { TweetStore } from "./store.js";
 
 const RUN_PREFIX = "operations/enrichment/runs";
@@ -111,6 +116,18 @@ export type PlannedEnrichmentRunResult = {
   successorHasWork: boolean;
 };
 
+export function canStartPlannedPublication(options: {
+  commandStartedAtMs: number;
+  nowMs: number;
+  jobTimeoutMs: number | undefined;
+  minimumRemainingMs: number | undefined;
+}): boolean {
+  if (options.jobTimeoutMs === undefined || options.minimumRemainingMs === undefined)
+    throw new Error("planned publication requires the physical timeout and minimum remaining time");
+  const elapsedMs = Math.max(0, options.nowMs - options.commandStartedAtMs);
+  return options.jobTimeoutMs - elapsedMs >= options.minimumRemainingMs;
+}
+
 export function runSinglePlannedEnrichmentAttempt(options: {
   commandStartedAtMs: number;
   maxElapsedMs?: number;
@@ -128,7 +145,7 @@ export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
   options: { deploymentManifest: DeploymentManifest },
 ): Promise<void> {
-  const commandStartedAtMs = Date.now();
+  const commandStartedAtMs = performance.now();
   const restoreOnly = env["XTAP_RESTORE_ONLY"] === "true";
   const config = loadConfig(
     restoreOnly ? { ...env, ENRICH_ENABLED: "false", INFERENCE_TOKEN: undefined } : env,
@@ -285,7 +302,7 @@ async function runSinglePlannedEnrichmentRun(
         completed,
         total,
         unit,
-        elapsed_ms: Date.now() - commandStartedAtMs,
+        elapsed_ms: performance.now() - commandStartedAtMs,
       }),
     );
   };
@@ -603,7 +620,7 @@ async function runSinglePlannedEnrichmentRun(
         claimed_segments: replayEvidence.claimedSegments,
         orphan_segments: replayEvidence.orphanSegments,
         provider_calls: 0,
-        elapsed_ms: Date.now() - commandStartedAtMs,
+        elapsed_ms: performance.now() - commandStartedAtMs,
       }),
     );
     tweetStore.close();
@@ -634,6 +651,103 @@ async function runSinglePlannedEnrichmentRun(
       },
       adapter,
     );
+  };
+  const publishCompletedRun = async (
+    providerCostUsd: number,
+  ): Promise<PlannedEnrichmentRunResult> => {
+    if (!runIsComplete(state))
+      throw new Error("incomplete enrichment run cannot enter publication");
+    if (state.publication.state === "pending") {
+      if (
+        !canStartPlannedPublication({
+          commandStartedAtMs,
+          nowMs: performance.now(),
+          jobTimeoutMs: config.enrichJobTimeoutMs,
+          minimumRemainingMs: config.enrichPublicationMinRemainingMs,
+        })
+      ) {
+        console.log(
+          JSON.stringify({
+            type: "publication-deferred",
+            run_id: runId,
+            elapsed_ms: performance.now() - commandStartedAtMs,
+            minimum_remaining_ms: config.enrichPublicationMinRemainingMs,
+          }),
+        );
+        return { providerCostUsd, successorHasWork: false };
+      }
+      state = setPublicationState(state, {
+        state: "building",
+        database_key: null,
+        database_sha256: null,
+        database_bytes: null,
+        manifest: null,
+      });
+      state = withCheckpointSequence(state, state.sequence + 1);
+      adapter.replace(state);
+      await coordinator.commit(
+        {
+          name: "publication-building",
+          sequence: state.sequence,
+          reached_at: new Date().toISOString(),
+          metadata: {},
+        },
+        adapter,
+      );
+    }
+    if (state.publication.state !== "building")
+      throw new Error("completed enrichment run has an invalid publication state");
+    const outputKeys = [
+      ...new Set([
+        ...sourceSegments.map((file) => file.key),
+        ...(await readRunOutputKeys(checkpointStore, runId, state, {
+          queue: queueBaselineOrdinals,
+          registry: plan.work.registry_baseline_scanned,
+        })),
+      ]),
+    ].sort();
+    const publicationPath = join(config.dataDir, "planned", `${runId}-publication.sqlite`);
+    const publication = await DurableIndex.restoreReference(
+      {
+        rawBucket: config.rawBucket,
+        indexBucket: config.indexBucket,
+        accessToken: config.hfToken,
+        databasePath: publicationPath,
+        log,
+        taxonomyVersion: config.taxonomyVersion,
+        contractHash,
+        expectedCurrentDatabaseSha256: plan.base_index.sha256,
+        progress,
+        publicationBoundary: commitPublicationBoundary,
+      },
+      {
+        key: plan.base_index.key,
+        sha256: plan.base_index.sha256,
+        sourceRevision: plan.base_index.source_revision,
+      },
+    );
+    try {
+      await publication.applyOutputSegments(outputKeys);
+      const manifest = await publication.publish();
+      const databaseBytes = state.publication.database_bytes;
+      if (databaseBytes === null) throw new Error("published database byte count is missing");
+      const successor = await ensureSuccessorRun({
+        config,
+        log,
+        checkpointStore,
+        plan,
+        targetWorkerRevision,
+        attemptId,
+        manifest,
+        databaseBytes,
+        databasePath: publicationPath,
+        publication,
+      });
+      await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
+      return { providerCostUsd, successorHasWork: successor.hasWork };
+    } finally {
+      publication.close();
+    }
   };
 
   try {
@@ -690,7 +804,6 @@ async function runSinglePlannedEnrichmentRun(
       await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
       return { providerCostUsd: 0, successorHasWork: successor.hasWork };
     }
-
     const inferenceToken = config.inferenceToken;
     if (inferenceToken === undefined) throw new Error("planned enrichment token is missing");
     const llm = createRouterLlmClient({
@@ -707,7 +820,11 @@ async function runSinglePlannedEnrichmentRun(
           }),
     });
     const ceilings: WorkerCeilings = {
-      maxElapsedMs: remainingWorkerElapsedMs(budget.maxElapsedMs, commandStartedAtMs, Date.now()),
+      maxElapsedMs: remainingWorkerElapsedMs(
+        budget.maxElapsedMs,
+        commandStartedAtMs,
+        performance.now(),
+      ),
       maxErrorRate: config.enrichMaxErrorRate,
       maxCostUsd: budget.maxCostUsd,
       maxCostPerCallUsd: config.enrichMaxCostPerCallUsd,
@@ -746,84 +863,9 @@ async function runSinglePlannedEnrichmentRun(
       },
     });
 
-    if (runIsComplete(state)) {
-      state = setPublicationState(state, {
-        state: "building",
-        database_key: null,
-        database_sha256: null,
-        database_bytes: null,
-        manifest: null,
-      });
-      state = withCheckpointSequence(state, state.sequence + 1);
-      adapter.replace(state);
-      await coordinator.commit(
-        {
-          name: "publication-building",
-          sequence: state.sequence,
-          reached_at: new Date().toISOString(),
-          metadata: {},
-        },
-        adapter,
-      );
-      const outputKeys = [
-        ...new Set([
-          ...sourceSegments.map((file) => file.key),
-          ...(await readRunOutputKeys(checkpointStore, runId, state, {
-            queue: queueBaselineOrdinals,
-            registry: plan.work.registry_baseline_scanned,
-          })),
-        ]),
-      ].sort();
-      const publicationPath = join(config.dataDir, "planned", `${runId}-publication.sqlite`);
-      const publication = await DurableIndex.restoreReference(
-        {
-          rawBucket: config.rawBucket,
-          indexBucket: config.indexBucket,
-          accessToken: config.hfToken,
-          databasePath: publicationPath,
-          log,
-          taxonomyVersion: config.taxonomyVersion,
-          contractHash,
-          expectedCurrentDatabaseSha256: plan.base_index.sha256,
-          progress,
-          publicationBoundary: commitPublicationBoundary,
-        },
-        {
-          key: plan.base_index.key,
-          sha256: plan.base_index.sha256,
-          sourceRevision: plan.base_index.source_revision,
-        },
-      );
-      try {
-        await publication.applyOutputSegments(outputKeys);
-        const manifest = await publication.publish();
-        const databaseBytes = state.publication.database_bytes;
-        if (databaseBytes === null) throw new Error("published database byte count is missing");
-        const successor = await ensureSuccessorRun({
-          config,
-          log,
-          checkpointStore,
-          plan,
-          targetWorkerRevision,
-          attemptId,
-          manifest,
-          databaseBytes,
-          databasePath: publicationPath,
-          publication,
-        });
-        await finishPlannedRun(coordinator, adapter, state, progress, manifest.database.sha256);
-        return {
-          providerCostUsd: receiptProviderCostUsd(receipt, budget.maxCostUsd),
-          successorHasWork: successor.hasWork,
-        };
-      } finally {
-        publication.close();
-      }
-    }
-    return {
-      providerCostUsd: receiptProviderCostUsd(receipt, budget.maxCostUsd),
-      successorHasWork: false,
-    };
+    const providerCostUsd = receiptProviderCostUsd(receipt, budget.maxCostUsd);
+    if (runIsComplete(state)) return await publishCompletedRun(providerCostUsd);
+    return { providerCostUsd, successorHasWork: false };
   } catch (error) {
     await reportBlockedBestEffort(progress);
     throw error;
@@ -1059,7 +1101,7 @@ async function finishPlannedRun(
     },
     adapter,
   );
-  await progress.complete();
+  await reportCompleteBestEffort(progress);
 }
 
 export function applyCheckpointToWorkerDatabase(

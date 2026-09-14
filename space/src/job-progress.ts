@@ -374,6 +374,17 @@ export async function reportBlockedBestEffort(
   }
 }
 
+export async function reportCompleteBestEffort(
+  progress: Pick<XTapJobProgress, "complete">,
+  report: (message: string) => void = console.error,
+): Promise<void> {
+  try {
+    await progress.complete();
+  } catch {
+    report("[xtap-pool job] failed to report complete progress");
+  }
+}
+
 export function isMissingProgressPath(error: unknown): boolean {
   return error instanceof HubApiError && error.statusCode === 404;
 }

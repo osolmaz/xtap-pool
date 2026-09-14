@@ -2,10 +2,16 @@
 title: Replace the durable SQLite index with Lance
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-15
+updated: 2026-09-15
+status: deferred
 tags: [lance, storage, index, hugging-face, operations]
 ---
 
 # Replace the durable SQLite index with Lance
+
+This work is deferred. The current production work keeps SQLite and fixes Job
+timeouts, publication admission, and transfer recovery. See
+[Make scheduled enrichment Jobs reliable](2026-09-15-enrichment-job-reliability-plan.md).
 
 ## Goal
 
