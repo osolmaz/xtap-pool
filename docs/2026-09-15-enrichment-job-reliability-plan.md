@@ -32,8 +32,9 @@ batches, and verified index pointer.
   and exit cleanly. The next scheduled Job must restore that checkpoint and
   publish it before starting new work.
 - Retry each large download or upload at most three times.
-- Retry transient checkpoint and control-object reads at most three times. Do
-  not retry authorization errors or other permanent Hub responses.
+- Retry transient checkpoint, control-object, and immutable raw source reads
+  at most three times. Do not retry authorization errors, invalid source
+  metadata, or other permanent Hub responses.
 - Keep a partial download between attempts in the same physical Job.
 - Resume a partial download only after the remote path, byte size, and ETag
   still match the identity recorded before the first byte was written.
@@ -163,8 +164,8 @@ start a second physical Job while one matching writer is active.
    verification.
 5. A remote identity change prevents partial-file reuse.
 6. Downloads and uploads stop after three failed attempts.
-7. A transient checkpoint read such as `ECONNRESET` is retried, while a
-   permanent Hub response is not retried.
+7. A transient checkpoint or raw source read such as `ECONNRESET` is retried,
+   while invalid source metadata and permanent Hub responses are not retried.
 8. The existing SHA-256, SQLite, provenance, count, and pointer checks still
    protect publication.
 9. A progress completion failure after the final checkpoint does not fail the
