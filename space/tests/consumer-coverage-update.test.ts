@@ -376,6 +376,26 @@ describe("source coverage maintenance", () => {
     await assertFullCoverage(next.cursor, source.cursor);
   });
 
+  it("does not advance observation coverage from an unpublished added reply", async () => {
+    const root = consumerTweet("100", { captured_at: "2026-09-06T01:00:00.000Z" });
+    await f.post(root);
+    const source = await finish(BOOTSTRAP);
+    expect(source.observations_through).toBe("2026-09-06T01:00:00.000Z");
+
+    await f.post(
+      consumerTweet("101", {
+        conversation_id: root.id,
+        captured_at: "2026-09-06T07:00:00.000Z",
+      }),
+      false,
+    );
+    const next = await finish(`/api/changes?after=${source.cursor}`);
+
+    expect(next.changes).toEqual([]);
+    expect(next.observations_through).toBe(source.observations_through);
+    await assertFullCoverage(next.cursor, source.cursor);
+  });
+
   it("handles mixed edits and counters, pending activation, and withdrawal of the previous maximum", async () => {
     await f.post(consumerTweet());
     await f.post(consumerTweet("200", { captured_at: "2026-09-06T02:00:00.000Z" }));
