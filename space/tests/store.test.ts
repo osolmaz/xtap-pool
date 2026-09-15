@@ -156,7 +156,7 @@ describe("query", () => {
 });
 
 describe("current enrichment filters", () => {
-  it("does not expose stale preset or free-label assignments after unit membership changes", () => {
+  it("keeps accepted labels on published members while an added member waits", () => {
     const now = new Date("2026-07-06T12:00:00.000Z");
     const contractHash = "current-contract";
     const enrich = new EnrichStore(store.database, 1, () => now, contractHash);
@@ -197,14 +197,16 @@ describe("current enrichment filters", () => {
     store.insert([reply]);
     enrich.registerTweets([reply]);
 
-    expect(store.query({ labels: ["ai"] }).records).toEqual([]);
-    expect(store.query({ freeLabel: "vllm" }).records).toEqual([]);
+    expect(store.query({ labels: ["ai"] }).records.map((entry) => entry.tweet.id)).toEqual(["10"]);
+    expect(store.query({ freeLabel: "vllm" }).records.map((entry) => entry.tweet.id)).toEqual([
+      "10",
+    ]);
     expect(
       store
         .query({ unlabeled: true, dedup: false })
         .records.map((entry) => entry.tweet.id)
         .sort(),
-    ).toEqual(["10", "11"]);
+    ).toEqual(["11"]);
   });
 });
 

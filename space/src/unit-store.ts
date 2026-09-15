@@ -95,31 +95,31 @@ export class UnitStore {
       .prepare(
         `WITH eligible AS (
            SELECT DISTINCT um.unit_id
-           FROM tweets
-           JOIN unit_members um ON um.tweet_id = tweets.id
+           FROM published_unit_members published
+           JOIN unit_members um ON um.unit_id = published.unit_id
+             AND um.tweet_id = published.tweet_id
+             AND um.content_hash = published.content_hash
+           JOIN tweets ON tweets.id = published.tweet_id
+             AND tweets.content_hash = published.content_hash
            JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ?
-           JOIN enrich_queue q ON q.unit_id = um.unit_id
-             AND q.taxonomy_version = ? AND q.status = 'done'
            WHERE ${whereSql}
          ), ordered AS (
-           SELECT um.unit_id, MAX(tweets.sort_ts) AS sort_ts
+           SELECT published.unit_id, MAX(tweets.sort_ts) AS sort_ts
            FROM eligible
-           JOIN unit_members um ON um.unit_id = eligible.unit_id
-           JOIN tweets ON tweets.id = um.tweet_id
-           GROUP BY um.unit_id
+           JOIN published_unit_members published ON published.unit_id = eligible.unit_id
+           JOIN unit_members um ON um.unit_id = published.unit_id
+             AND um.tweet_id = published.tweet_id
+             AND um.content_hash = published.content_hash
+           JOIN tweets ON tweets.id = published.tweet_id
+             AND tweets.content_hash = published.content_hash
+           GROUP BY published.unit_id
          )
          SELECT unit_id, sort_ts FROM ordered
          ${cursorSql}
          ORDER BY sort_ts DESC, unit_id DESC
          LIMIT ?`,
       )
-      .all(
-        this.taxonomyVersion,
-        this.taxonomyVersion,
-        ...params,
-        ...cursorParams,
-        limit + 1,
-      ) as OrderedUnitRow[];
+      .all(this.taxonomyVersion, ...params, ...cursorParams, limit + 1) as OrderedUnitRow[];
 
     return this.pageFromRows(rows, limit, revision, query.cutoff);
   }
@@ -149,13 +149,17 @@ export class UnitStore {
     const posts = this.db
       .prepare(
         `WITH ranked AS (
-           SELECT um.unit_id, tweets.json, tweets.sort_ts, tweets.id,
+           SELECT published.unit_id, tweets.json, tweets.sort_ts, tweets.id,
                   ROW_NUMBER() OVER (
                     PARTITION BY tweets.id ORDER BY ${POST_ORDER}
                   ) AS rn
-           FROM unit_members um
-           JOIN tweets ON tweets.id = um.tweet_id
-           WHERE um.unit_id IN (${placeholders})
+           FROM published_unit_members published
+           JOIN unit_members um ON um.unit_id = published.unit_id
+             AND um.tweet_id = published.tweet_id
+             AND um.content_hash = published.content_hash
+           JOIN tweets ON tweets.id = published.tweet_id
+             AND tweets.content_hash = published.content_hash
+           WHERE published.unit_id IN (${placeholders})
          )
          SELECT unit_id, json FROM ranked WHERE rn = 1
          ORDER BY unit_id, sort_ts, id`,
@@ -163,9 +167,14 @@ export class UnitStore {
       .all(...unitIds) as UnitPostRow[];
     const contributors = this.db
       .prepare(
-        `SELECT um.unit_id, GROUP_CONCAT(DISTINCT tweets.contributed_by) AS contributors
-         FROM unit_members um JOIN tweets ON tweets.id = um.tweet_id
-         WHERE um.unit_id IN (${placeholders}) GROUP BY um.unit_id`,
+        `SELECT published.unit_id,
+                GROUP_CONCAT(DISTINCT tweets.contributed_by) AS contributors
+         FROM published_unit_members published
+         JOIN unit_members um ON um.unit_id = published.unit_id
+           AND um.tweet_id = published.tweet_id
+           AND um.content_hash = published.content_hash
+         JOIN tweets ON tweets.id = published.tweet_id
+         WHERE published.unit_id IN (${placeholders}) GROUP BY published.unit_id`,
       )
       .all(...unitIds) as UnitContributorsRow[];
     const assignments = readVisibleAssignments(this.db, unitIds);
@@ -246,6 +255,7 @@ function ensureResultRevision(db: Database.Database): void {
   for (const table of [
     "tweets",
     "unit_members",
+    "published_unit_members",
     "enrichment",
     "enrich_queue",
     "label_assignments",
@@ -305,8 +315,12 @@ function identityFilters(query: UnitQuery): Filter[] {
     const placeholders = query.authorIds.map(() => "?").join(",");
     filters.push({
       sql: `NOT EXISTS (
-              SELECT 1 FROM unit_members author_um INDEXED BY idx_unit_members_current_access
-              WHERE author_um.unit_id = um.unit_id
+              SELECT 1 FROM published_unit_members author_published
+              JOIN unit_members author_um INDEXED BY idx_unit_members_current_access
+                ON author_um.unit_id = author_published.unit_id
+                AND author_um.tweet_id = author_published.tweet_id
+                AND author_um.content_hash = author_published.content_hash
+              WHERE author_published.unit_id = um.unit_id
                 AND (
                   author_um.author_id IS NULL
                   OR author_um.author_id NOT IN (${placeholders})
@@ -338,7 +352,11 @@ function rangeFilters(query: UnitQuery): Filter[] {
   }
   if (query.cutoff !== undefined) {
     filters.push({
-      sql: `(SELECT MAX(u.content_at) FROM unit_members u WHERE u.unit_id = um.unit_id) <= ?`,
+      sql: `(SELECT MAX(u.content_at) FROM published_unit_members cutoff_published
+              JOIN unit_members u ON u.unit_id = cutoff_published.unit_id
+                AND u.tweet_id = cutoff_published.tweet_id
+                AND u.content_hash = cutoff_published.content_hash
+              WHERE cutoff_published.unit_id = um.unit_id) <= ?`,
       values: [query.cutoff],
     });
   }
@@ -395,13 +413,21 @@ function publicationFilters(query: UnitQuery): Filter[] {
   return [
     {
       sql: `NOT EXISTS (
-              SELECT 1 FROM unit_members private_um INDEXED BY idx_unit_members_current_access
-              WHERE private_um.unit_id = um.unit_id
+              SELECT 1 FROM published_unit_members private_published
+              JOIN unit_members private_um INDEXED BY idx_unit_members_current_access
+                ON private_um.unit_id = private_published.unit_id
+                AND private_um.tweet_id = private_published.tweet_id
+                AND private_um.content_hash = private_published.content_hash
+              WHERE private_published.unit_id = um.unit_id
                 AND private_um.is_subscriber_only = 1
             )
             AND EXISTS (
-              SELECT 1 FROM unit_members original_um INDEXED BY idx_unit_members_current_access
-              WHERE original_um.unit_id = um.unit_id
+              SELECT 1 FROM published_unit_members original_published
+              JOIN unit_members original_um INDEXED BY idx_unit_members_current_access
+                ON original_um.unit_id = original_published.unit_id
+                AND original_um.tweet_id = original_published.tweet_id
+                AND original_um.content_hash = original_published.content_hash
+              WHERE original_published.unit_id = um.unit_id
                 AND original_um.is_retweet = 0
             )`,
       values: [],

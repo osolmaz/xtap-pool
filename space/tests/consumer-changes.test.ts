@@ -43,18 +43,21 @@ function post(value: PooledTweet) {
   store.insert([value]);
   enrich.registerTweets([value]);
 }
-function result(value: PooledTweet) {
+function result(value: PooledTweet, enrichedAt = now, labels = ["ai"]) {
   const id = unitIdFor(value);
   const row = {
     unit_id: id,
     tweet_ids: enrich.unitMemberIds(id),
     input_hash: computeInputHash(id, enrich.unitSemanticMembers(id)),
     contract_hash: contract,
-    preset_labels: [{ name: "ai", evidence: [{ tweet_id: value.id, quote: "model" }] }],
+    preset_labels: labels.map((name) => ({
+      name,
+      evidence: [{ tweet_id: value.id, quote: "model" }],
+    })),
     free_labels: [],
     model: "fixture",
     taxonomy_version: 1,
-    enriched_at: now,
+    enriched_at: enrichedAt,
   };
   store.sourceEffects.recordResult(row, source());
   enrich.applyEnrichment(row);
@@ -222,6 +225,74 @@ describe("bounded consumer change steps", () => {
     expect(samples.changes.map((change) => change.type)).toEqual(["observation"]);
     expect(read.mock.calls.every(([ids]) => ids.length === 1)).toBe(true);
     expect(samples.cursor.position.kind).toBe("idle");
+  });
+
+  it("keeps accepted members visible while an added reply waits for enrichment", () => {
+    const root = tweet();
+    post(root);
+    result(root);
+    const before = context();
+    const reply = tweet("101", {
+      conversation_id: root.id,
+      text: "more model details",
+      captured_at: "2026-09-06T06:00:00.000Z",
+    });
+    post(reply);
+    const pending = context();
+
+    expect(drain(pending, before)).toEqual([]);
+
+    result(reply);
+    const changes = drain(context(), pending, 1);
+    expect(changes.filter((change) => change.type === "unit_remove")).toEqual([]);
+    const upserts = changes.filter((change) => change.type === "unit_upsert");
+    expect(upserts).toHaveLength(1);
+    expect(upserts[0]?.unit.id).toBe(unitIdFor(root));
+    expect(upserts[0]?.unit.posts.map((post) => post.id)).toEqual([root.id, reply.id]);
+  });
+
+  it("removes the accepted version when the completed replacement loses its label", () => {
+    const root = tweet();
+    post(root);
+    result(root);
+    const before = context();
+    const reply = tweet("101", {
+      conversation_id: root.id,
+      text: "more model details",
+      captured_at: "2026-09-06T06:00:00.000Z",
+    });
+    post(reply);
+    result(reply, "2026-09-07T13:00:00.000Z", []);
+
+    expect(drain(context(), before)).toEqual([
+      { type: "unit_remove", unit_id: unitIdFor(root), reason: "not_available" },
+    ]);
+  });
+
+  it("does not revive an older subset after an accepted reply changes", () => {
+    const root = tweet();
+    post(root);
+    result(root);
+    const reply = tweet("101", {
+      conversation_id: root.id,
+      text: "more model details",
+      captured_at: "2026-09-06T06:00:00.000Z",
+    });
+    post(reply);
+    result(reply, "2026-09-07T13:00:00.000Z");
+    const before = context();
+
+    post(
+      tweet("101", {
+        conversation_id: root.id,
+        text: "changed model details",
+        captured_at: "2026-09-06T08:00:00.000Z",
+      }),
+    );
+
+    expect(drain(context(), before)).toEqual([
+      { type: "unit_remove", unit_id: unitIdFor(root), reason: "not_available" },
+    ]);
   });
 
   it("withdraws pending edits and recovers their old observations on first eligible publication", () => {

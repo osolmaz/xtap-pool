@@ -15,7 +15,7 @@ export const CONSUMER_PROJECTION_HASH = createHash("sha256")
       content: "exclude observation fields and followers; current content-run clock",
       posts: "observed time, private first, content hash, contributor",
       results:
-        "newest applicable result by UTC time and hash; reuse exact input; account for unsupported rows",
+        "newest applicable result by UTC time and hash; keep the last accepted unchanged subset while added members wait; account for unsupported rows",
       registry: "frozen actual approved state, not raw revision inference",
       changes: "exact source membership, historical author-ID and reverse dependencies",
     }),

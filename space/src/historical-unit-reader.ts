@@ -8,7 +8,7 @@ import { UnitStore } from "./unit-store.js";
 import type { UnitQuery } from "./unit-store.js";
 import { consumerRegistrySchema } from "./consumer-registry.js";
 import type { ConsumerRegistry } from "./consumer-registry.js";
-import { recordedResults } from "./recorded-result.js";
+import { recordedPublishedResults, recordedResults } from "./recorded-result.js";
 import { restrictedAccessSql } from "./post-state.js";
 
 const MAX_POSTS = 2000;
@@ -144,6 +144,16 @@ export class HistoricalUnitReader {
       sourceKeys: keys,
     });
     for (const row of results.values()) enrich.applyEnrichment(row);
+    const missing = requests
+      .map((request) => request.unit_id)
+      .filter((unitId) => !results.has(unitId));
+    const published = recordedPublishedResults({
+      database: this.database,
+      enrich,
+      unitIds: missing,
+      sourceKeys: keys,
+    });
+    for (const row of published.values()) enrich.applyPublishedEnrichment(row);
   }
 
   private applyRegistry(slice: Database.Database, registry: ConsumerRegistry): void {
