@@ -7,6 +7,7 @@ import { selectedCompleteThrough } from "./enrich-store.js";
 import {
   selectedCurrentCoverageUnitIds,
   selectedCurrentObservationThrough,
+  selectedCurrentPublishedUnitIds,
   selectedObservationThrough,
 } from "./consumer-coverage.js";
 import { ConsumerCoverageEffects } from "./consumer-coverage-effects.js";
@@ -50,7 +51,14 @@ export function updateConsumerCoverage(
   )
     return recalculate(database, target);
 
-  const affectedLatest = selectedCurrentObservationThrough(database, target, currentAffectedUnits);
+  const publishedAffectedUnits = selectedCurrentPublishedUnitIds(database, target, {
+    unitIds: [...affectedUnits],
+  });
+  const affectedLatest = selectedCurrentObservationThrough(
+    database,
+    target,
+    publishedAffectedUnits,
+  );
   const observationsThrough = later(summary.observationsThrough, affectedLatest);
   return {
     kind: "coverage",
@@ -174,12 +182,13 @@ function recalculate(
     if (error instanceof ConsumerBootstrapRequired) return historicalCoverage(database, target);
     throw error;
   }
-  const unitIds = selectedCurrentCoverageUnitIds(database, target);
+  const workingUnitIds = selectedCurrentCoverageUnitIds(database, target);
+  const publishedUnitIds = selectedCurrentPublishedUnitIds(database, target);
   return {
     kind: "coverage",
     mode: "semantic",
-    completeThrough: selectedCompleteThrough(database, { unitIds }) ?? null,
-    observationsThrough: selectedCurrentObservationThrough(database, target, unitIds),
+    completeThrough: selectedCompleteThrough(database, { unitIds: workingUnitIds }) ?? null,
+    observationsThrough: selectedCurrentObservationThrough(database, target, publishedUnitIds),
   };
 }
 

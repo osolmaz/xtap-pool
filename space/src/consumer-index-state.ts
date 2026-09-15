@@ -17,6 +17,7 @@ export const CONSUMER_PROJECTION_HASH = createHash("sha256")
       results:
         "newest applicable result by UTC time and hash; keep the last accepted unchanged subset while added members wait; account for unsupported rows",
       registry: "frozen actual approved state, not raw revision inference",
+      coverage: "published member set only; pending additions do not advance clocks",
       changes: "exact source membership, historical author-ID and reverse dependencies",
     }),
   )

@@ -46,6 +46,32 @@ export function selectedCurrentCoverageUnitIds(
     .map((row) => unitRow.parse(row).unit_id);
 }
 
+/** Published units use the accepted member set even while working membership changes. */
+export function selectedCurrentPublishedUnitIds(
+  database: Database.Database,
+  target: ResolvedConsumerContext,
+  options: { unitIds?: readonly string[]; after?: string } = {},
+): string[] {
+  if (options.unitIds?.length === 0) return [];
+  const context = target.context;
+  const eligible = eligibleUnits({
+    ...historicalSelection(target),
+    unitIds: options.unitIds,
+    taxonomyVersion: context.taxonomy.version,
+    contractHash: context.contract,
+  });
+  return database
+    .prepare(
+      `WITH eligible AS MATERIALIZED (${eligible.sql})
+       SELECT eligible.unit_id FROM eligible
+       JOIN enrich_queue q ON q.unit_id = eligible.unit_id
+       WHERE (? IS NULL OR q.latest_activity_at > ?)
+       ORDER BY eligible.unit_id`,
+    )
+    .all(...eligible.params, options.after ?? null, options.after ?? null)
+    .map((row) => unitRow.parse(row).unit_id);
+}
+
 /** Current selected, completed public content only. Counters have their own clock;
  * pending, unselected, subscriber-only and retweet samples cannot advance it. */
 export function selectedObservationThrough(
@@ -58,7 +84,7 @@ export function selectedObservationThrough(
       ? undefined
       : database
           .prepare(
-            "SELECT DISTINCT unit_id FROM unit_members WHERE tweet_id IN (SELECT value FROM json_each(?))",
+            "SELECT DISTINCT unit_id FROM published_unit_members WHERE tweet_id IN (SELECT value FROM json_each(?))",
           )
           .all(JSON.stringify(postIds))
           .map((row) => unitRow.parse(row).unit_id);
@@ -116,9 +142,12 @@ function observationThrough(
         AND a.kind = 'free' AND a.name = ? AND a.name IN (SELECT json_extract(value, '$.name') FROM json_each(?))))
       ${privacySql}
     ), selected_posts AS MATERIALIZED (
-      SELECT DISTINCT m.tweet_id AS post_id FROM permitted p
-      JOIN unit_members m INDEXED BY idx_unit_members_current_access ON m.unit_id = p.unit_id
-      WHERE (? IS NULL OR m.tweet_id IN (SELECT value FROM json_each(?)))
+      SELECT DISTINCT published.tweet_id AS post_id FROM permitted p
+      JOIN published_unit_members published ON published.unit_id = p.unit_id
+      JOIN unit_members m INDEXED BY idx_unit_members_current_access
+        ON m.unit_id = published.unit_id AND m.tweet_id = published.tweet_id
+        AND m.content_hash = published.content_hash
+      WHERE (? IS NULL OR published.tweet_id IN (SELECT value FROM json_each(?)))
         AND m.is_retweet = 0
     ) SELECT MAX((
       SELECT o.observed_at FROM post_observations o INDEXED BY idx_observation_post_time
@@ -147,6 +176,9 @@ function observationThrough(
 
 function coveragePrivacySql(currentSource: boolean): string {
   if (currentSource) return "";
-  return `AND NOT EXISTS (SELECT 1 FROM unit_members m INDEXED BY idx_unit_members_current_access
-        WHERE m.unit_id = e.unit_id AND m.is_subscriber_only = 1)`;
+  return `AND NOT EXISTS (SELECT 1 FROM published_unit_members published
+        JOIN unit_members m INDEXED BY idx_unit_members_current_access
+          ON m.unit_id = published.unit_id AND m.tweet_id = published.tweet_id
+          AND m.content_hash = published.content_hash
+        WHERE published.unit_id = e.unit_id AND m.is_subscriber_only = 1)`;
 }

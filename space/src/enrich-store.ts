@@ -1173,19 +1173,7 @@ export class EnrichStore {
   candidateDetail(name: string): FreeLabelCandidateDetail | undefined {
     const row = this.registryEntry(name);
     if (row === undefined) return undefined;
-    const counts = this.db
-      .prepare(
-        `SELECT COUNT(DISTINCT a.unit_id) AS units,
-                COUNT(DISTINCT current.author_id) AS authors,
-                COUNT(DISTINCT substr(current.content_at, 1, 10)) AS days
-         FROM label_assignments a
-         JOIN published_unit_members published ON published.unit_id = a.unit_id
-         JOIN unit_members current ON current.unit_id = published.unit_id
-           AND current.tweet_id = published.tweet_id
-           AND current.content_hash = published.content_hash
-         WHERE a.kind = 'free' AND a.name = ?`,
-      )
-      .get(name) as { units: number; authors: number; days: number };
+    const counts = this.freeLabelSignals(name);
     const quotes = this.db
       .prepare(
         `SELECT unit_id, tweet_id, quote FROM label_evidence
@@ -1203,6 +1191,27 @@ export class EnrichStore {
       representative_quotes: quotes,
       ...(row.reason === null ? {} : { reason: row.reason }),
     };
+  }
+
+  private freeLabelSignals(
+    name: string,
+    eligible?: EligibleQuery,
+  ): { units: number; authors: number; days: number } {
+    const selected = eligible === undefined ? "" : ` AND a.unit_id IN (${eligible.sql})`;
+    return this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT a.unit_id) AS units,
+                COUNT(DISTINCT json_extract(tw.json, '$.author.id')) AS authors,
+                COUNT(DISTINCT substr(tw.captured_at, 1, 10)) AS days
+         FROM label_assignments a
+         JOIN published_unit_members published ON published.unit_id = a.unit_id
+         JOIN unit_members current ON current.unit_id = published.unit_id
+           AND current.tweet_id = published.tweet_id
+           AND current.content_hash = published.content_hash
+         JOIN tweets tw ON tw.id = published.tweet_id
+         WHERE a.kind = 'free' AND a.name = ?${selected}`,
+      )
+      .get(name, ...(eligible?.params ?? [])) as { units: number; authors: number; days: number };
   }
 
   /** Build, but do not apply, a durable candidate event for a new name. */
@@ -1371,21 +1380,7 @@ export class EnrichStore {
       taxonomyVersion: this.taxonomyVersion,
       contractHash: this.contractHash,
     });
-    const row = this.db
-      .prepare(
-        `SELECT COUNT(DISTINCT a.unit_id) AS units,
-                COUNT(DISTINCT current.author_id) AS authors,
-                COUNT(DISTINCT substr(current.content_at, 1, 10)) AS days
-         FROM label_assignments a
-         JOIN published_unit_members published ON published.unit_id = a.unit_id
-         JOIN unit_members current ON current.unit_id = published.unit_id
-           AND current.tweet_id = published.tweet_id
-           AND current.content_hash = published.content_hash
-         WHERE a.kind = 'free' AND a.name = ?
-           AND a.unit_id IN (${eligible.sql})`,
-      )
-      .get(name, ...eligible.params) as { units: number; authors: number; days: number };
-    return { units: row.units, authors: row.authors, days: row.days };
+    return this.freeLabelSignals(name, eligible);
   }
 
   queueProgress(): QueueDepth {
