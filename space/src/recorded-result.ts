@@ -79,3 +79,59 @@ export function recordedResults(
   }
   return results;
 }
+
+/** Find the newest accepted subset when a current unit only gained members. */
+export function recordedPublishedResults(
+  options: ResultSource & { unitIds: readonly string[] },
+): Map<string, EnrichmentRow> {
+  const unitIds = z.array(z.string().min(1)).max(200).parse(options.unitIds);
+  const results = new Map<string, EnrichmentRow>();
+  const invalidated = new Set<string>();
+  if (unitIds.length === 0) return results;
+  const rows = options.database
+    .prepare(
+      `WITH requested AS MATERIALIZED (
+        SELECT CAST(value AS TEXT) AS unit_id FROM json_each(@units)
+      ), candidates AS (
+        SELECT r.unit_id, r.payload_json, ROW_NUMBER() OVER (
+          PARTITION BY r.unit_id ORDER BY r.enriched_at DESC, r.result_hash DESC
+        ) AS position FROM requested q CROSS JOIN consumer_results r
+          ON r.rowid IN (
+            SELECT candidate.rowid FROM consumer_results candidate
+            WHERE candidate.unit_id = q.unit_id AND candidate.contract_hash = @contract
+              AND (@keys IS NULL OR EXISTS (
+                SELECT 1 FROM consumer_result_sources s INDEXED BY idx_consumer_result_source_hash
+                WHERE s.result_hash = candidate.result_hash
+                  AND +s.segment_key IN (SELECT value FROM json_each(@keys))))
+            ORDER BY candidate.enriched_at DESC, candidate.result_hash DESC LIMIT @limit
+          )
+      ) SELECT unit_id, payload_json, position FROM candidates
+        WHERE position <= @limit ORDER BY unit_id, position`,
+    )
+    .iterate({
+      units: JSON.stringify(unitIds),
+      contract: options.enrich.currentContractHash(),
+      keys: options.sourceKeys ?? null,
+      limit: MAX_CANDIDATES + 1,
+    });
+  for (const candidate of rows) acceptPublishedCandidate(options, candidate, results, invalidated);
+  return results;
+}
+
+function acceptPublishedCandidate(
+  options: ResultSource,
+  candidate: unknown,
+  results: Map<string, EnrichmentRow>,
+  invalidated: Set<string>,
+): void {
+  const parsed = candidateSchema.parse(candidate);
+  if (results.has(parsed.unit_id) || invalidated.has(parsed.unit_id)) return;
+  if (parsed.position > MAX_CANDIDATES)
+    throw new Error("recorded published result validation exceeds its candidate bound");
+  const row = enrichmentRowSchema.parse(JSON.parse(parsed.payload_json));
+  if (!options.enrich.matchesPublishedInput(row)) {
+    invalidated.add(parsed.unit_id);
+    return;
+  }
+  if (options.enrich.matchesPublishedUnit(row)) results.set(parsed.unit_id, row);
+}

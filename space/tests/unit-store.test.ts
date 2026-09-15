@@ -102,7 +102,7 @@ describe("UnitStore", () => {
     root.close();
   });
 
-  it("withholds a unit until enrichment covers its current membership", () => {
+  it("keeps the accepted members visible while added members wait for enrichment", () => {
     const tweets = new TweetStore();
     const enrich = newEnrich(tweets);
     const units = new UnitStore(tweets.database, 1);
@@ -117,10 +117,58 @@ describe("UnitStore", () => {
     tweets.insert([reply]);
     enrich.registerTweets([reply]);
     expect(enrich.queueEntry(unitId)?.status).toBe("pending");
-    expect(units.query({ labels: ["ai"] }).units).toHaveLength(0);
+    expect(units.query({ labels: ["ai"] }).units[0]?.posts.map((post) => post.id)).toEqual(["1"]);
+    for (const status of ["running", "retrying", "blocked"]) {
+      tweets.database
+        .prepare("UPDATE enrich_queue SET status = ? WHERE unit_id = ?")
+        .run(status, unitId);
+      expect(units.query({ labels: ["ai"] }).units[0]?.posts.map((post) => post.id)).toEqual(["1"]);
+    }
 
     enrich.applyEnrichment(enrichment([root, reply], unitId, ["ai"]));
     expect(units.query({ labels: ["ai"] }).units[0]?.posts).toHaveLength(2);
+    tweets.close();
+  });
+
+  it("keeps all contributors for an accepted post", () => {
+    const tweets = new TweetStore();
+    const enrich = newEnrich(tweets);
+    const units = new UnitStore(tweets.database, 1);
+    const first = pooled("1", { contributed_by: "one", text: "model alpha" });
+    const second = pooled("1", { contributed_by: "two", text: "model beta" });
+    tweets.insert([first, second]);
+    enrich.registerTweets([first, second]);
+    const selected = [first, second].find(
+      (post) =>
+        computeInputHashFromTweets(unitIdFor(post), [post]) ===
+        enrich.queueEntry(unitIdFor(post))?.inputHash,
+    );
+    if (selected === undefined) throw new Error("missing selected contributor copy");
+    enrich.applyEnrichment(enrichment([selected], unitIdFor(selected), ["ai"]));
+
+    expect(units.query({ labels: ["ai"] }).units[0]?.contributors).toEqual(["one", "two"]);
+    tweets.close();
+  });
+
+  it("withdraws accepted members when their content changes", () => {
+    const tweets = new TweetStore();
+    const enrich = newEnrich(tweets);
+    const units = new UnitStore(tweets.database, 1);
+    const root = pooled("1");
+    tweets.insert([root]);
+    enrich.registerTweets([root]);
+    const unitId = unitIdFor(root);
+    enrich.applyEnrichment(enrichment([root], unitId, ["ai"]));
+
+    const edited = pooled("1", {
+      text: "changed release",
+      captured_at: "2026-07-29T12:00:00.000Z",
+    });
+    tweets.insert([edited]);
+    enrich.registerTweets([edited]);
+
+    expect(enrich.queueEntry(unitId)?.status).toBe("pending");
+    expect(units.query({ labels: ["ai"] }).units).toEqual([]);
     tweets.close();
   });
 

@@ -359,11 +359,12 @@ function labelFilters(query: TweetQuery): Filter[] {
         filters.push({
           sql: `EXISTS (
                   SELECT 1 FROM label_assignments la
-                  JOIN unit_members um ON um.unit_id = la.unit_id
-                  JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
-                  JOIN enrichment e ON e.unit_id = eq.unit_id
-                    AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
-                  WHERE um.tweet_id = tweets.id AND la.kind = 'preset' AND la.name = ?
+                  JOIN published_unit_members published ON published.unit_id = la.unit_id
+                  JOIN unit_members current ON current.unit_id = published.unit_id
+                    AND current.tweet_id = published.tweet_id
+                    AND current.content_hash = published.content_hash
+                  WHERE published.tweet_id = tweets.id
+                    AND la.kind = 'preset' AND la.name = ?
                 )`,
           values: [label],
         });
@@ -371,11 +372,11 @@ function labelFilters(query: TweetQuery): Filter[] {
     } else {
       filters.push({
         sql: `tweets.id IN (
-                SELECT um.tweet_id FROM unit_members um
-                JOIN label_assignments la ON la.unit_id = um.unit_id
-                JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
-                JOIN enrichment e ON e.unit_id = eq.unit_id
-                  AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+                SELECT published.tweet_id FROM published_unit_members published
+                JOIN unit_members current ON current.unit_id = published.unit_id
+                  AND current.tweet_id = published.tweet_id
+                  AND current.content_hash = published.content_hash
+                JOIN label_assignments la ON la.unit_id = published.unit_id
                 WHERE la.kind = 'preset' AND la.name IN (${query.labels.map(() => "?").join(",")})
               )`,
         values: query.labels,
@@ -385,11 +386,11 @@ function labelFilters(query: TweetQuery): Filter[] {
   if (query.unlabeled === true) {
     filters.push({
       sql: `tweets.id NOT IN (
-              SELECT um.tweet_id FROM unit_members um
-              JOIN label_assignments la ON la.unit_id = um.unit_id
-              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
-              JOIN enrichment e ON e.unit_id = eq.unit_id
-                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+              SELECT published.tweet_id FROM published_unit_members published
+              JOIN unit_members current ON current.unit_id = published.unit_id
+                AND current.tweet_id = published.tweet_id
+                AND current.content_hash = published.content_hash
+              JOIN label_assignments la ON la.unit_id = published.unit_id
               WHERE la.kind = 'preset'
             )`,
       values: [],
@@ -403,11 +404,11 @@ function freeLabelFilters(query: TweetQuery): Filter[] {
   if (query.freeLabel !== undefined) {
     filters.push({
       sql: `tweets.id IN (
-              SELECT um.tweet_id FROM unit_members um
-              JOIN label_assignments la ON la.unit_id = um.unit_id
-              JOIN enrich_queue eq ON eq.unit_id = la.unit_id AND eq.status = 'done'
-              JOIN enrichment e ON e.unit_id = eq.unit_id
-                AND e.input_hash = eq.input_hash AND e.contract_hash = eq.contract_hash
+              SELECT published.tweet_id FROM published_unit_members published
+              JOIN unit_members current ON current.unit_id = published.unit_id
+                AND current.tweet_id = published.tweet_id
+                AND current.content_hash = published.content_hash
+              JOIN label_assignments la ON la.unit_id = published.unit_id
               JOIN free_label_registry r ON r.name = la.name AND r.status = 'approved'
               WHERE la.kind = 'free' AND la.name = ?
             )`,

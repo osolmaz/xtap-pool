@@ -134,6 +134,19 @@ describe("unit derivation and enqueue", () => {
     expect(entry?.attempts).toBe(0);
   });
 
+  it("backfills the last accepted members for an existing pending addition", () => {
+    insertAndRegister([{ id: "100", conversation_id: "100" }]);
+    enrich.applyEnrichment(row());
+    insertAndRegister([{ id: "101", conversation_id: "100", text: "new reply" }]);
+    store.database.prepare("DELETE FROM published_unit_members").run();
+
+    new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH);
+
+    expect(
+      store.database.prepare("SELECT tweet_id FROM published_unit_members ORDER BY tweet_id").all(),
+    ).toEqual([{ tweet_id: "100" }]);
+  });
+
   it("re-enqueues stale units after a taxonomy bump", () => {
     insertAndRegister([{ id: "100" }]);
     enrich.applyEnrichment(row());
@@ -490,7 +503,7 @@ describe("assignments and evidence", () => {
     expect(visible?.free_labels).toEqual([]);
   });
 
-  it("excludes stale assignments from registry promotion signals", () => {
+  it("keeps accepted assignments in promotion signals while added members wait", () => {
     insertAndRegister([{ id: "100", text: "vLLM ships fp8" }]);
     enrich.applyEnrichment(
       row({
@@ -503,7 +516,7 @@ describe("assignments and evidence", () => {
       { id: "101", conversation_id: "100", in_reply_to_status_id: "100", text: "new reply" },
     ]);
     expect(enrich.queueEntry("100:someone")?.status).toBe("pending");
-    expect(enrich.promotionSignals("fp8")).toEqual({ units: 0, authors: 0, days: 0 });
+    expect(enrich.promotionSignals("fp8")).toEqual({ units: 1, authors: 0, days: 1 });
   });
 });
 

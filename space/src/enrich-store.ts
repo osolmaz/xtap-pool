@@ -116,6 +116,14 @@ export function ensureEnrichmentTables(db: Database.Database): void {
       is_retweet INTEGER NOT NULL DEFAULT 0 CHECK (is_retweet IN (0, 1))
     );
     CREATE INDEX IF NOT EXISTS idx_unit_members_unit ON unit_members(unit_id, tweet_id);
+    CREATE TABLE IF NOT EXISTS published_unit_members (
+      unit_id TEXT NOT NULL,
+      tweet_id TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      PRIMARY KEY (unit_id, tweet_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS idx_published_unit_members_post
+      ON published_unit_members(tweet_id, unit_id);
     CREATE TABLE IF NOT EXISTS enrich_queue (
       unit_id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
@@ -201,6 +209,47 @@ export class EnrichStore {
   ) {
     this.contractHash = contractHash;
     ensureEnrichmentTables(db);
+    this.backfillPublishedMembers();
+  }
+
+  private backfillPublishedMembers(): void {
+    const hasResults = this.db.prepare("SELECT 1 FROM enrichment LIMIT 1").get() !== undefined;
+    const hasPublished =
+      this.db.prepare("SELECT 1 FROM published_unit_members LIMIT 1").get() !== undefined;
+    if (!hasResults || hasPublished) return;
+    const migrate = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO published_unit_members (unit_id, tweet_id, content_hash)
+           SELECT e.unit_id, CAST(member.value AS TEXT), current.content_hash
+           FROM enrichment e
+           JOIN enrich_queue q ON q.unit_id = e.unit_id
+             AND q.status = 'done' AND q.input_hash = e.input_hash
+             AND q.contract_hash = e.contract_hash
+           JOIN json_each(e.tweet_ids) member
+           JOIN unit_members current ON current.unit_id = e.unit_id
+             AND current.tweet_id = CAST(member.value AS TEXT)
+           WHERE e.taxonomy_version = ? AND e.contract_hash = ?`,
+        )
+        .run(this.taxonomyVersion, this.contractHash);
+      const pending = this.db
+        .prepare(
+          `SELECT e.unit_id, e.tweet_ids, e.input_hash FROM enrichment e
+           JOIN enrich_queue q ON q.unit_id = e.unit_id AND q.status != 'done'
+           WHERE e.taxonomy_version = ? AND e.contract_hash = ?`,
+        )
+        .all(this.taxonomyVersion, this.contractHash) as {
+        unit_id: string;
+        tweet_ids: string;
+        input_hash: string;
+      }[];
+      for (const row of pending) {
+        const tweetIds = z.array(z.string()).parse(JSON.parse(row.tweet_ids));
+        if (this.publishedInputMatches(row.unit_id, tweetIds, row.input_hash))
+          this.replacePublishedMembers(row.unit_id, tweetIds);
+      }
+    });
+    migrate();
   }
 
   setContractHash(contractHash: string): void {
@@ -210,6 +259,7 @@ export class EnrichStore {
       for (const table of [
         "label_evidence",
         "label_assignments",
+        "published_unit_members",
         "enrichment",
         "free_label_registry",
         "recent_errors",
@@ -253,6 +303,7 @@ export class EnrichStore {
       for (const table of [
         "label_evidence",
         "label_assignments",
+        "published_unit_members",
         "enrichment",
         "enrich_queue",
         "unit_members",
@@ -345,6 +396,7 @@ export class EnrichStore {
         access.isSubscriberOnly,
         access.isRetweet,
       );
+    this.invalidateChangedPublishedMember(tweetId, unitId, content.hash);
     return {
       dirty:
         existing?.content_hash !== content.hash ||
@@ -354,6 +406,21 @@ export class EnrichStore {
         ? { previousUnitId: existing.unit_id }
         : {}),
     };
+  }
+
+  private invalidateChangedPublishedMember(
+    tweetId: string,
+    unitId: string,
+    contentHash: string,
+  ): void {
+    const published = this.db
+      .prepare("SELECT unit_id, content_hash FROM published_unit_members WHERE tweet_id = ?")
+      .get(tweetId) as { unit_id: string; content_hash: string } | undefined;
+    if (
+      published !== undefined &&
+      (published.unit_id !== unitId || published.content_hash !== contentHash)
+    )
+      this.clearPublishedEnrichment(published.unit_id);
   }
 
   private refreshQueueForUnit(unitId: string): void {
@@ -454,10 +521,15 @@ export class EnrichStore {
   }
 
   private clearUnitEnrichment(unitId: string): void {
+    this.clearPublishedEnrichment(unitId);
+    this.db.prepare("DELETE FROM enrich_queue WHERE unit_id = ?").run(unitId);
+  }
+
+  private clearPublishedEnrichment(unitId: string): void {
     this.db.prepare("DELETE FROM label_assignments WHERE unit_id = ?").run(unitId);
     this.db.prepare("DELETE FROM label_evidence WHERE unit_id = ?").run(unitId);
+    this.db.prepare("DELETE FROM published_unit_members WHERE unit_id = ?").run(unitId);
     this.db.prepare("DELETE FROM enrichment WHERE unit_id = ?").run(unitId);
-    this.db.prepare("DELETE FROM enrich_queue WHERE unit_id = ?").run(unitId);
   }
 
   private hasCurrentEnrichment(unitId: string, inputHash: string): boolean {
@@ -482,6 +554,15 @@ export class EnrichStore {
   }
 
   private semanticMembersFor(unitId: string): SemanticTweetFields[] {
+    return this.semanticMembersForIds(unitId);
+  }
+
+  private semanticMembersForIds(
+    unitId: string,
+    tweetIds?: readonly string[],
+  ): SemanticTweetFields[] {
+    const memberWhere =
+      tweetIds === undefined ? "" : " AND um.tweet_id IN (SELECT value FROM json_each(?))";
     const rows = this.db
       .prepare(
         `SELECT tweets.json FROM (
@@ -489,12 +570,45 @@ export class EnrichStore {
                   ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY ${POST_ORDER}) AS rn
            FROM tweets
            JOIN unit_members um ON um.tweet_id = tweets.id
-           WHERE um.unit_id = ?
+           WHERE um.unit_id = ?${memberWhere}
          ) picks JOIN tweets ON tweets.rowid = picks.rowid
          WHERE picks.rn = 1 ORDER BY tweets.id`,
       )
-      .all(unitId) as { json: string }[];
+      .all(unitId, ...(tweetIds === undefined ? [] : [JSON.stringify(tweetIds)])) as {
+      json: string;
+    }[];
     return rows.map((row) => semanticTweetFields(JSON.parse(row.json) as PooledTweet));
+  }
+
+  private publishedInputMatches(
+    unitId: string,
+    tweetIds: readonly string[],
+    inputHash: string,
+  ): boolean {
+    const uniqueIds = [...new Set(tweetIds)];
+    if (uniqueIds.length === 0 || uniqueIds.length !== tweetIds.length) return false;
+    const members = this.semanticMembersForIds(unitId, uniqueIds);
+    return members.length === uniqueIds.length && computeInputHash(unitId, members) === inputHash;
+  }
+
+  private replacePublishedMembers(unitId: string, tweetIds: readonly string[]): void {
+    const uniqueIds = [...new Set(tweetIds)];
+    const rows = this.db
+      .prepare(
+        `SELECT tweet_id, content_hash FROM unit_members
+         WHERE unit_id = ? AND tweet_id IN (SELECT value FROM json_each(?))
+         ORDER BY tweet_id`,
+      )
+      .all(unitId, JSON.stringify(uniqueIds)) as { tweet_id: string; content_hash: string }[];
+    if (uniqueIds.length === 0 || rows.length !== uniqueIds.length) {
+      throw new Error("published unit members do not match current membership");
+    }
+    this.db.prepare("DELETE FROM published_unit_members WHERE unit_id = ?").run(unitId);
+    const insert = this.db.prepare(
+      `INSERT INTO published_unit_members (unit_id, tweet_id, content_hash)
+       VALUES (?, ?, ?)`,
+    );
+    for (const row of rows) insert.run(unitId, row.tweet_id, row.content_hash);
   }
 
   private latestActivityAt(unitId: string): string {
@@ -534,7 +648,9 @@ export class EnrichStore {
   }
 
   /** Return tweet text keyed by id for evidence-quote validation. */
-  unitTweetTexts(unitId: string): Map<string, string> {
+  unitTweetTexts(unitId: string, tweetIds?: readonly string[]): Map<string, string> {
+    const memberWhere =
+      tweetIds === undefined ? "" : " AND um.tweet_id IN (SELECT value FROM json_each(?))";
     const rows = this.db
       .prepare(
         `SELECT id, text FROM (
@@ -542,10 +658,13 @@ export class EnrichStore {
                   ROW_NUMBER() OVER (PARTITION BY tweets.id ORDER BY ${POST_ORDER}) AS rn
            FROM tweets
            JOIN unit_members um ON um.tweet_id = tweets.id
-           WHERE um.unit_id = ?
+           WHERE um.unit_id = ?${memberWhere}
          ) WHERE rn = 1`,
       )
-      .all(unitId) as { id: string; text: string }[];
+      .all(unitId, ...(tweetIds === undefined ? [] : [JSON.stringify(tweetIds)])) as {
+      id: string;
+      text: string;
+    }[];
     return new Map(rows.map((row) => [row.id, row.text]));
   }
 
@@ -774,34 +893,39 @@ export class EnrichStore {
   }
 
   /**
-   * Upsert one enrichment result: rewrite the unit's evidence-bearing label
-   * assignments, then settle the queue entry when the row covers the unit's
-   * current membership and hashes. Legacy rows without evidence never settle
-   * the queue on replay.
+   * Publish one enrichment result for the exact current unit, then settle its
+   * working queue entry. Legacy or stale rows remain in the raw log but cannot
+   * replace the published version.
    */
   applyEnrichment(row: EnrichmentRow): void {
+    this.applyResult(row, true);
+  }
+
+  /** Publish a previously accepted unchanged subset while newer members wait. */
+  applyPublishedEnrichment(row: EnrichmentRow): void {
+    this.applyResult(row, false);
+  }
+
+  private applyResult(row: EnrichmentRow, requireCurrent: boolean): void {
     const apply = this.db.transaction((input: EnrichmentRow) => {
       const { row: enrichment, hash } = resultIdentity(input);
-      if (this.unitMemberIds(enrichment.unit_id).length === 0) {
-        return;
-      }
-      // Historical rows, rows from another contract, and stale rows may be
-      // retained in the append-only Bucket log, but must never erase a current
-      // projection or seed registry state during replay.
-      if (!this.matchesCurrentUnit(enrichment)) return;
-      if (this.hasNewerResult(enrichment, hash)) return;
-      // Wipe previous assignments/evidence and rewrite from the new row.
+      if (this.unitMemberIds(enrichment.unit_id).length === 0) return;
+      const valid = requireCurrent
+        ? this.matchesCurrentUnit(enrichment)
+        : this.matchesPublishedUnit(enrichment);
+      if (!valid || this.hasNewerResult(enrichment, hash, !requireCurrent)) return;
       this.db.prepare("DELETE FROM label_assignments WHERE unit_id = ?").run(enrichment.unit_id);
       this.db.prepare("DELETE FROM label_evidence WHERE unit_id = ?").run(enrichment.unit_id);
       this.writeAssignments(enrichment.unit_id, enrichment.preset_labels, "preset");
       this.writeAssignments(enrichment.unit_id, enrichment.free_labels, "free");
       this.upsertEnrichmentRow(enrichment);
+      this.replacePublishedMembers(enrichment.unit_id, enrichment.tweet_ids);
       this.settleQueueForRow(enrichment);
     });
     apply(row);
   }
 
-  private hasNewerResult(row: EnrichmentRow, hash: string): boolean {
+  private hasNewerResult(row: EnrichmentRow, hash: string, compareAnyInput = false): boolean {
     const saved = this.db
       .prepare("SELECT enriched_at, input_hash, result_hash FROM enrichment WHERE unit_id = ?")
       .get(row.unit_id);
@@ -815,7 +939,7 @@ export class EnrichStore {
       .parse(saved);
     const at = new Date(existing.enriched_at).toISOString();
     return (
-      existing.input_hash === row.input_hash &&
+      (compareAnyInput || existing.input_hash === row.input_hash) &&
       (at > row.enriched_at || (at === row.enriched_at && existing.result_hash >= hash))
     );
   }
@@ -844,19 +968,35 @@ export class EnrichStore {
     this.settleDone(row.unit_id, row.input_hash, this.latestActivityAt(row.unit_id));
   }
 
-  /** A row may project labels only when it exactly matches current membership. */
+  /** A row may settle working state only when it covers exact current membership. */
   matchesCurrentUnit(row: EnrichmentRow): boolean {
+    const members = this.unitMemberIds(row.unit_id);
+    return (
+      this.matchesPublishedUnit(row) &&
+      row.tweet_ids.length === members.length &&
+      members.every((id) => row.tweet_ids.includes(id))
+    );
+  }
+
+  /** A prior result input remains usable only while every covered member is unchanged. */
+  matchesPublishedInput(row: EnrichmentRow): boolean {
     if (!isCurrentEnrichmentRow(row)) return false;
     if (row.taxonomy_version !== this.taxonomyVersion || row.contract_hash !== this.contractHash) {
       return false;
     }
-    const members = this.unitMemberIds(row.unit_id);
     const covered = new Set(row.tweet_ids);
-    if (covered.size !== members.length || !members.every((id) => covered.has(id))) return false;
-    if (row.input_hash !== computeInputHash(row.unit_id, this.semanticMembersFor(row.unit_id))) {
-      return false;
-    }
-    const texts = this.unitTweetTexts(row.unit_id);
+    if (covered.size !== row.tweet_ids.length || covered.size === 0) return false;
+    const current = new Set(this.unitMemberIds(row.unit_id));
+    return (
+      [...covered].every((id) => current.has(id)) &&
+      this.publishedInputMatches(row.unit_id, row.tweet_ids, row.input_hash)
+    );
+  }
+
+  /** A prior result remains publishable while current membership only adds posts. */
+  matchesPublishedUnit(row: EnrichmentRow): boolean {
+    if (!this.matchesPublishedInput(row)) return false;
+    const texts = this.unitTweetTexts(row.unit_id, row.tweet_ids);
     return [...row.preset_labels, ...row.free_labels].every(
       (assignment) => validateEvidenceQuotes(assignment, texts).ok,
     );
@@ -1036,11 +1176,13 @@ export class EnrichStore {
     const counts = this.db
       .prepare(
         `SELECT COUNT(DISTINCT a.unit_id) AS units,
-                COUNT(DISTINCT json_extract(tw.json, '$.author.id')) AS authors,
-                COUNT(DISTINCT substr(tw.captured_at, 1, 10)) AS days
+                COUNT(DISTINCT current.author_id) AS authors,
+                COUNT(DISTINCT substr(current.content_at, 1, 10)) AS days
          FROM label_assignments a
-         JOIN unit_members um ON um.unit_id = a.unit_id
-         JOIN tweets tw ON tw.id = um.tweet_id
+         JOIN published_unit_members published ON published.unit_id = a.unit_id
+         JOIN unit_members current ON current.unit_id = published.unit_id
+           AND current.tweet_id = published.tweet_id
+           AND current.content_hash = published.content_hash
          WHERE a.kind = 'free' AND a.name = ?`,
       )
       .get(name) as { units: number; authors: number; days: number };
@@ -1232,11 +1374,13 @@ export class EnrichStore {
     const row = this.db
       .prepare(
         `SELECT COUNT(DISTINCT a.unit_id) AS units,
-                COUNT(DISTINCT json_extract(tw.json, '$.author.id')) AS authors,
-                COUNT(DISTINCT substr(tw.captured_at, 1, 10)) AS days
+                COUNT(DISTINCT current.author_id) AS authors,
+                COUNT(DISTINCT substr(current.content_at, 1, 10)) AS days
          FROM label_assignments a
-         JOIN unit_members um ON um.unit_id = a.unit_id
-         JOIN tweets tw ON tw.id = um.tweet_id
+         JOIN published_unit_members published ON published.unit_id = a.unit_id
+         JOIN unit_members current ON current.unit_id = published.unit_id
+           AND current.tweet_id = published.tweet_id
+           AND current.content_hash = published.content_hash
          WHERE a.kind = 'free' AND a.name = ?
            AND a.unit_id IN (${eligible.sql})`,
       )
@@ -1362,8 +1506,8 @@ export class EnrichStore {
       .get(name, ...eligible.params) as { unit_count: number };
     const tweetCount = this.db
       .prepare(
-        `SELECT COUNT(DISTINCT um.tweet_id) AS n FROM label_assignments a
-         JOIN unit_members um ON um.unit_id = a.unit_id
+        `SELECT COUNT(DISTINCT published.tweet_id) AS n FROM label_assignments a
+         JOIN published_unit_members published ON published.unit_id = a.unit_id
          WHERE a.kind = 'free' AND a.name = ? AND a.unit_id IN (${eligible.sql})`,
       )
       .get(name, ...eligible.params) as { n: number };
@@ -1569,15 +1713,17 @@ type EligibleUnitOptions = UnitSelection & {
 export function eligibleUnits(options: EligibleUnitOptions): { sql: string; params: unknown[] } {
   const labels = options.labels ?? [];
   const labelPlaceholders = labels.map(() => "?").join(",");
-  const finalizedJoins = `JOIN enrichment e ON e.unit_id = um.unit_id AND e.taxonomy_version = ? AND e.contract_hash = ?
-            JOIN enrich_queue q ON q.unit_id = um.unit_id
-              AND q.taxonomy_version = ? AND q.status = 'done'`;
+  const finalizedJoins = `JOIN unit_members current_um ON current_um.unit_id = um.unit_id
+              AND current_um.tweet_id = um.tweet_id
+              AND current_um.content_hash = um.content_hash
+            JOIN enrichment e ON e.unit_id = um.unit_id
+              AND e.taxonomy_version = ? AND e.contract_hash = ?`;
   const unitWhere =
     options.unitIds === undefined ? "" : " AND um.unit_id IN (SELECT value FROM json_each(?))";
-  const selection = `${cutoffWhere(options.cutoff)}${authorWhere(options.authorIds, "um.unit_id")}${publicationWhere(
-    options.publication,
+  const selection = `${publishedCutoffWhere(options.cutoff)}${publishedAuthorWhere(
+    options.authorIds,
     "um.unit_id",
-  )}`;
+  )}${publishedPublicationWhere(options.publication, "um.unit_id")}`;
   // A unit can have many members and match several labels. Deduplicate before
   // reading post bodies for publication/author checks, not after those checks.
   const selected = (sql: string) =>
@@ -1587,13 +1733,12 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
   const authorParams = options.authorIds ?? [];
   if (labels.length === 0) {
     return {
-      sql: selected(`SELECT DISTINCT um.unit_id FROM unit_members um
+      sql: selected(`SELECT DISTINCT um.unit_id FROM published_unit_members um
             ${finalizedJoins}
             WHERE 1 = 1${unitWhere}`),
       params: [
         options.taxonomyVersion,
         options.contractHash,
-        options.taxonomyVersion,
         ...unitParams,
         ...cutoffParams,
         ...authorParams,
@@ -1602,14 +1747,13 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
   }
   if (options.labelMode !== "all") {
     return {
-      sql: selected(`SELECT DISTINCT um.unit_id FROM unit_members um
+      sql: selected(`SELECT DISTINCT um.unit_id FROM published_unit_members um
             ${finalizedJoins}
             JOIN label_assignments la ON la.unit_id = um.unit_id AND la.kind = 'preset'
             WHERE la.name IN (${labelPlaceholders})${unitWhere}`),
       params: [
         options.taxonomyVersion,
         options.contractHash,
-        options.taxonomyVersion,
         ...labels,
         ...unitParams,
         ...cutoffParams,
@@ -1618,7 +1762,7 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
     };
   }
   return {
-    sql: selected(`SELECT um.unit_id FROM unit_members um
+    sql: selected(`SELECT um.unit_id FROM published_unit_members um
           ${finalizedJoins}
           JOIN label_assignments la ON la.unit_id = um.unit_id AND la.kind = 'preset'
           WHERE la.name IN (${labelPlaceholders})${unitWhere}
@@ -1626,7 +1770,6 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
     params: [
       options.taxonomyVersion,
       options.contractHash,
-      options.taxonomyVersion,
       ...labels,
       ...unitParams,
       labels.length,
@@ -1634,6 +1777,53 @@ export function eligibleUnits(options: EligibleUnitOptions): { sql: string; para
       ...authorParams,
     ],
   };
+}
+
+function publishedCutoffWhere(cutoff: string | undefined): string {
+  if (cutoff === undefined) return "";
+  return ` AND (
+    SELECT MAX(current.content_at) FROM published_unit_members published
+    JOIN unit_members current ON current.unit_id = published.unit_id
+      AND current.tweet_id = published.tweet_id
+      AND current.content_hash = published.content_hash
+    WHERE published.unit_id = um.unit_id
+  ) <= ?`;
+}
+
+function publishedAuthorWhere(authorIds: readonly string[] | undefined, unitIdSql: string): string {
+  if (authorIds === undefined || authorIds.length === 0) return "";
+  const placeholders = authorIds.map(() => "?").join(",");
+  return ` AND NOT EXISTS (
+    SELECT 1 FROM published_unit_members published
+    JOIN unit_members current INDEXED BY idx_unit_members_current_access
+      ON current.unit_id = published.unit_id
+      AND current.tweet_id = published.tweet_id
+      AND current.content_hash = published.content_hash
+    WHERE published.unit_id = ${unitIdSql}
+      AND (current.author_id IS NULL OR current.author_id NOT IN (${placeholders}))
+  )`;
+}
+
+function publishedPublicationWhere(
+  publication: UnitSelection["publication"],
+  unitIdSql: string,
+): string {
+  if (publication !== "public-original") return "";
+  return ` AND NOT EXISTS (
+    SELECT 1 FROM published_unit_members published
+    JOIN unit_members current INDEXED BY idx_unit_members_current_access
+      ON current.unit_id = published.unit_id
+      AND current.tweet_id = published.tweet_id
+      AND current.content_hash = published.content_hash
+    WHERE published.unit_id = ${unitIdSql} AND current.is_subscriber_only = 1
+  ) AND EXISTS (
+    SELECT 1 FROM published_unit_members published
+    JOIN unit_members current INDEXED BY idx_unit_members_current_access
+      ON current.unit_id = published.unit_id
+      AND current.tweet_id = published.tweet_id
+      AND current.content_hash = published.content_hash
+    WHERE published.unit_id = ${unitIdSql} AND current.is_retweet = 0
+  )`;
 }
 
 function selectedUnits(options: UnitSelection): { sql: string; params: unknown[] } {

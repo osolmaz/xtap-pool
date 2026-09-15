@@ -2,7 +2,7 @@
 title: Incremental consumer HTTP contract
 author: Onur Solmaz <2453968+osolmaz@users.noreply.github.com>
 date: 2026-09-07
-updated: 2026-09-10
+updated: 2026-09-15
 tags: [consumer-api, implementation]
 ---
 
@@ -46,6 +46,8 @@ All bootstrap and change responses have exactly these fields:
 The two coverage timestamps are null or UTC. Observation freshness does not promise complete observation coverage. The source identifies the exact raw object set, including late arrivals.
 
 Changes are the existing `metadata`, `unit_upsert`, `unit_remove`, and `observation` variants in `consumer-page.ts`. Bootstrap starts with a metadata-only page, even for an empty selection. Continue that page to receive upserts or the empty final page. The signed `metadata_sent` field prevents repeats at `limit=1`. Changes emit metadata only when the frozen taxonomy or approved registry state differs. Registry counters and coverage movement alone do not cause metadata changes.
+
+A visible unit is the last accepted enrichment result and the exact posts that result covered. If a new same-author reply joins the thread, the accepted posts stay visible while the expanded thread waits for enrichment. The API emits no removal for that pending work. A semantic edit, access restriction, or unit move for an accepted post withdraws the saved version immediately. A completed replacement then emits an upsert or a normal selection-based removal.
 
 Each `unit_upsert` has exactly `type`, `content_hash`, `post_content_hashes`, and `unit`:
 

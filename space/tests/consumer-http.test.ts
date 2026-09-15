@@ -4,6 +4,7 @@ import {
   consumerHistoryEnvelopeSchema,
 } from "../src/consumer-http-contract.js";
 import { ConsumerRuntime } from "../src/consumer-runtime.js";
+import type { ConsumerChange } from "../src/consumer-page.js";
 import { ConsumerContractChanged } from "../src/consumer-cursor.js";
 import { ConsumerHttpError } from "../src/consumer-errors.js";
 import { BOOTSTRAP, consumerFixture, consumerTweet } from "./consumer-http-fixture.js";
@@ -34,6 +35,32 @@ const history = (at: string, extra = "") =>
   `/api/observations?at=${at}&post_ids=100&since=2026-09-05T00:00:00Z&until=2026-09-07T00:00:00Z${extra}`;
 
 describe("incremental consumer HTTP", () => {
+  it("bootstraps the accepted posts while an added reply waits for enrichment", async () => {
+    const root = consumerTweet();
+    await f.post(root);
+    await f.post(
+      consumerTweet("101", {
+        conversation_id: root.id,
+        text: "more model details",
+        captured_at: "2026-09-06T06:00:00.000Z",
+      }),
+      false,
+    );
+    const changes: ConsumerChange[] = [];
+    let result = await page(BOOTSTRAP);
+    changes.push(...result.changes);
+    while (result.has_more) {
+      result = await page(`/api/units?cursor=${result.cursor}`);
+      changes.push(...result.changes);
+    }
+
+    expect(
+      changes.flatMap((change) =>
+        change.type === "unit_upsert" ? [change.unit.posts.map((post) => post.id)] : [],
+      ),
+    ).toEqual([[root.id]]);
+  });
+
   it("resumes metadata-only limit=1 pages after restart and excludes late writes until the next cycle", async () => {
     await f.post(consumerTweet());
     await f.post(consumerTweet("200"));
