@@ -106,7 +106,7 @@ describe("changed-source request boundaries", () => {
       error: {
         code: "deadline_exceeded",
         message:
-          "The consumer read deadline expired while reading source changes. Retry the same cursor.",
+          "The consumer read deadline expired while reading source page. Retry the same cursor.",
       },
     });
   });
