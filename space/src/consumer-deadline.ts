@@ -2,27 +2,31 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { ConsumerHttpError } from "./consumer-errors.js";
 
 export const CONSUMER_DEADLINE_MS = 60_000;
-/** A changed source can require an exact full-selection coverage calculation.
- * Only that stage extends the request's absolute deadline. SQLite remains in
- * the same killable child process and every other read keeps the short bound. */
-export const CONSUMER_COVERAGE_DEADLINE_MS = 5 * 60_000;
+/** A changed source can require an exact full-selection coverage calculation or
+ * large change pages. Only those stages extend the request's absolute deadline.
+ * SQLite remains in the same killable child process and every other read keeps
+ * the short bound. */
+export const CONSUMER_LONG_READ_DEADLINE_MS = 5 * 60_000;
 type Stage =
   | "waiting for the index"
   | "loading source metadata"
   | "calculating source coverage"
   | "saving source metadata"
-  | "reading source changes";
+  | "reading source changes"
+  | "reading source page";
 type DeadlineContext = {
   signal: AbortSignal;
   stage?: Stage;
-  extendForCoverage: () => void;
+  extendDeadline: () => void;
 };
 const signals = new AsyncLocalStorage<DeadlineContext>();
 export function consumerStage(stage: Stage): void {
   const context = signals.getStore();
   if (context === undefined) return;
   context.stage = stage;
-  if (stage === "calculating source coverage") context.extendForCoverage();
+  if (stage === "calculating source coverage" || stage === "reading source changes") {
+    context.extendDeadline();
+  }
 }
 export function consumerTimeout(stage?: Stage): ConsumerHttpError {
   return new ConsumerHttpError(
@@ -37,23 +41,23 @@ export async function withConsumerDeadline<T>(
   requestSignal: AbortSignal,
   limits: {
     milliseconds?: number;
-    coverageMilliseconds?: number;
+    longReadMilliseconds?: number;
   } = {},
 ): Promise<T> {
   const milliseconds = limits.milliseconds ?? CONSUMER_DEADLINE_MS;
-  const coverageMilliseconds = limits.coverageMilliseconds ?? CONSUMER_COVERAGE_DEADLINE_MS;
+  const longReadMilliseconds = limits.longReadMilliseconds ?? CONSUMER_LONG_READ_DEADLINE_MS;
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, requestSignal]);
   const started = Date.now();
   let timer: ReturnType<typeof setTimeout>;
-  let coverageExtended = false;
+  let deadlineExtended = false;
   const context: DeadlineContext = {
     signal,
-    extendForCoverage: () => {
-      if (coverageExtended) return;
-      coverageExtended = true;
+    extendDeadline: () => {
+      if (deadlineExtended) return;
+      deadlineExtended = true;
       clearTimeout(timer);
-      timer = deadlineTimer(controller, context, coverageMilliseconds - (Date.now() - started));
+      timer = deadlineTimer(controller, context, longReadMilliseconds - (Date.now() - started));
     },
   };
   timer = deadlineTimer(controller, context, milliseconds);

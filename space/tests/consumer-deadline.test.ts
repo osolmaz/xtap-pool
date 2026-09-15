@@ -1,42 +1,59 @@
 import { afterEach, expect, it, vi } from "vitest";
 import {
-  CONSUMER_COVERAGE_DEADLINE_MS,
   CONSUMER_DEADLINE_MS,
+  CONSUMER_LONG_READ_DEADLINE_MS,
   consumerStage,
   withConsumerDeadline,
 } from "../src/consumer-deadline.js";
 
 afterEach(() => vi.useRealTimers());
 
-it("extends only the bounded production coverage stage", () => {
+it("keeps a bounded production deadline for long source reads", () => {
   expect(CONSUMER_DEADLINE_MS).toBe(60_000);
-  expect(CONSUMER_COVERAGE_DEADLINE_MS).toBe(5 * 60_000);
+  expect(CONSUMER_LONG_READ_DEADLINE_MS).toBe(5 * 60_000);
 });
 
 function pending(): Promise<never> {
   return new Promise(() => undefined);
 }
 
-it("reports the stage where a read exhausted its coverage deadline", async () => {
+it.each(["calculating source coverage" as const, "reading source changes" as const])(
+  "reports the stage where %s exhausted its long-read deadline",
+  async (stage) => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const read = withConsumerDeadline(
+      (active) => {
+        signal = active;
+        consumerStage(stage);
+        return pending();
+      },
+      new AbortController().signal,
+      { milliseconds: 20, longReadMilliseconds: 50 },
+    );
+    const checked = expect(read).rejects.toMatchObject({
+      code: "deadline_exceeded",
+      message: `The consumer read deadline expired while ${stage}. Retry the same cursor.`,
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(30);
+    await checked;
+  },
+);
+
+it("keeps ordinary source pages on the short deadline", async () => {
   vi.useFakeTimers();
-  let signal: AbortSignal | undefined;
   const read = withConsumerDeadline(
-    (active) => {
-      signal = active;
-      consumerStage("calculating source coverage");
+    () => {
+      consumerStage("reading source page");
       return pending();
     },
     new AbortController().signal,
-    { milliseconds: 20, coverageMilliseconds: 50 },
+    { milliseconds: 20, longReadMilliseconds: 50 },
   );
-  const checked = expect(read).rejects.toMatchObject({
-    code: "deadline_exceeded",
-    message:
-      "The consumer read deadline expired while calculating source coverage. Retry the same cursor.",
-  });
+  const checked = expect(read).rejects.toThrow("while reading source page");
   await vi.advanceTimersByTimeAsync(20);
-  expect(signal?.aborted).toBe(false);
-  await vi.advanceTimersByTimeAsync(30);
   await checked;
 });
 
@@ -49,7 +66,7 @@ it("keeps stage names separate for concurrent requests", async () => {
         return pending();
       },
       new AbortController().signal,
-      { milliseconds: 20, coverageMilliseconds: 50 },
+      { milliseconds: 20, longReadMilliseconds: 50 },
     ),
   );
   const checked = Promise.all([

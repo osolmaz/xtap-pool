@@ -69,7 +69,7 @@ export class ConsumerRuntime {
     return withConsumerDeadline(
       (signal) => this.lockedRead(route, query, limit, signal, authorize),
       request.signal,
-      deadline === undefined ? {} : { milliseconds: deadline, coverageMilliseconds: deadline },
+      deadline === undefined ? {} : { milliseconds: deadline, longReadMilliseconds: deadline },
     );
   }
 
@@ -379,7 +379,11 @@ export class ConsumerRuntime {
     limit: number,
     signal: AbortSignal,
   ): Promise<Response> {
-    consumerStage("reading source changes");
+    consumerStage(
+      sequence.base !== undefined && sequence.reconciliation === undefined
+        ? "reading source changes"
+        : "reading source page",
+    );
     if (sequence.reconciliation !== undefined)
       return this.reconcile(sequence, current, limit, signal);
     try {
