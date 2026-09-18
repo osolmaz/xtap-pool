@@ -10,6 +10,7 @@ import {
   applyClaimedWorkerSegments,
   canStartPlannedPublication,
   applyDurableOutput,
+  enrichmentProgressRunId,
   outputsFromSegment,
   parseSourceSegments,
   readRunOutputKeys,
@@ -47,6 +48,18 @@ it("starts publication only with the full reserved time remaining", () => {
     }),
   ).toThrow("physical timeout");
 });
+
+it("starts a fresh progress stream after a worker revision handoff", () => {
+  const logicalRunId = "xtap-a148890be8a18f8f3b3f45528cff83bb";
+  const first = enrichmentProgressRunId(logicalRunId, "a".repeat(40));
+  const repeated = enrichmentProgressRunId(logicalRunId, "a".repeat(40));
+  const repaired = enrichmentProgressRunId(logicalRunId, "b".repeat(40));
+
+  expect(first).toMatch(/^xtap-[a-f0-9]{32}$/u);
+  expect(repeated).toBe(first);
+  expect(repaired).not.toBe(first);
+});
+
 const SEGMENT = `v1/segments/attempt/2026/08/19/1787140800000-11111111-1111-4111-8111-111111111111-${"b".repeat(64)}.json.gz`;
 
 class MemoryObjects implements CheckpointObjectStore {

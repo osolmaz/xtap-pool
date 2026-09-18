@@ -141,6 +141,14 @@ export function runSinglePlannedEnrichmentAttempt(options: {
   });
 }
 
+export function enrichmentProgressRunId(logicalRunId: string, workerRevision: string): string {
+  const digest = createHash("sha256")
+    .update(`${logicalRunId}:${workerRevision}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `xtap-${digest}`;
+}
+
 export async function runPlannedEnrichmentCommand(
   env: Record<string, string | undefined>,
   options: { deploymentManifest: DeploymentManifest },
@@ -468,7 +476,10 @@ async function runSinglePlannedEnrichmentRun(
         accessToken: config.hfToken,
         sourceRevision: plan.source.snapshot_revision,
         contractHash,
-        env: { ...env, XTAP_PROGRESS_RUN_ID: runId },
+        env: {
+          ...env,
+          XTAP_PROGRESS_RUN_ID: enrichmentProgressRunId(runId, targetWorkerRevision),
+        },
       });
   const baseCheckpointStore = restoreOnly
     ? preflightStore
