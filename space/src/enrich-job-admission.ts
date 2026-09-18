@@ -1,29 +1,21 @@
-import { listJobs } from "@huggingface/hub";
-import { z } from "zod";
+import { createRawBucketClient } from "./bucket-log.js";
+import type { BucketObject, RawBucketClient } from "./bucket-log.js";
 
-const ACTIVE_JOB_STAGES = new Set(["PAUSED", "RUNNING", "SCHEDULING", "UPDATING"]);
-const ENRICHMENT_LABELS = {
-  app: "xtap-pool",
-  component: "enrichment",
-} as const;
+const SOURCE_REVISION = /^[a-f0-9]{40}$/u;
+const PHYSICAL_JOB_ID = /^[a-f0-9]{24}$/u;
 const DEFAULT_SETTLE_MS = 15_000;
 const DEFAULT_CONFIRMATION_MS = 2_000;
-
-const physicalJobSchema = z
-  .object({
-    id: z.string().min(1),
-    status: z.object({ stage: z.string().min(1) }).loose(),
-    labels: z.record(z.string(), z.string()).nullish(),
-  })
-  .loose();
+const CONTENDER_WINDOW_MS = 5 * 60_000;
 
 export type EnrichmentJobAdmission = {
   admitted: true;
   jobId?: string;
 };
 
+type AdmissionClient = Pick<RawBucketClient, "list" | "upload">;
+
 type AdmissionDependencies = {
-  listJobs?: (namespace: string, accessToken: string) => Promise<unknown>;
+  client?: AdmissionClient;
   sleep?: (milliseconds: number) => Promise<void>;
   settleMs?: number;
   confirmationMs?: number;
@@ -37,64 +29,113 @@ export async function admitSingleEnrichmentJob(
   if (jobId === undefined) return { admitted: true };
 
   const accessToken = required(env, "HF_TOKEN");
-  const sourceRevision = required(env, "XTAP_SOURCE_REVISION");
-  const namespace = bucketNamespace(required(env, "INDEX_BUCKET"));
-  const readJobs =
-    dependencies.listJobs ??
-    ((owner: string, token: string) => listJobs({ namespace: owner, accessToken: token }));
+  const sourceRevision = validSourceRevision(required(env, "XTAP_SOURCE_REVISION"));
+  const indexBucket = validBucket(required(env, "INDEX_BUCKET"));
+  const physicalJobId = validPhysicalJobId(jobId);
+  const client = dependencies.client ?? createRawBucketClient(indexBucket, accessToken);
   const sleep = dependencies.sleep ?? delay;
   const settleMs = boundedDelay(dependencies.settleMs ?? DEFAULT_SETTLE_MS, "settleMs");
   const confirmationMs = boundedDelay(
     dependencies.confirmationMs ?? DEFAULT_CONFIRMATION_MS,
     "confirmationMs",
   );
+  const prefix = claimPrefix(sourceRevision);
 
+  await client.upload(claimKey(prefix, physicalJobId), claimBytes(sourceRevision, physicalJobId));
   await sleep(settleMs);
-  requireOnlyOwnedActiveJob(await readJobs(namespace, accessToken), jobId, sourceRevision);
+  requireElectedWriter(await client.list(prefix), prefix, physicalJobId);
   await sleep(confirmationMs);
-  requireOnlyOwnedActiveJob(await readJobs(namespace, accessToken), jobId, sourceRevision);
-  return { admitted: true, jobId };
+  requireElectedWriter(await client.list(prefix), prefix, physicalJobId);
+  return { admitted: true, jobId: physicalJobId };
 }
 
-type PhysicalJob = z.infer<typeof physicalJobSchema>;
-
-function requireOnlyOwnedActiveJob(payload: unknown, jobId: string, sourceRevision: string): void {
-  const activeJobs = z.array(physicalJobSchema).parse(payload).filter(isActiveEnrichmentJob);
-  const spaceRepo = verifiedCurrentSpaceRepo(activeJobs, jobId, sourceRevision);
-  const matching = activeJobs.filter((job) => job.labels?.["space_repo"] === spaceRepo);
-  if (matching.length !== 1 || matching[0]?.id !== jobId) {
+function requireElectedWriter(
+  objects: readonly BucketObject[],
+  prefix: string,
+  jobId: string,
+): void {
+  const currentCreatedAt = physicalJobCreatedAt(jobId);
+  const contenders = [
+    ...new Set(
+      objects
+        .map((object) => jobIdFromClaimKey(object.key, prefix))
+        .filter((candidate): candidate is string => candidate !== undefined)
+        .filter(
+          (candidate) =>
+            Math.abs(physicalJobCreatedAt(candidate) - currentCreatedAt) <= CONTENDER_WINDOW_MS,
+        ),
+    ),
+  ].sort();
+  if (!contenders.includes(jobId)) {
     throw new Error(
-      `single-writer admission rejected enrichment Job ${jobId}; active matching Jobs: ${jobIds(matching)}`,
+      `single-writer admission could not verify enrichment Job ${jobId}; contenders: ${jobIds(contenders)}`,
+    );
+  }
+  const elected = contenders[0];
+  if (elected !== jobId) {
+    throw new Error(
+      `single-writer admission rejected enrichment Job ${jobId}; elected ${elected ?? "none"}; contenders: ${jobIds(contenders)}`,
     );
   }
 }
 
-function isActiveEnrichmentJob(job: PhysicalJob): boolean {
-  return (
-    ACTIVE_JOB_STAGES.has(job.status.stage) &&
-    job.labels?.["app"] === ENRICHMENT_LABELS.app &&
-    job.labels["component"] === ENRICHMENT_LABELS.component
+function claimPrefix(sourceRevision: string): string {
+  return `operations/enrichment/admission/${sourceRevision}/claims`;
+}
+
+function claimKey(prefix: string, jobId: string): string {
+  return `${prefix}/${jobId}.json`;
+}
+
+function claimBytes(sourceRevision: string, jobId: string): Uint8Array {
+  return new TextEncoder().encode(
+    `${JSON.stringify({
+      schema_version: 1,
+      job_id: jobId,
+      source_revision: sourceRevision,
+      created_at: new Date(physicalJobCreatedAt(jobId)).toISOString(),
+    })}\n`,
   );
 }
 
-function verifiedCurrentSpaceRepo(
-  activeJobs: PhysicalJob[],
-  jobId: string,
-  sourceRevision: string,
-): string {
-  const current = activeJobs.find((job) => job.id === jobId);
-  const spaceRepo = current?.labels?.["space_repo"];
-  if (current?.labels?.["source_revision"] !== sourceRevision || spaceRepo === undefined) {
-    throw new Error(
-      `single-writer admission could not verify enrichment Job ${jobId}; active owned Jobs: ${jobIds(activeJobs)}`,
-    );
-  }
-  return spaceRepo;
+function jobIdFromClaimKey(key: string, prefix: string): string | undefined {
+  const pathPrefix = `${prefix}/`;
+  if (!key.startsWith(pathPrefix)) return undefined;
+  const relative = key.slice(pathPrefix.length);
+  const match = /^([a-f0-9]{24})\.json$/u.exec(relative);
+  return match?.[1];
 }
 
-function jobIds(jobs: PhysicalJob[]): string {
-  const ids = jobs.map((job) => job.id).sort();
-  return ids.length === 0 ? "none" : ids.join(",");
+function physicalJobCreatedAt(jobId: string): number {
+  return Number.parseInt(jobId.slice(0, 8), 16) * 1_000;
+}
+
+function validPhysicalJobId(value: string): string {
+  if (!PHYSICAL_JOB_ID.test(value)) {
+    throw new Error("JOB_ID must be a 24-character hexadecimal Hugging Face Job ID");
+  }
+  return value;
+}
+
+function validSourceRevision(value: string): string {
+  if (!SOURCE_REVISION.test(value)) {
+    throw new Error("XTAP_SOURCE_REVISION must be a 40-character lowercase Git revision");
+  }
+  return value;
+}
+
+function validBucket(value: string): string {
+  const [namespace, name, extra] = value.split("/");
+  if (
+    namespace === undefined ||
+    namespace.length === 0 ||
+    name === undefined ||
+    name.length === 0 ||
+    extra !== undefined
+  ) {
+    throw new Error("INDEX_BUCKET must use owner/name form for enrichment Job admission");
+  }
+  return value;
 }
 
 function required(env: Readonly<Record<string, string | undefined>>, name: string): string {
@@ -105,25 +146,15 @@ function required(env: Readonly<Record<string, string | undefined>>, name: strin
   return value;
 }
 
-function bucketNamespace(bucket: string): string {
-  const [namespace, name, extra] = bucket.split("/");
-  if (
-    namespace === undefined ||
-    namespace.length === 0 ||
-    name === undefined ||
-    name.length === 0 ||
-    extra !== undefined
-  ) {
-    throw new Error("INDEX_BUCKET must use owner/name form for enrichment Job admission");
-  }
-  return namespace;
-}
-
 function boundedDelay(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 60_000) {
     throw new Error(`${name} must be an integer from 0 to 60000`);
   }
   return value;
+}
+
+function jobIds(jobIds: readonly string[]): string {
+  return jobIds.length === 0 ? "none" : jobIds.join(",");
 }
 
 function delay(milliseconds: number): Promise<void> {
