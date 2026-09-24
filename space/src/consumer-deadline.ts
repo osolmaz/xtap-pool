@@ -3,10 +3,12 @@ import { ConsumerHttpError } from "./consumer-errors.js";
 
 export const CONSUMER_DEADLINE_MS = 60_000;
 /** A changed source can require an exact full-selection coverage calculation or
- * large change pages. Only those stages extend the request's absolute deadline.
+ * large change pages. The long stages renew the request's deadline. A coverage
+ * calculation over a large selection passes five minutes and an abandoned read
+ * kills its worker before it can pin the context, so the bound is generous.
  * SQLite remains in the same killable child process and every other read keeps
  * the short bound. */
-export const CONSUMER_LONG_READ_DEADLINE_MS = 5 * 60_000;
+export const CONSUMER_LONG_READ_DEADLINE_MS = 15 * 60_000;
 type Stage =
   | "waiting for the index"
   | "loading source metadata"
@@ -14,6 +16,15 @@ type Stage =
   | "saving source metadata"
   | "reading source changes"
   | "reading source page";
+/** A read acquires the index mutex before it can load source metadata, so the
+ * queue wait needs the long bound too. A single read can wait for the index and
+ * then compute coverage, so each long stage renews the bound instead of
+ * consuming one shared budget from the first stage. */
+const LONG_READ_STAGES = new Set<Stage>([
+  "waiting for the index",
+  "calculating source coverage",
+  "reading source changes",
+]);
 type DeadlineContext = {
   signal: AbortSignal;
   stage?: Stage;
@@ -24,9 +35,7 @@ export function consumerStage(stage: Stage): void {
   const context = signals.getStore();
   if (context === undefined) return;
   context.stage = stage;
-  if (stage === "calculating source coverage" || stage === "reading source changes") {
-    context.extendDeadline();
-  }
+  if (LONG_READ_STAGES.has(stage)) context.extendDeadline();
 }
 export function consumerTimeout(stage?: Stage): ConsumerHttpError {
   return new ConsumerHttpError(
@@ -48,16 +57,12 @@ export async function withConsumerDeadline<T>(
   const longReadMilliseconds = limits.longReadMilliseconds ?? CONSUMER_LONG_READ_DEADLINE_MS;
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, requestSignal]);
-  const started = Date.now();
   let timer: ReturnType<typeof setTimeout>;
-  let deadlineExtended = false;
   const context: DeadlineContext = {
     signal,
     extendDeadline: () => {
-      if (deadlineExtended) return;
-      deadlineExtended = true;
       clearTimeout(timer);
-      timer = deadlineTimer(controller, context, longReadMilliseconds - (Date.now() - started));
+      timer = deadlineTimer(controller, context, longReadMilliseconds);
     },
   };
   timer = deadlineTimer(controller, context, milliseconds);
