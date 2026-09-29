@@ -10,7 +10,7 @@ afterEach(() => vi.useRealTimers());
 
 it("keeps a bounded production deadline for long source reads", () => {
   expect(CONSUMER_DEADLINE_MS).toBe(60_000);
-  expect(CONSUMER_LONG_READ_DEADLINE_MS).toBe(15 * 60_000);
+  expect(CONSUMER_LONG_READ_DEADLINE_MS).toBe(25 * 60_000);
 });
 
 function pending(): Promise<never> {

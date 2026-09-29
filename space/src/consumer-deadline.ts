@@ -4,11 +4,11 @@ import { ConsumerHttpError } from "./consumer-errors.js";
 export const CONSUMER_DEADLINE_MS = 60_000;
 /** A changed source can require an exact full-selection coverage calculation or
  * large change pages. The long stages renew the request's deadline. A coverage
- * calculation over a large selection passes five minutes and an abandoned read
- * kills its worker before it can pin the context, so the bound is generous.
- * SQLite remains in the same killable child process and every other read keeps
- * the short bound. */
-export const CONSUMER_LONG_READ_DEADLINE_MS = 15 * 60_000;
+ * calculation over a large selection passes five minutes, and a read that
+ * competes with index work has taken almost fourteen minutes. The bound is
+ * generous so the calculation can finish and pin its context. SQLite remains in
+ * the same killable child process and every other read keeps the short bound. */
+export const CONSUMER_LONG_READ_DEADLINE_MS = 25 * 60_000;
 type Stage =
   | "waiting for the index"
   | "loading source metadata"
