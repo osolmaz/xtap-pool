@@ -5,10 +5,12 @@ export const CONSUMER_DEADLINE_MS = 60_000;
 /** A changed source can require an exact full-selection coverage calculation or
  * large change pages. The long stages renew the request's deadline. A coverage
  * calculation over a large selection passes five minutes, and a read that
- * competes with index work has taken almost fourteen minutes. The bound is
- * generous so the calculation can finish and pin its context. SQLite remains in
- * the same killable child process and every other read keeps the short bound. */
-export const CONSUMER_LONG_READ_DEADLINE_MS = 25 * 60_000;
+ * competes with index work has taken almost fourteen minutes. An idle cursor
+ * still exceeded the twenty-five minute bound on 2026-10-02 with enrichment
+ * idle, so the bound is an hour. The bound is generous so the calculation can
+ * finish and pin its context. SQLite remains in the same killable child process
+ * and every other read keeps the short bound. */
+export const CONSUMER_LONG_READ_DEADLINE_MS = 60 * 60_000;
 type Stage =
   | "waiting for the index"
   | "loading source metadata"
