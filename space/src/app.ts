@@ -12,13 +12,11 @@ import type { EnrichReceipt, ServiceAccountScope } from "@xtap-pool/shared";
 import { registerConsumerRoutes } from "./consumer-routes.js";
 import type { ConsumerRuntime } from "./consumer-runtime.js";
 import { consumerErrorResponse, ConsumerHttpError } from "./consumer-errors.js";
-import { renderConnectPage } from "./connect-page.js";
 import type { SpaceConfig } from "./config.js";
 import type { EnrichTaxonomy } from "./enrich-config.js";
 import { CompleteGraphLimitError, type EnrichStore } from "./enrich-store.js";
 import { createHuggingFaceOrgResolver } from "./hf-orgs.js";
 import type { OrgResolver } from "./hf-orgs.js";
-import type { IngestOutcome } from "./ingest.js";
 import type { PoolAccessGrant, PoolIdentity, PoolMembership, PoolSnapshot } from "./membership.js";
 import { authorizeUrl, exchangeCodeForIdentity } from "./oauth.js";
 import { mintPoolToken, verifyPoolToken } from "./pool-token.js";
@@ -34,7 +32,6 @@ import {
 const SESSION_COOKIE = "xtap_pool_session";
 const OAUTH_STATE_COOKIE = "xtap_pool_oauth";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const POOL_TOKEN_TTL_MS = 180 * 24 * 60 * 60 * 1000;
 const ORG_GRANT_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type EnrichDeps = {
@@ -78,7 +75,6 @@ export type AppDeps = {
   serviceAccounts: ServiceAccountRegistry;
   unitStore: UnitStore;
   enrich: EnrichDeps;
-  ingest: (username: string, payload: unknown) => Promise<IngestOutcome>;
   repairMembership?: (actor: string) => Promise<PoolSnapshot>;
   mutateServiceAccounts?: <T>(operation: () => Promise<T>) => Promise<T>;
   readiness?: () => AppReadiness;
@@ -224,13 +220,6 @@ export function createApp(deps: AppDeps): Hono {
     return verified.ok ? authorizeIdentity(verified) : undefined;
   };
 
-  const bearerIdentity = (c: Context): AuthorizedIdentity | undefined => {
-    const header = c.req.header("authorization");
-    if (header?.toLowerCase().startsWith("bearer ") !== true) return undefined;
-    const verified = verifyPoolToken(config.poolSigningSecret, header.slice(7).trim(), now());
-    return verified.ok ? authorizeIdentity(verified) : undefined;
-  };
-
   const serviceIdentity = (
     c: Context,
     scope: ServiceAccountScope,
@@ -288,7 +277,6 @@ export function createApp(deps: AppDeps): Hono {
   };
   app.use("/api/*", requireReady);
   app.use("/oauth/*", requireReady);
-  app.use("/connect", requireReady);
 
   const health = (): { ok: true; tweets: number; readiness?: AppReadiness } => {
     const readiness = deps.readiness?.();
@@ -377,40 +365,10 @@ export function createApp(deps: AppDeps): Hono {
     return c.redirect(next);
   });
 
-  app.get("/connect", (c) => {
-    const identity = sessionIdentity(c);
-    if (identity === undefined) return c.redirect("/oauth/login?next=/connect");
-    const poolTokenTtl = tokenTtlForGrant(identity.grant, POOL_TOKEN_TTL_MS);
-    const token = mintPoolToken(
-      config.poolSigningSecret,
-      identity,
-      new Date(now().getTime() + poolTokenTtl),
-    );
-    return c.html(renderConnectPage(identity.username, token));
-  });
-
   app.use("/api/*", cors({ origin: "*", allowHeaders: ["authorization", "content-type"] }));
 
-  app.post("/api/ingest", async (c) => {
-    const identity = bearerIdentity(c);
-    if (identity === undefined) return c.json({ error: "invalid or missing pool token" }, 401);
-    let payload: unknown;
-    try {
-      payload = await c.req.json();
-    } catch {
-      return c.json({ error: "body must be JSON" }, 400);
-    }
-    const outcome = await deps.ingest(identity.username, payload);
-    if (!outcome.ok) return c.json({ error: outcome.error }, outcome.status);
-    return c.json({
-      added: outcome.added,
-      duplicates: outcome.duplicates,
-      rejected: outcome.rejected,
-    });
-  });
-
   app.get("/api/me", (c) => {
-    const identity = bearerIdentity(c) ?? sessionIdentity(c);
+    const identity = sessionIdentity(c);
     if (identity === undefined) return c.json({ error: "unauthenticated" }, 401);
     return c.json({ username: identity.username, isAdmin: membership.isAdmin(identity.username) });
   });

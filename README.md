@@ -5,10 +5,12 @@ Pool [xTap](https://github.com/mkubicek/xTap) captures with a group of friends.
 xtap-pool has these parts:
 
 - **`extension/`** — a vendored xTap Chrome extension that keeps local captures
-  and syncs them to a shared Hugging Face Space.
-- **`space/`** — a Hugging Face Docker Space that authenticates contributors,
-  validates and deduplicates submissions, and commits them to an immutable raw
-  Bucket log before it returns success.
+  and hands sealed observation batches to its local daemon's pool outbox.
+- **Outbox uploader** — `npm run push-outbox --workspace space` validates each
+  outbox batch, stamps the token owner as the contributor, and writes it to the
+  immutable raw Bucket log. It needs no Space.
+- **`space/`** — a Hugging Face Docker Space that reads the Buckets and serves
+  the explorer, administration, and the consumer API.
 - **`explorer/`** — a React web interface for browsing, filtering, searching,
   and administering the pool.
 - **Consumer API** — revision-consistent enriched conversation-author units for
@@ -24,6 +26,22 @@ describes cursor-based changes and bounded observation history for downstream ap
 [Make scheduled enrichment Jobs reliable](docs/2026-09-15-enrichment-job-reliability-plan.md)
 describes the current timeout, transfer recovery, and two-hour schedule.
 The other implementation plans under [`docs/`](docs/) record earlier design work.
+
+## Upload captures
+
+The extension hands sealed batches to the local daemon, which keeps them in
+`~/.xtap/pool-outbox`. Upload them with the locally configured Hugging Face
+token (`HF_TOKEN`, or the token file from `hf auth login`):
+
+```bash
+npm run build --workspace space
+RAW_BUCKET=osolmaz/xtap-pool-data npm run push-outbox --workspace space
+```
+
+The token owner becomes `contributed_by` for every uploaded observation, so
+the pool has one writer per write token. A retry of the same outbox file writes
+the same segment key and stores no second copy. Invalid lines move to
+`~/.xtap/pool-outbox/rejected/`. Set `XTAP_POOL_OUTBOX_DIR` for another outbox.
 
 ## Set up a pool
 

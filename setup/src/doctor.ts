@@ -1018,7 +1018,7 @@ async function confirmGeneratedSecretRepairDefault(
 ): Promise<boolean> {
   const effects = keys.map((key) => {
     if (key === "POOL_SIGNING_SECRET")
-      return "Replacing POOL_SIGNING_SECRET invalidates extension pool tokens.";
+      return "Replacing POOL_SIGNING_SECRET invalidates consumer cursors.";
     return "Replacing SESSION_SECRET signs out browser sessions.";
   });
   note(

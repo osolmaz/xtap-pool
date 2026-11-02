@@ -18,13 +18,12 @@ import {
   OUTPUT_SCHEMA_ID,
   PROMPT_TEMPLATE_ID,
 } from "../src/enrich-worker.js";
-import { Mutex, ingestBatch } from "../src/ingest.js";
 import { PoolMembership } from "../src/membership.js";
 import { mintPoolToken } from "../src/pool-token.js";
 import { ServiceAccountRegistry } from "../src/service-accounts.js";
 import { TweetStore } from "../src/store.js";
 import { UnitStore } from "../src/unit-store.js";
-import { makeTweet, testConfig } from "./helpers.js";
+import { makeTweet, seedTweets, testConfig } from "./helpers.js";
 import { FakeLog } from "./fake-log.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
@@ -80,10 +79,6 @@ function sessionCookie(
   return `xtap_pool_session=${mintPoolToken(testConfig.sessionSecret, { username, orgs }, FUTURE)}`;
 }
 
-function bearer(username: string, orgs: readonly { sub: string; name?: string }[] = []): string {
-  return `Bearer ${mintPoolToken(testConfig.poolSigningSecret, { username, orgs }, FUTURE)}`;
-}
-
 function sessionCookieFrom(setCookie: string | null): string {
   return /xtap_pool_session=[^;,]+/.exec(setCookie ?? "")?.[0] ?? "";
 }
@@ -99,7 +94,6 @@ beforeEach(async () => {
     now: () => NOW,
   });
   serviceAccounts = await ServiceAccountRegistry.load({ log, now: () => NOW });
-  const mutex = new Mutex();
   enrich = {
     store: new EnrichStore(store.database, 1, () => NOW, CONTRACT_HASH),
     taxonomy: { labels: DEFAULT_TAXONOMY, version: 1, source: "default" },
@@ -113,10 +107,6 @@ beforeEach(async () => {
     unitStore,
     enrich,
     now: () => NOW,
-    ingest: (username, payload) =>
-      mutex.run(() =>
-        ingestBatch({ store, log, enrich: enrich.store, now: () => NOW }, username, payload),
-      ),
   });
 });
 
@@ -140,7 +130,6 @@ describe("health", () => {
       serviceAccounts,
       unitStore,
       enrich,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       readiness: () => ({
         ok: false,
         storage: {
@@ -190,7 +179,6 @@ describe("health", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       readiness: () => ({
         ok: !brokenMembership.hasConfigError(),
         storage: {
@@ -230,50 +218,6 @@ describe("health", () => {
   });
 });
 
-describe("/api/ingest", () => {
-  it("rejects missing, malformed and disallowed tokens", async () => {
-    const body = JSON.stringify({ tweets: [makeTweet()] });
-    const post = async (headers: Record<string, string>): Promise<Response> =>
-      app.request("/api/ingest", {
-        method: "POST",
-        headers: { "content-type": "application/json", ...headers },
-        body,
-      });
-    expect((await post({})).status).toBe(401);
-    expect((await post({ authorization: "Bearer garbage" })).status).toBe(401);
-    expect((await post({ authorization: bearer("mallory") })).status).toBe(401);
-    const sessionSigned = mintPoolToken(testConfig.sessionSecret, "osolmaz", FUTURE);
-    expect((await post({ authorization: `Bearer ${sessionSigned}` })).status).toBe(401);
-  });
-
-  it("ingests a batch for a valid pool token", async () => {
-    const response = await app.request("/api/ingest", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: bearer("osolmaz") },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ added: 1, duplicates: 0, rejected: [] });
-    expect(log.commits).toHaveLength(1);
-  });
-
-  it("rejects non-JSON bodies and surfaces persistence failures", async () => {
-    const bad = await app.request("/api/ingest", {
-      method: "POST",
-      headers: { authorization: bearer("osolmaz") },
-      body: "not json",
-    });
-    expect(bad.status).toBe(400);
-    log.failNextCommit = true;
-    const failed = await app.request("/api/ingest", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: bearer("osolmaz") },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
-    expect(failed.status).toBe(500);
-  });
-});
-
 describe("session-guarded reads", () => {
   it("rejects unauthenticated tweet queries", async () => {
     expect((await app.request("/api/tweets")).status).toBe(401);
@@ -282,11 +226,7 @@ describe("session-guarded reads", () => {
   });
 
   it("serves tweets, contributors and identity for a valid session", async () => {
-    await app.request("/api/ingest", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: bearer("alice") },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
+    seedTweets(store, enrich.store, "alice", [makeTweet()], NOW);
     const headers = { cookie: sessionCookie("osolmaz") };
     const tweets = (await (await app.request("/api/tweets", { headers })).json()) as {
       records: { tweet: { id: string }; contributors: string[] }[];
@@ -303,10 +243,10 @@ describe("session-guarded reads", () => {
       username: "osolmaz",
       isAdmin: true,
     });
-    const viaBearer = await app.request("/api/me", {
-      headers: { authorization: bearer("alice") },
+    const asMember = await app.request("/api/me", {
+      headers: { cookie: sessionCookie("alice") },
     });
-    await expect(viaBearer.json()).resolves.toEqual({ username: "alice", isAdmin: false });
+    await expect(asMember.json()).resolves.toEqual({ username: "alice", isAdmin: false });
   });
 
   it("rejects invalid query parameters", async () => {
@@ -321,24 +261,24 @@ describe("enrichment endpoints", () => {
   const headers = { cookie: sessionCookie("osolmaz") };
 
   async function seedEnrichedTweets(extraFreeLabels: readonly string[] = []): Promise<void> {
-    await app.request("/api/ingest", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: bearer("alice") },
-      body: JSON.stringify({
-        tweets: [
-          makeTweet({
-            id: "1",
-            text: "vllm ships fp8",
-            author: { id: "author-allowed", username: "someone" },
-          }),
-          makeTweet({
-            id: "2",
-            text: "agents!",
-            author: { id: "author-excluded", username: "swyx" },
-          }),
-        ],
-      }),
-    });
+    seedTweets(
+      store,
+      enrich.store,
+      "alice",
+      [
+        makeTweet({
+          id: "1",
+          text: "vllm ships fp8",
+          author: { id: "author-allowed", username: "someone" },
+        }),
+        makeTweet({
+          id: "2",
+          text: "agents!",
+          author: { id: "author-excluded", username: "swyx" },
+        }),
+      ],
+      NOW,
+    );
     const semantic = enrich.store.unitSemanticMembers("1:someone");
     const { computeInputHash } = await import("@xtap-pool/shared");
     enrich.store.applyEnrichment({
@@ -421,15 +361,6 @@ describe("enrichment endpoints", () => {
     });
 
     expect((await app.request("/api/free-labels", { headers: authorization })).status).toBe(401);
-    expect(
-      (
-        await app.request("/api/ingest", {
-          method: "POST",
-          headers: { ...authorization, "content-type": "application/json" },
-          body: JSON.stringify({ tweets: [makeTweet()] }),
-        })
-      ).status,
-    ).toBe(401);
 
     const stale = await app.request(`/api/graph?revision=${encodeURIComponent("old")}`, {
       headers: { cookie: sessionCookie("osolmaz") },
@@ -658,15 +589,9 @@ describe("enrichment endpoints", () => {
   });
 });
 
-describe("oauth + connect flow", () => {
-  it("redirects /connect to login without a session", async () => {
-    const response = await app.request("/connect");
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("/oauth/login?next=/connect");
-  });
-
+describe("oauth flow", () => {
   it("login sets a state cookie and redirects to the HF authorize page", async () => {
-    const response = await app.request("/oauth/login?next=/connect");
+    const response = await app.request("/oauth/login?next=/");
     expect(response.status).toBe(302);
     const location = new URL(response.headers.get("location") ?? "");
     expect(location.origin).toBe("https://huggingface.co");
@@ -689,12 +614,11 @@ describe("oauth + connect flow", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
     });
 
     const mismatch = await oauthApp.request("/oauth/callback?code=c&state=slate", {
-      headers: { cookie: "xtap_pool_oauth=state-1|/connect" },
+      headers: { cookie: "xtap_pool_oauth=state-1|/" },
     });
     expect(mismatch.status).toBe(400);
 
@@ -702,10 +626,10 @@ describe("oauth + connect flow", () => {
     expect(missing.status).toBe(400);
 
     const success = await oauthApp.request("/oauth/callback?code=c&state=state-1", {
-      headers: { cookie: "xtap_pool_oauth=state-1|/connect" },
+      headers: { cookie: "xtap_pool_oauth=state-1|/" },
     });
     expect(success.status).toBe(302);
-    expect(success.headers.get("location")).toBe("/connect");
+    expect(success.headers.get("location")).toBe("/");
     expect(success.headers.get("set-cookie")).toContain("xtap_pool_session=");
   });
 
@@ -724,7 +648,6 @@ describe("oauth + connect flow", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
     });
     const response = await oauthApp.request("/oauth/callback?code=c&state=s1", {
@@ -733,7 +656,7 @@ describe("oauth + connect flow", () => {
     expect(response.status).toBe(403);
   });
 
-  it("callback accepts member organization users and mints usable pool tokens", async () => {
+  it("callback accepts member organization users with a usable session", async () => {
     await membership.addMemberOrg("osolmaz", {
       name: "huggingface",
       sub: "org-hf",
@@ -758,34 +681,20 @@ describe("oauth + connect flow", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: (username, payload) =>
-        new Mutex().run(() => ingestBatch({ store, log, now: () => NOW }, username, payload)),
       oauthFetch,
     });
 
     const success = await oauthApp.request("/oauth/callback?code=c&state=s1", {
-      headers: { cookie: "xtap_pool_oauth=s1|/connect" },
+      headers: { cookie: "xtap_pool_oauth=s1|/" },
     });
     expect(success.status).toBe(302);
     const cookie = sessionCookieFrom(success.headers.get("set-cookie"));
     expect(cookie).toContain("xtap_pool_session=");
-    const connect = await oauthApp.request("/connect", { headers: { cookie } });
-    const html = await connect.text();
-    const match = /data-token="([^"]+)"/.exec(html);
-    expect(match).not.toBeNull();
-
-    const ingestResponse = await oauthApp.request("/api/ingest", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${match?.[1] ?? ""}`,
-      },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
-    expect(ingestResponse.status).toBe(200);
+    const me = await oauthApp.request("/api/me", { headers: { cookie } });
+    await expect(me.json()).resolves.toEqual({ username: "dana", isAdmin: false });
   });
 
-  it("does not carry org claims into explicit member tokens", async () => {
+  it("does not carry org claims into explicit member sessions", async () => {
     await membership.addMemberOrg("osolmaz", {
       name: "huggingface",
       sub: "org-hf",
@@ -810,48 +719,17 @@ describe("oauth + connect flow", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       oauthFetch,
     });
 
     const success = await oauthApp.request("/oauth/callback?code=c&state=s1", {
-      headers: { cookie: "xtap_pool_oauth=s1|/connect" },
+      headers: { cookie: "xtap_pool_oauth=s1|/" },
     });
     const cookie = sessionCookieFrom(success.headers.get("set-cookie"));
-    const connect = await oauthApp.request("/connect", { headers: { cookie } });
-    const html = await connect.text();
-    const match = /data-token="([^"]+)"/.exec(html);
-    expect(match).not.toBeNull();
+    expect((await oauthApp.request("/api/me", { headers: { cookie } })).status).toBe(200);
 
     await membership.removeMember("osolmaz", "alice");
-    const ingestResponse = await oauthApp.request("/api/ingest", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${match?.[1] ?? ""}`,
-      },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
-    expect(ingestResponse.status).toBe(401);
-  });
-
-  it("renders the connect page with a working pool token for a session", async () => {
-    const response = await app.request("/connect", {
-      headers: { cookie: sessionCookie("osolmaz") },
-    });
-    expect(response.status).toBe(200);
-    const html = await response.text();
-    const match = /data-token="([^"]+)"/.exec(html);
-    expect(match).not.toBeNull();
-    const ingestResponse = await app.request("/api/ingest", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${match?.[1] ?? ""}`,
-      },
-      body: JSON.stringify({ tweets: [makeTweet()] }),
-    });
-    expect(ingestResponse.status).toBe(200);
+    expect((await oauthApp.request("/api/me", { headers: { cookie } })).status).toBe(401);
   });
 });
 
@@ -920,13 +798,7 @@ describe("admin pool management", () => {
     expect(added.status).toBe(200);
     expect(log.files.get("config/pool.json")).toContain("mallory");
     expect(
-      (
-        await app.request("/api/ingest", {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: bearer("mallory") },
-          body: JSON.stringify({ tweets: [makeTweet()] }),
-        })
-      ).status,
+      (await app.request("/api/me", { headers: { cookie: sessionCookie("mallory") } })).status,
     ).toBe(200);
 
     const removed = await app.request("/api/admin/members/mallory", {
@@ -935,13 +807,7 @@ describe("admin pool management", () => {
     });
     expect(removed.status).toBe(200);
     expect(
-      (
-        await app.request("/api/ingest", {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: bearer("mallory") },
-          body: JSON.stringify({ tweets: [makeTweet({ id: "2" })] }),
-        })
-      ).status,
+      (await app.request("/api/me", { headers: { cookie: sessionCookie("mallory") } })).status,
     ).toBe(401);
   });
 
@@ -978,7 +844,6 @@ describe("admin pool management", () => {
       unitStore,
       enrich,
       now: () => NOW,
-      ingest: () => Promise.resolve({ ok: true, added: 0, duplicates: 0, rejected: [] }),
       resolveOrg: (orgName) =>
         Promise.resolve({
           name: orgName.toLowerCase(),
@@ -998,7 +863,7 @@ describe("admin pool management", () => {
     expect(
       (
         await orgApp.request("/api/me", {
-          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+          headers: { cookie: sessionCookie("dana", [{ sub: "org-hf", name: "huggingface" }]) },
         })
       ).status,
     ).toBe(200);
@@ -1014,14 +879,14 @@ describe("admin pool management", () => {
     expect(
       (
         await orgApp.request("/api/me", {
-          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+          headers: { cookie: sessionCookie("dana", [{ sub: "org-hf", name: "huggingface" }]) },
         })
       ).status,
     ).toBe(401);
     expect(
       (
         await orgApp.request("/api/me", {
-          headers: { authorization: bearer("dana", [{ sub: "org-dutiful", name: "dutifuldev" }]) },
+          headers: { cookie: sessionCookie("dana", [{ sub: "org-dutiful", name: "dutifuldev" }]) },
         })
       ).status,
     ).toBe(200);
@@ -1034,7 +899,7 @@ describe("admin pool management", () => {
     expect(
       (
         await orgApp.request("/api/me", {
-          headers: { authorization: bearer("dana", [{ sub: "org-hf", name: "huggingface" }]) },
+          headers: { cookie: sessionCookie("dana", [{ sub: "org-hf", name: "huggingface" }]) },
         })
       ).status,
     ).toBe(401);

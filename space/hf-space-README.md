@@ -12,11 +12,9 @@ pinned: false
 
 # xtap-pool
 
-Private tweet pool for a group of friends running the
-[xtap-pool extension](https://github.com/osolmaz/xtap-pool).
+Private tweet pool built from the raw Bucket that the
+[xtap-pool](https://github.com/osolmaz/xtap-pool) uploader writes.
 
-- `POST /api/ingest` — extension submissions (Bearer pool token)
-- `GET /connect` — sign in with Hugging Face to connect the extension
 - `GET /api/units` — revision-consistent enriched units for scoped service accounts
 - `/` — tweet explorer and pool administration
 - `GET /healthz` and `GET /readyz` — machine-readable runtime health
