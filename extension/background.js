@@ -5,8 +5,6 @@ import {
   initPoolSync,
   poolEnqueue,
   poolFlush,
-  poolConnect,
-  poolSetConfig,
   poolTogglePause,
   poolStatus,
 } from './lib/pool-sync.js';
@@ -260,6 +258,15 @@ async function httpFetch(method, path, body) {
     return { status: resp.status, data: await resp.json() };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// Store one sealed pool batch in the daemon's outbox for `npm run push-outbox`.
+async function poolHandoff(name, content) {
+  if (!httpPort) throw new Error('local daemon unavailable');
+  const { status, data } = await httpFetch('POST', '/pool-outbox', { name, content });
+  if (status !== 200 || !data || data.ok !== true) {
+    throw new Error(`local daemon responded ${status}${data && data.error ? `: ${data.error}` : ''}`);
   }
 }
 
@@ -863,25 +870,9 @@ async function handleGraphqlResponse(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'POOL_CONNECT') {
-    (async () => {
-      const result = await poolConnect(msg, sender && sender.url ? sender.url : '');
-      sendResponse(result);
-    })();
-    return true;
-  }
-
   if (msg.type === 'POOL_STATUS') {
     sendResponse(poolStatus());
     return;
-  }
-
-  if (msg.type === 'POOL_SET_CONFIG') {
-    (async () => {
-      await poolSetConfig(msg);
-      sendResponse(poolStatus());
-    })();
-    return true;
   }
 
   if (msg.type === 'POOL_TOGGLE_PAUSE') {
@@ -1091,7 +1082,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 restoreState().catch((error) => {
   console.error('[xTap] Failed to restore state:', error);
 }).then(async () => {
-  await initPoolSync();
+  await initPoolSync({ handoff: poolHandoff });
   await recoverStagedPayloads();
   await initTransport();
   readyResolve();

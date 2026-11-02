@@ -93,8 +93,6 @@ function bootSW({ sessionSeed = {}, localSeed = {} } = {}) {
     initPoolSync: async () => {},
     poolEnqueue() {},
     poolFlush: async () => {},
-    poolConnect: async () => ({}),
-    poolSetConfig: async () => {},
     poolTogglePause: async () => {},
     poolStatus: () => ({}),
     chrome: {

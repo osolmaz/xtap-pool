@@ -720,3 +720,53 @@ class TestArticlePathSanitization:
         assert '../../../../etc/evil.jpg' not in line['article']['text']
         assert 'before' in line['article']['text']
         assert 'after' in line['article']['text']
+
+
+# ---------------------------------------------------------------------------
+# Tests — pool outbox handoff
+# ---------------------------------------------------------------------------
+
+OUTBOX_NAME = '1793611800000-0b7c3c55-8d0e-4b8e-9f00-3d1d6c7e2a10.jsonl'
+
+
+class TestPoolOutbox:
+
+    @pytest.fixture(autouse=True)
+    def _outbox(self, tmp_path, monkeypatch):
+        self.outbox = tmp_path / 'pool-outbox'
+        monkeypatch.setattr(xtap_daemon, 'POOL_OUTBOX_DIR', str(self.outbox))
+
+    def test_writes_a_sealed_batch(self, daemon_url):
+        status, body = _post(daemon_url, '/pool-outbox',
+                             body={'name': OUTBOX_NAME, 'content': '{"id":"1"}\n'}, token=TEST_TOKEN)
+        assert (status, body) == (200, {'ok': True})
+        assert (self.outbox / OUTBOX_NAME).read_text() == '{"id":"1"}\n'
+        assert sorted(p.name for p in self.outbox.iterdir()) == [OUTBOX_NAME]
+
+    def test_same_bytes_retry_is_a_no_op_and_changed_bytes_conflict(self, daemon_url):
+        payload = {'name': OUTBOX_NAME, 'content': '{"id":"1"}\n'}
+        assert _post(daemon_url, '/pool-outbox', body=payload, token=TEST_TOKEN)[0] == 200
+        assert _post(daemon_url, '/pool-outbox', body=payload, token=TEST_TOKEN)[0] == 200
+        status, body = _post(daemon_url, '/pool-outbox',
+                             body={'name': OUTBOX_NAME, 'content': '{"id":"2"}\n'}, token=TEST_TOKEN)
+        assert status == 409
+        assert body['ok'] is False
+        assert (self.outbox / OUTBOX_NAME).read_text() == '{"id":"1"}\n'
+
+    @pytest.mark.parametrize('payload', [
+        {'name': '../escape.jsonl', 'content': '{}\n'},
+        {'name': 'tweets-2026-11-02.jsonl', 'content': '{}\n'},
+        {'name': OUTBOX_NAME, 'content': '{}'},
+        {'name': OUTBOX_NAME, 'content': 7},
+        {'content': '{}\n'},
+    ])
+    def test_rejects_invalid_names_and_content(self, daemon_url, payload):
+        status, body = _post(daemon_url, '/pool-outbox', body=payload, token=TEST_TOKEN)
+        assert status == 400
+        assert body['ok'] is False
+        assert not self.outbox.exists()
+
+    def test_requires_the_daemon_token(self, daemon_url):
+        status, _ = _post(daemon_url, '/pool-outbox',
+                          body={'name': OUTBOX_NAME, 'content': '{}\n'}, token='wrong')
+        assert status == 401

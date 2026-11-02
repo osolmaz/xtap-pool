@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import platform
+import re
 import signal
 import socket
 import sys
@@ -57,6 +58,9 @@ CONN_TIMEOUT_S = _env_timeout_s('XTAP_CONN_TIMEOUT_S', 15.0)
 SHUTDOWN_GRACE_S = _env_timeout_s('XTAP_SHUTDOWN_GRACE_S', 10.0)
 XTAP_DIR = os.path.expanduser('~/.xtap')
 XTAP_SECRET = os.path.join(XTAP_DIR, 'secret')
+# Sealed pool batches wait here for `npm run push-outbox` to upload them.
+POOL_OUTBOX_DIR = os.path.expanduser(os.environ.get('XTAP_POOL_OUTBOX_DIR', os.path.join(XTAP_DIR, 'pool-outbox')))
+POOL_OUTBOX_NAME = re.compile(r'^\d{13}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$')
 
 # Log level: 'info' (default) or 'debug'
 LOG_LEVEL = os.environ.get('XTAP_LOG_LEVEL', 'info').lower()
@@ -210,6 +214,8 @@ class DaemonHandler(BaseHTTPRequestHandler):
             self._handle_tweets(body)
         elif self.path == '/log':
             self._handle_log(body)
+        elif self.path == '/pool-outbox':
+            self._handle_pool_outbox(body)
         elif self.path == '/dump':
             self._handle_dump(body)
         elif self.path == '/test-path':
@@ -250,6 +256,32 @@ class DaemonHandler(BaseHTTPRequestHandler):
             self._send_json({'ok': False, 'error': str(e)}, 400)
         except Exception as e:
             log_info(f'ERROR /tweets: {e}')
+            log_debug(f'  Traceback: {_format_exc()}')
+            self._send_json({'ok': False, 'error': str(e)}, 500)
+
+    def _handle_pool_outbox(self, body):
+        """Store one sealed pool batch. A retry with the same bytes is a no-op;
+        different bytes under an existing name are refused so a sealed batch
+        can never change."""
+        name = body.get('name')
+        content = body.get('content')
+        if not isinstance(name, str) or not POOL_OUTBOX_NAME.match(name):
+            self._send_json({'ok': False, 'error': 'invalid outbox name'}, 400)
+            return
+        if not isinstance(content, str) or not content.endswith('\n'):
+            self._send_json({'ok': False, 'error': 'content must be newline-terminated JSONL'}, 400)
+            return
+        data = content.encode('utf-8')
+        try:
+            with _state_lock:
+                written = write_outbox_file(POOL_OUTBOX_DIR, name, data)
+            if written is None:
+                self._send_json({'ok': False, 'error': 'outbox file exists with different content'}, 409)
+                return
+            log_debug(f'  Pool outbox: {name} ({len(data)} bytes, {"new" if written else "existing"})')
+            self._send_json({'ok': True})
+        except Exception as e:
+            log_info(f'ERROR /pool-outbox: {e}')
             log_debug(f'  Traceback: {_format_exc()}')
             self._send_json({'ok': False, 'error': str(e)}, 500)
 
@@ -329,6 +361,30 @@ class DaemonHandler(BaseHTTPRequestHandler):
         download_id = body.get('downloadId', '')
         status = get_download_status(download_id)
         self._send_json({'ok': True, **status})
+
+
+def write_outbox_file(outbox_dir, name, data):
+    """Write `data` to `outbox_dir/name` durably. Returns True when written,
+    False when the same bytes are already there, None on a conflict."""
+    os.makedirs(outbox_dir, exist_ok=True)
+    path = os.path.join(outbox_dir, name)
+    try:
+        with open(path, 'rb') as existing:
+            return False if existing.read() == data else None
+    except FileNotFoundError:
+        pass
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'wb') as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(outbox_dir, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    return True
 
 
 def _format_exc():

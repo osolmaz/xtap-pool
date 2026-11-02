@@ -14,25 +14,20 @@ this directory, excluding the modifications below.
 ## Local modifications
 
 - `manifest.json` — renamed to `xtap-pool`; added `debugger` and
-  `unlimitedStorage` permissions, the `https://*.hf.space/*` host permission,
-  and the `pool-connect.js` content script.
+  `unlimitedStorage` permissions.
 - Firefox manifests, build scripts, page-interception tests, and browser E2E
   harness are omitted. Firefox does not implement Chrome's extension debugger
   API, and this fork does not fall back to page-owned fetch/XHR interception.
-- `lib/pool-sync.js` — **new**: persistent observation queue and batched flush to
-  the pool Space's `/api/ingest` with backoff. Queue admission and sampling state
-  are saved together. Storage errors and queue overflow leave staged work pending.
-  A batch leaves the queue only after the server's `added`, `duplicates`, and
-  `rejected` counts account for every record. No extra success flag is required.
-  Explicitly rejected records are saved in a bounded local rejection archive, so one invalid
-  post does not block valid work. A full rejection archive blocks removal instead
-  of discarding records.
+- `lib/pool-sync.js` — **new**: persistent observation queue, sealed into JSONL
+  batches and handed to the local daemon's `/pool-outbox` with backoff. Queue
+  admission and sampling state are saved together. Storage errors and queue
+  overflow leave staged work pending. A sealed batch keeps its name and size until
+  the daemon acknowledges it, so a retry sends the same bytes under the same name.
+  `npm run push-outbox` uploads the outbox to the raw Bucket.
 - `lib/observations.js` — **new**: stable local observation identities, exact
   nullable counters, and five-minute sampling for unchanged content. Later visits
   and immediate content or visibility edits are independent of unique-post export
   deduplication.
-- `pool-connect.js` — **new**: content script for the Space's `/connect` page;
-  hands the pool token to the service worker (no copy-paste).
 - `background.js` — imports `lib/pool-sync.js`; new captures also feed the pool
   queue before unique-post deduplication; new `POOL_*` message handlers; a
   `chrome.alarms` periodic pool flush and staged-response retry;
@@ -40,12 +35,13 @@ this directory, excluding the modifications below.
   original observation time through a browser restart. Upstream's coupled
   dedup/buffer persistence, image backfill, bounded splitting, startup flush,
   and HTTP-only transport remain in place around the pool path.
-- `popup.html` / `popup.js` — added the "Pool sync" section (status, connect,
-  sync-now, pause) and an Options link.
-- `options.html` / `options.js` — **new**: configure the pool Space URL and
-  paste a token manually (fallback for the automatic handoff).
+- `popup.html` / `popup.js` — added the "Pool sync" section (status, sync-now,
+  pause).
+- `native-host/xtap_daemon.py` — added `POST /pool-outbox`, which stores one sealed
+  pool batch durably in `~/.xtap/pool-outbox` (`XTAP_POOL_OUTBOX_DIR`). A retry
+  with the same bytes is a no-op; different bytes under an existing name fail.
 - `tests/pool-sync.test.mjs` — **new**: node --test coverage for the queue,
-  flush, backoff and connect flows.
+  sealed handoff, retry identity, batch size and pause flows.
 - `lib/scrape-receipts.js` and `lib/scrape-bridge.js` — **new**: durable
   IndexedDB receipts for X list observations plus a cursor-based external port
   used by the allowlisted Infinite Feed Scroller extension.
