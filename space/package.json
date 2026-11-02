@@ -7,6 +7,7 @@
     "build": "tsc --build",
     "dev": "node --watch --experimental-strip-types src/server.ts",
     "start": "node dist/src/server.js",
+    "push-outbox": "node dist/src/push-outbox-main.js",
     "enrich": "node dist/src/enrich-command-main.js",
     "enrich:job": "node dist/src/enrich-job-main.js",
     "enrich:bootstrap-run": "node dist/src/bootstrap-enrichment-main.js",

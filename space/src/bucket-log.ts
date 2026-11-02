@@ -317,18 +317,7 @@ export class BucketLog {
   }
 
   async appendTweets(tweets: readonly PooledTweet[], title?: string): Promise<string> {
-    const byPath = new Map<string, string[]>();
-    for (const tweet of tweets) {
-      const path = tweetPathFor(tweet.contributed_by, tweet.captured_at);
-      const lines = byPath.get(path);
-      if (lines === undefined) byPath.set(path, [JSON.stringify(tweet)]);
-      else lines.push(JSON.stringify(tweet));
-    }
-    return this.commitBatch(
-      [...byPath].map(([path, lines]) => ({ path, lines })),
-      [],
-      title,
-    );
+    return this.commitBatch(tweetAppends(tweets), [], title);
   }
 
   async putSegment(candidate: BucketSegment): Promise<string> {
@@ -934,6 +923,18 @@ export function parseJsonlTweets(content: string, path: string): PooledTweet[] {
 export function tweetPathFor(contributor: string, capturedAt: string): string {
   const day = new Date(capturedAt).toISOString().slice(0, 10);
   return `data/${contributor}/${day.slice(0, 4)}/${day.slice(5, 7)}/tweets-${day}.jsonl`;
+}
+
+/** Group pooled tweets into one append per daily contributor path, in input order. */
+export function tweetAppends(tweets: readonly PooledTweet[]): { path: string; lines: string[] }[] {
+  const byPath = new Map<string, string[]>();
+  for (const tweet of tweets) {
+    const path = tweetPathFor(tweet.contributed_by, tweet.captured_at);
+    const lines = byPath.get(path);
+    if (lines === undefined) byPath.set(path, [JSON.stringify(tweet)]);
+    else lines.push(JSON.stringify(tweet));
+  }
+  return [...byPath].map(([path, lines]) => ({ path, lines }));
 }
 
 export function deterministicUuid(digest: string): string {
