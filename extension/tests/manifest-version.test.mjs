@@ -9,9 +9,17 @@ test('upstream sync preserves passive capture permissions', async () => {
   assert.equal(manifest.version, '0.26.0');
   assert.ok(manifest.permissions.includes('debugger'));
   assert.equal(
-    manifest.content_scripts.some((entry) =>
+    (manifest.content_scripts ?? []).some((entry) =>
       entry.matches.some((pattern) => pattern.includes('x.com')),
     ),
     false,
   );
+});
+
+test('pool sync uses only the local daemon, not a Space', async () => {
+  const manifest = JSON.parse(await readFile(manifestUrl, 'utf8'));
+  assert.ok(manifest.host_permissions.includes('http://127.0.0.1/*'));
+  assert.equal(manifest.host_permissions.some((pattern) => pattern.includes('hf.space')), false);
+  assert.equal(manifest.content_scripts, undefined);
+  assert.equal(manifest.options_ui, undefined);
 });

@@ -332,8 +332,6 @@ xTap/
 ├── lib/dedup.js               # Capture and image-backfill deduplication
 ├── lib/tweet-parser.js        # GraphQL response parser
 ├── popup.html/js/css          # Extension popup UI
-├── options.html/js            # Pool connection settings
-├── pool-connect.js            # Private pool token handoff
 ├── reload.html/js             # Safe extension reload page
 ├── cutover.html/js            # Coordinated active-run cutover page
 ├── debug.html/js/css          # Debug dashboard (live events, transport health, parser sandbox)

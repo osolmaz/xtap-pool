@@ -58,7 +58,6 @@ function refresh() {
 // --- Pool sync section ---
 
 const poolStatusEl = document.getElementById('pool-status');
-const poolConnectBtn = document.getElementById('pool-connect');
 const poolSyncNowBtn = document.getElementById('pool-sync-now');
 const poolPauseBtn = document.getElementById('pool-pause');
 
@@ -67,30 +66,18 @@ function renderPool(state) {
   if (state.lastError) {
     poolStatusEl.textContent = state.lastError;
     poolStatusEl.className = 'status disconnected';
-  } else if (state.connected) {
-    const who = state.username ? ` as @${state.username}` : '';
+  } else {
     poolStatusEl.textContent =
-      `Connected${who} — ${state.queued} observations queued, ${state.synced} synced, ${state.sampled} sampled out` +
+      `${state.queued} observations queued, ${state.synced} handed to the uploader, ${state.sampled} sampled out` +
       (state.paused ? ' (paused)' : '');
     poolStatusEl.className = 'status connected';
-  } else {
-    poolStatusEl.textContent = 'Not connected to a pool';
-    poolStatusEl.className = 'status disconnected';
   }
-  poolConnectBtn.textContent = state.connected ? 'Reconnect' : 'Connect';
   poolPauseBtn.textContent = state.paused ? 'Resume sync' : 'Pause sync';
-  poolConnectUrl = state.url;
 }
-
-let poolConnectUrl = '';
 
 function refreshPool() {
   chrome.runtime.sendMessage({ type: 'POOL_STATUS' }, renderPool);
 }
-
-poolConnectBtn.addEventListener('click', () => {
-  chrome.tabs.create({ url: `${poolConnectUrl}/connect` });
-});
 
 poolSyncNowBtn.addEventListener('click', () => {
   chrome.runtime.sendMessage({ type: 'POOL_FLUSH_NOW' }, renderPool);

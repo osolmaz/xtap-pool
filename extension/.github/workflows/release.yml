@@ -21,8 +21,6 @@ jobs:
             manifest.json \
             background.js \
             popup.html popup.js popup.css \
-            options.html options.js \
-            pool-connect.js \
             reload.html reload.js \
             cutover.html cutover.js \
             debug.html debug.js debug.css \

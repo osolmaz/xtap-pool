@@ -1,39 +1,42 @@
-// xtap-pool — background sync of captured tweets to the shared pool Space.
+// xtap-pool — background handoff of captured observations to the raw Bucket.
 //
-// Additive to xTap's local saving: tweets are appended to a persistent queue
-// in chrome.storage.local and flushed in batches to POST <poolUrl>/api/ingest
-// with the user's pool token. Delivery is at-least-once; the Space dedups.
+// Additive to xTap's local saving: observations are appended to a persistent
+// queue in chrome.storage.local, sealed into batches, and handed to the local
+// daemon, which stores each batch in the pool outbox. `npm run push-outbox`
+// uploads the outbox to the raw Bucket with the local Hugging Face token.
+//
+// A sealed batch keeps its name and size until the daemon acknowledges it, so a
+// retry sends the same bytes under the same name. The uploader turns the name
+// into the segment identity, so a repeated handoff never stores a second copy.
 
 import { prepareObservations } from './observations.js';
 
 const QUEUE_KEY = 'poolQueue';
 const SAMPLES_KEY = 'poolSamples';
-const REJECTIONS_KEY = 'poolRejections';
-const MAX_REJECTIONS = 500;
-const CONFIG_KEYS = ['poolUrl', 'poolToken', 'poolUsername', 'poolPaused', 'poolStats'];
+const SEALED_KEY = 'poolSealed';
+const LAST_SEAL_KEY = 'poolLastSealMs';
+const CONFIG_KEYS = ['poolPaused', 'poolStats'];
 const MAX_QUEUE = 5000;
 const MAX_BATCH = 500;
+// The daemon accepts 10 MB bodies; JSON string escaping can grow the content.
+export const MAX_HANDOFF_BYTES = 4_000_000;
 const FLUSH_DEBOUNCE_MS = 20_000;
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_MAX_MS = 15 * 60_000;
 
-// Set at build/packaging time so friends get a working default without setup.
-export const DEFAULT_POOL_URL = 'https://osolmaz-xtap-pool.hf.space';
-
 let queue = [];
 let samples = {};
-let rejections = [];
+let sealed = null;
+let lastSealMs = 0;
+let paused = false;
+let handoff = null;
+let stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, dropped: 0, lastError: null, lastSyncAt: null };
 let queueWrites = Promise.resolve();
-let config = {
-  poolUrl: DEFAULT_POOL_URL,
-  poolToken: '',
-  poolUsername: '',
-  poolPaused: false,
-};
-let stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, lastError: null, lastSyncAt: null };
 let flushTimer = null;
 let backoffMs = 0;
 let flushing = false;
+
+const encoder = new TextEncoder();
 
 function storage() {
   return globalThis.chrome.storage.local;
@@ -61,15 +64,24 @@ function withQueueWrite(operation) {
   return result;
 }
 
-export async function initPoolSync() {
-  const saved = await storageGet([QUEUE_KEY, SAMPLES_KEY, REJECTIONS_KEY, ...CONFIG_KEYS]);
+function validSealed(value, queueLength) {
+  return value && typeof value === 'object' &&
+    typeof value.name === 'string' && value.name.length > 0 &&
+    Number.isSafeInteger(value.count) && value.count > 0 && value.count <= queueLength;
+}
+
+/**
+ * Restore pool state. `options.handoff(name, content)` stores one sealed batch
+ * and resolves only after the daemon acknowledged it.
+ */
+export async function initPoolSync(options = {}) {
+  handoff = typeof options.handoff === 'function' ? options.handoff : null;
+  const saved = await storageGet([QUEUE_KEY, SAMPLES_KEY, SEALED_KEY, LAST_SEAL_KEY, ...CONFIG_KEYS]);
   queue = Array.isArray(saved[QUEUE_KEY]) ? saved[QUEUE_KEY] : [];
   samples = saved[SAMPLES_KEY] && typeof saved[SAMPLES_KEY] === 'object' ? saved[SAMPLES_KEY] : {};
-  rejections = Array.isArray(saved[REJECTIONS_KEY]) ? saved[REJECTIONS_KEY] : [];
-  if (typeof saved.poolUrl === 'string' && saved.poolUrl) config.poolUrl = saved.poolUrl;
-  if (typeof saved.poolToken === 'string') config.poolToken = saved.poolToken;
-  if (typeof saved.poolUsername === 'string') config.poolUsername = saved.poolUsername;
-  config.poolPaused = saved.poolPaused === true;
+  sealed = validSealed(saved[SEALED_KEY], queue.length) ? saved[SEALED_KEY] : null;
+  lastSealMs = Number.isSafeInteger(saved[LAST_SEAL_KEY]) ? saved[LAST_SEAL_KEY] : 0;
+  paused = saved.poolPaused === true;
   if (saved.poolStats && typeof saved.poolStats === 'object') stats = { ...stats, ...saved.poolStats };
   if (queue.length > 0) scheduleFlush(0);
 }
@@ -114,23 +126,64 @@ function scheduleFlush(delayMs) {
   }, delayMs);
 }
 
-/** Push queued tweets to the Space, batch by batch. Returns when idle. */
+function batchContent(count) {
+  return queue.slice(0, count).map(observation => `${JSON.stringify(observation)}\n`).join('');
+}
+
+/** Seal the next batch, dropping a leading observation that can never fit. */
+function sealNext() {
+  return withQueueWrite(async () => {
+    if (sealed || queue.length === 0) return;
+    let dropped = 0;
+    while (dropped < queue.length && encoder.encode(JSON.stringify(queue[dropped])).length + 1 > MAX_HANDOFF_BYTES) dropped += 1;
+    let count = 0;
+    let bytes = 0;
+    while (dropped + count < queue.length && count < MAX_BATCH) {
+      const size = encoder.encode(JSON.stringify(queue[dropped + count])).length + 1;
+      if (bytes + size > MAX_HANDOFF_BYTES) break;
+      bytes += size;
+      count += 1;
+    }
+    const nextQueue = dropped > 0 ? queue.slice(dropped) : queue;
+    const sealMs = Math.max(Date.now(), lastSealMs + 1);
+    const nextSealed = count > 0 ? { name: `${sealMs}-${globalThis.crypto.randomUUID()}.jsonl`, count } : null;
+    const nextStats = dropped > 0
+      ? { ...stats, dropped: stats.dropped + dropped, lastError: `${dropped} observation(s) larger than one handoff batch were dropped` }
+      : stats;
+    await storageSet({
+      [QUEUE_KEY]: nextQueue,
+      [SEALED_KEY]: nextSealed,
+      [LAST_SEAL_KEY]: nextSealed ? sealMs : lastSealMs,
+      poolStats: nextStats,
+    });
+    queue = nextQueue;
+    sealed = nextSealed;
+    if (nextSealed) lastSealMs = sealMs;
+    stats = nextStats;
+  });
+}
+
+/** Hand queued observations to the local daemon, batch by batch. Returns when idle. */
 export async function poolFlush() {
-  if (flushing || config.poolPaused || !config.poolToken || queue.length === 0) return;
+  if (flushing || paused || !handoff || queue.length === 0) return;
   flushing = true;
   try {
     while (queue.length > 0) {
-      const batch = queue.slice(0, MAX_BATCH);
-      const acknowledgment = await sendBatch(batch);
-      if (!acknowledgment) break;
+      await sealNext();
+      if (!sealed) break;
+      const batch = sealed;
+      try {
+        await handoff(batch.name, batchContent(batch.count));
+      } catch (error) {
+        await retryLater(`local handoff failed: ${error && error.message ? error.message : error}`);
+        break;
+      }
       await withQueueWrite(async () => {
-        const nextQueue = queue.slice(batch.length);
-        const nextRejections = [...rejections, ...acknowledgment.rejected.map(item => ({ tweet: batch[item.index], reason: item.reason }))];
-        if (nextRejections.length > MAX_REJECTIONS) throw new Error('pool rejection archive full — queued observations retained');
-        const nextStats = { ...stats, synced: stats.synced + batch.length - acknowledgment.rejected.length, lastError: nextRejections.length ? `${nextRejections.length} rejected observations saved for inspection` : null, lastSyncAt: new Date().toISOString() };
-        await storageSet({ [QUEUE_KEY]: nextQueue, [REJECTIONS_KEY]: nextRejections, poolStats: nextStats });
+        const nextQueue = queue.slice(batch.count);
+        const nextStats = { ...stats, synced: stats.synced + batch.count, lastError: null, lastSyncAt: new Date().toISOString() };
+        await storageSet({ [QUEUE_KEY]: nextQueue, [SEALED_KEY]: null, poolStats: nextStats });
         queue = nextQueue;
-        rejections = nextRejections;
+        sealed = null;
         stats = nextStats;
         backoffMs = 0;
       });
@@ -140,43 +193,6 @@ export async function poolFlush() {
   }
 }
 
-async function sendBatch(batch) {
-  let response;
-  try {
-    response = await globalThis.fetch(`${config.poolUrl}/api/ingest`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${config.poolToken}`,
-      },
-      body: JSON.stringify({ tweets: batch }),
-    });
-  } catch (e) {
-    return retryLater(`network error: ${e && e.message ? e.message : e}`);
-  }
-  if (response.status === 401) {
-    // Token expired or revoked — needs a manual reconnect, retrying won't help.
-    await withQueueWrite(async () => {
-      stats.lastError = 'pool token rejected — reconnect from the popup';
-      await persistStats();
-    });
-    return false;
-  }
-  if (!response.ok) {
-    return retryLater(`pool responded ${response.status}`);
-  }
-  const body = await response.json().catch(() => null);
-  if (!body || !Number.isSafeInteger(body.added) || body.added < 0 ||
-      !Number.isSafeInteger(body.duplicates) || body.duplicates < 0 ||
-      !Array.isArray(body.rejected) ||
-      !body.rejected.every(item => item && Number.isSafeInteger(item.index) && item.index >= 0 && item.index < batch.length && typeof item.reason === 'string' && item.reason.length > 0) ||
-      new Set(body.rejected.map(item => item.index)).size !== body.rejected.length ||
-      body.added + body.duplicates + body.rejected.length !== batch.length) {
-    return retryLater('pool did not acknowledge the complete observation batch');
-  }
-  return { rejected: body.rejected };
-}
-
 async function retryLater(message) {
   backoffMs = Math.min(backoffMs > 0 ? backoffMs * 2 : BACKOFF_BASE_MS, BACKOFF_MAX_MS);
   await withQueueWrite(async () => {
@@ -184,88 +200,25 @@ async function retryLater(message) {
     await persistStats();
   });
   scheduleFlush(backoffMs);
-  return false;
-}
-
-/**
- * Handle a token handed off by the /connect page content script.
- *
- * The token is only accepted when the sender page's origin matches the
- * configured pool URL; otherwise any malicious HF Space rendering an
- * `#xtap-pool-token` element could silently repoint the extension and
- * receive all future captures. Switching pools requires setting the URL
- * explicitly (options / POOL_SET_CONFIG) before connecting.
- */
-export async function poolConnect({ token, username }, senderUrl) {
-  if (typeof token !== 'string' || !token) return { ok: false, error: 'missing token' };
-  if (!senderMatchesPool(senderUrl)) {
-    console.warn(`[xtap-pool] refused pool token from unexpected origin: ${senderUrl}`);
-    return { ok: false, error: `refused token from unexpected origin (pool is ${config.poolUrl})` };
-  }
-  config.poolToken = token;
-  if (typeof username === 'string') config.poolUsername = username;
-  stats.lastError = null;
-  await storageSet({
-    poolToken: config.poolToken,
-    poolUsername: config.poolUsername,
-    poolStats: stats,
-  });
-  scheduleFlush(0);
-  return { ok: true, username: config.poolUsername };
-}
-
-function senderMatchesPool(senderUrl) {
-  if (typeof senderUrl !== 'string' || !senderUrl) return false;
-  try {
-    return new URL(senderUrl).origin === new URL(config.poolUrl).origin;
-  } catch {
-    return false;
-  }
-}
-
-export async function poolSetConfig({ url, token }) {
-  if (typeof url === 'string' && url) {
-    const normalized = url.replace(/\/+$/, '');
-    if (normalized !== config.poolUrl) {
-      config.poolUrl = normalized;
-      // A token is only valid for the pool that minted it. Keeping the old
-      // one would leak it (and queued captures) to whatever Space the new
-      // URL points at on the next flush.
-      config.poolToken = '';
-      config.poolUsername = '';
-    }
-  }
-  if (typeof token === 'string' && token) {
-    config.poolToken = token;
-    config.poolUsername = '';
-  }
-  await storageSet({
-    poolUrl: config.poolUrl,
-    poolToken: config.poolToken,
-    poolUsername: config.poolUsername,
-  });
-  if (config.poolToken) scheduleFlush(0);
 }
 
 export async function poolTogglePause() {
-  config.poolPaused = !config.poolPaused;
-  await storageSet({ poolPaused: config.poolPaused });
-  if (!config.poolPaused) scheduleFlush(0);
-  return config.poolPaused;
+  paused = !paused;
+  await storageSet({ poolPaused: paused });
+  if (!paused) scheduleFlush(0);
+  return paused;
 }
 
 export function poolStatus() {
   return {
-    connected: Boolean(config.poolToken),
-    username: config.poolUsername,
-    url: config.poolUrl,
-    paused: config.poolPaused,
+    paused,
     queued: queue.length,
+    sealed: sealed ? sealed.name : null,
     synced: stats.synced,
     observations: stats.observations,
     sampled: stats.sampled,
     blocked: stats.blocked,
-    rejected: rejections.length,
+    dropped: stats.dropped,
     lastError: stats.lastError,
     lastSyncAt: stats.lastSyncAt,
   };
@@ -275,10 +228,12 @@ export function poolStatus() {
 export function _resetForTests() {
   queue = [];
   samples = {};
-  rejections = [];
+  sealed = null;
+  lastSealMs = 0;
+  paused = false;
+  handoff = null;
+  stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, dropped: 0, lastError: null, lastSyncAt: null };
   queueWrites = Promise.resolve();
-  config = { poolUrl: DEFAULT_POOL_URL, poolToken: '', poolUsername: '', poolPaused: false };
-  stats = { synced: 0, observations: 0, sampled: 0, blocked: 0, lastError: null, lastSyncAt: null };
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = null;
   backoffMs = 0;
