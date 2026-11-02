@@ -4,7 +4,7 @@ This directory vendors the xTap Chrome extension.
 
 - Upstream: https://github.com/mkubicek/xTap
 - Vendored at commit: `9eba39a3c972649f07df98c3874cac6de38b383f` (`v0.24.0`)
-- Local extension version: `0.26.0`
+- Local extension version: `0.27.0`. Bump it whenever the worker code changes: Chrome keeps the registered service worker of an unpacked extension across browser restarts until the version changes.
 - License: MIT (see `LICENSE`, unchanged)
 
 Keep upstream code style (vanilla JS, MV3, no bundler) so future re-syncs
