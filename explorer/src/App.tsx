@@ -45,7 +45,8 @@ function InstallExtension(): React.JSX.Element {
       <header className="border-b border-(--x-border) pb-4">
         <h2 className="text-lg font-bold">Install extension</h2>
         <p className="mt-1 text-sm text-(--x-muted)">
-          Add the browser extension, connect it to this pool, then browse X normally.
+          Add the browser extension, browse X normally, then run the outbox uploader on the same
+          machine.
         </p>
       </header>
       <p className="text-sm text-(--x-muted)">
@@ -63,12 +64,6 @@ function InstallExtension(): React.JSX.Element {
         >
           {copied ? "Copied" : "Copy command"}
         </button>
-        <a
-          className="rounded-md bg-(--x-accent) px-3 py-1.5 font-semibold text-white"
-          href="/connect"
-        >
-          Connect
-        </a>
       </div>
     </section>
   );

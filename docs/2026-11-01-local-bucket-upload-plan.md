@@ -39,7 +39,9 @@ redtap tried an upload from the extension service worker on 2026-10-08
 
 The working redtap design seals a batch in the extension, saves it to a downloads
 folder with `chrome.downloads`, and lets a local Node process upload it with
-`@huggingface/hub`. This plan uses the same split.
+`@huggingface/hub`. This plan uses the same split. xTap already sends every
+capture to its local daemon over loopback, so the handoff uses that daemon
+instead of `chrome.downloads`: no new permission and no download history.
 
 ## Design
 
@@ -47,24 +49,26 @@ folder with `chrome.downloads`, and lets a local Node process upload it with
 
 - Keep the queue, admission, sampling, and `observation_id` logic in
   `pool-sync.js` unchanged.
-- Replace the HTTP flush with a handoff. Seal up to `MAX_BATCH` queued
-  observations into one JSONL file and save it with `chrome.downloads` to
-  `xtap-outbox/<seal-time-ms>-<uuid>.jsonl`.
-- Store the sealed path and UUID before the download starts. A retry writes the
-  same path with the same bytes. Remove the batch from the queue only after the
-  download completes.
-- Seal on every service-worker wake and on a `chrome.alarms` timer, so a
-  suspended worker cannot starve the handoff.
-- Remove `poolUrl`, the pool token, `pool-connect.js`, and the
-  `https://*.hf.space/*` host permission. Add the `downloads` permission.
-  Record the change in `extension/VENDORED.md`.
+- Replace the Space flush with a handoff. Seal up to `MAX_BATCH` queued
+  observations, and at most `MAX_HANDOFF_BYTES`, into one JSONL batch named
+  `<seal-time-ms>-<uuid>.jsonl`, and post it to the daemon's `/pool-outbox`.
+  The daemon writes it durably to `~/.xtap/pool-outbox/`.
+- Store the sealed name and size before the handoff. A retry sends the same
+  name with the same bytes; the daemon accepts the same bytes again and refuses
+  different bytes under that name. Remove the batch from the queue only after
+  the daemon acknowledges it.
+- Keep the existing `chrome.alarms` flush, so a suspended worker cannot starve
+  the handoff.
+- Remove the pool URL, the pool token, `pool-connect.js`, the options page, and
+  the `https://*.hf.space/*` host permission. Record the change in
+  `extension/VENDORED.md`.
 
 ### 2. Uploader: one command that empties the outbox
 
 Add a one-shot command to `space/` that reuses the current ingest modules:
 
 ```bash
-npm run push-outbox --workspace space -- --outbox ~/Downloads/xtap-outbox
+RAW_BUCKET=osolmaz/xtap-pool-data npm run push-outbox --workspace space
 ```
 
 For each outbox file, in name order:
@@ -90,21 +94,18 @@ that the command calls. Do not keep a second copy.
 
 ### 3. Token
 
-- The owner creates a fine-grained token with write access to
-  `osolmaz/xtap-pool-data` only.
-- First check whether a fine-grained token can target one Bucket. If it cannot,
-  stop and report before building the uploader.
-- The command reads the token from a file kept under the secrets policy. It never
-  prints the token. Buckets keep no history, so a leaked write token can delete
-  data.
+- The command uses the locally configured Hugging Face token in place: `HF_TOKEN`,
+  or the token file that `hf auth login` writes. The owner chose this over a
+  separate token for the Bucket.
+- It never prints or copies the token.
 
 ### 4. Readers
 
 - The scheduled enrichment Job lists `v1/segments/` through
-  `createRawBucketReader`. Add a test that proves it reads a tweet segment that
-  the Space did not write.
-- Check that a Space restart rebuilds its index from both Buckets and includes
-  these segments. The Space stays paused for this work.
+  `createRawBucketReader`, so it reads uploader segments like any other.
+- A running Space's refresh loop discovers the whole raw Bucket head and applies
+  new tweet segments, so it shows uploads without an ingest route. The Space
+  stays paused for this work.
 
 ### 5. Hard cutover
 

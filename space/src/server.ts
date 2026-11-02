@@ -26,7 +26,7 @@ import {
   DurableIndex,
 } from "./durable-index.js";
 import { contractHashFor } from "./enrich-worker.js";
-import { ingestBatch, Mutex } from "./ingest.js";
+import { Mutex } from "./ingest.js";
 import { checkInferenceCredential, inferenceCredentialOk } from "./inference-token.js";
 import type { InferenceCredentialReadiness } from "./inference-token.js";
 import { PoolMembership } from "./membership.js";
@@ -185,26 +185,6 @@ const app = createApp({
     },
     lastReceipt: () => lastReceipt,
   },
-  ingest: (username, payload) =>
-    mutex.run(async () => {
-      const result = await ingestBatch(
-        { store, log, enrich: enrichStore, now: () => new Date() },
-        username,
-        payload,
-      );
-      try {
-        await index.advanceToLatest();
-        applyIndexStats();
-        storageState = { state: "ready" };
-        readiness = buildReadiness();
-      } catch (error) {
-        const message = errorMessage(error);
-        storageState = { state: "invalid", error: `durable index ingest sync failed: ${message}` };
-        readiness = buildReadiness();
-        throw error;
-      }
-      return result;
-    }),
   repairMembership: (actor) =>
     mutex.run(async () => {
       const pool = await membership.repairConfig(actor);
@@ -272,9 +252,9 @@ function applyIndexStats(): void {
 }
 
 /**
- * The enrichment worker is intentionally external. This reader loop only
- * replays recently changed durable shards so a long-running Space observes
- * scheduled-worker commits without starting a provider client or worker.
+ * The enrichment worker and the outbox uploader are intentionally external.
+ * This reader loop only replays recently changed durable shards so a
+ * long-running Space observes their commits without writing raw data itself.
  */
 function startEnrichmentRefresh(): void {
   if (enrichmentRefreshTimer !== undefined) return;
