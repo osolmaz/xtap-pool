@@ -1,32 +1,13 @@
 import { stampTweet, validateTweet } from "@xtap-pool/shared";
 import type { PooledTweet } from "@xtap-pool/shared";
-import { z } from "zod";
 
-import type { StorageLog } from "./bucket-log.js";
-import type { EnrichStore } from "./enrich-store.js";
-import type { TweetStore } from "./store.js";
+const MAX_FUTURE_CAPTURE_MS = 5 * 60_000;
 
-const MAX_BATCH = 1000;
+export type IngestRejection = { index: number; reason: string };
 
-const ingestPayloadSchema = z.object({
-  tweets: z.array(z.unknown()).min(1).max(MAX_BATCH),
-});
-
-export type IngestOutcome =
-  | {
-      ok: true;
-      added: number;
-      duplicates: number;
-      rejected: readonly { index: number; reason: string }[];
-    }
-  | { ok: false; status: 400 | 500; error: string };
-
-export type IngestDeps = {
-  store: TweetStore;
-  log: StorageLog;
-  /** When present, ingested tweets enqueue their units for enrichment. */
-  enrich?: EnrichStore;
-  now: () => Date;
+export type PreparedIngest = {
+  stamped: PooledTweet[];
+  rejected: IngestRejection[];
 };
 
 /** Serialize async critical sections (single raw Bucket writer). */
@@ -41,56 +22,23 @@ export class Mutex {
 }
 
 /**
- * Validate, stamp, dedup and durably persist one ingest batch for a verified
- * contributor. Nothing is persisted locally unless the Hub commit succeeds.
+ * Validate candidate tweets and stamp verified attribution onto the valid ones.
+ * `contributor` must come from verified auth; candidate attribution is overwritten.
  */
-export async function ingestBatch(
-  deps: IngestDeps,
-  username: string,
-  payload: unknown,
-): Promise<IngestOutcome> {
-  const parsed = ingestPayloadSchema.safeParse(payload);
-  if (!parsed.success) {
-    return {
-      ok: false,
-      status: 400,
-      error: `invalid payload: expected {tweets: [1..${String(MAX_BATCH)}]}`,
-    };
-  }
-
-  const rejected: { index: number; reason: string }[] = [];
+export function prepareIngest(
+  candidates: readonly unknown[],
+  contributor: string,
+  pooledAt: Date,
+  now: Date,
+): PreparedIngest {
+  const rejected: IngestRejection[] = [];
   const stamped: PooledTweet[] = [];
-  const now = deps.now();
-  parsed.data.tweets.forEach((candidate, index) => {
+  candidates.forEach((candidate, index) => {
     const result = validateTweet(candidate);
     if (!result.ok) rejected.push({ index, reason: result.reason });
-    else if (Date.parse(result.tweet.captured_at) > now.getTime() + 5 * 60_000)
+    else if (Date.parse(result.tweet.captured_at) > now.getTime() + MAX_FUTURE_CAPTURE_MS)
       rejected.push({ index, reason: "captured_at is more than five minutes in the future" });
-    else stamped.push(stampTweet(result.tweet, username, now));
+    else stamped.push(stampTweet(result.tweet, contributor, pooledAt));
   });
-
-  const { accepted, skippedDuplicates } = deps.store.classify(stamped);
-  if (accepted.length === 0) {
-    return { ok: true, added: 0, duplicates: skippedDuplicates, rejected };
-  }
-
-  let sourceKey: string;
-  try {
-    const days = [...new Set(accepted.map((tweet) => tweet.captured_at.slice(0, 10)))].sort();
-    sourceKey = await deps.log.appendTweets(
-      accepted,
-      `pool: ${username} +${String(accepted.length)} tweets (${days.join(", ")})`,
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "unknown error";
-    return { ok: false, status: 500, error: `failed to persist to raw Bucket: ${message}` };
-  }
-
-  deps.store.database.transaction(() => {
-    for (const { tweet, source } of deps.store.observations.recordBatch(accepted, sourceKey))
-      deps.store.sourceEffects.recordPost(tweet, source);
-    deps.store.insert(accepted);
-    deps.enrich?.registerTweets(accepted);
-  })();
-  return { ok: true, added: accepted.length, duplicates: skippedDuplicates, rejected };
+  return { stamped, rejected };
 }

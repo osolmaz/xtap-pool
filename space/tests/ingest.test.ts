@@ -1,145 +1,55 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-import { Mutex, ingestBatch } from "../src/ingest.js";
-import type { IngestDeps } from "../src/ingest.js";
-import { TweetStore } from "../src/store.js";
-import { EnrichStore } from "../src/enrich-store.js";
+import { Mutex, prepareIngest } from "../src/ingest.js";
 import { makeTweet } from "./helpers.js";
-import { FakeLog } from "./fake-log.js";
 
 const NOW = new Date("2026-07-06T12:00:00.000Z");
+const POOLED_AT = new Date("2026-07-06T11:00:00.000Z");
 
-let dir: string;
-let log: FakeLog;
-let deps: IngestDeps;
-
-beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "xtap-pool-ingest-"));
-  log = new FakeLog();
-  deps = {
-    store: new TweetStore(),
-    log,
-    now: () => NOW,
-  };
-});
-
-afterEach(() => {
-  deps.store.close();
-  rmSync(dir, { recursive: true, force: true });
-});
-
-describe("ingestBatch", () => {
-  it("rejects malformed payloads", async () => {
-    await expect(ingestBatch(deps, "osolmaz", { nope: true })).resolves.toMatchObject({
-      ok: false,
-      status: 400,
-    });
-    await expect(ingestBatch(deps, "osolmaz", { tweets: [] })).resolves.toMatchObject({
-      ok: false,
-      status: 400,
-    });
+describe("prepareIngest", () => {
+  it("stamps verified attribution over client-supplied values", () => {
+    const prepared = prepareIngest(
+      [{ ...makeTweet(), contributed_by: "mallory", pooled_at: "2020-01-01T00:00:00.000Z" }],
+      "osolmaz",
+      POOLED_AT,
+      NOW,
+    );
+    expect(prepared.rejected).toEqual([]);
+    expect(prepared.stamped).toEqual([
+      expect.objectContaining({ contributed_by: "osolmaz", pooled_at: POOLED_AT.toISOString() }),
+    ]);
   });
 
-  it("stamps verified identity, persists to the hub and indexes", async () => {
-    const outcome = await ingestBatch(deps, "osolmaz", {
-      tweets: [makeTweet(), { id: "broken" }],
-    });
-    expect(outcome).toMatchObject({ ok: true, added: 1, duplicates: 0 });
-    if (!outcome.ok) return;
-    expect(outcome.rejected).toHaveLength(1);
-    expect(outcome.rejected[0]?.index).toBe(1);
-
-    const committed = log.files.get("data/osolmaz/2026/05/tweets-2026-05-21.jsonl");
-    expect(committed).toBeDefined();
-    const stored = JSON.parse(committed?.trim() ?? "{}") as Record<string, unknown>;
-    expect(stored["contributed_by"]).toBe("osolmaz");
-    expect(stored["pooled_at"]).toBe(NOW.toISOString());
-    expect(deps.store.count()).toBe(1);
-    expect(log.commits[0]?.title).toBe("pool: osolmaz +1 tweets (2026-05-21)");
+  it("rejects invalid candidates by index and keeps the valid ones", () => {
+    const prepared = prepareIngest([{ id: 1 }, makeTweet({ id: "2" })], "osolmaz", POOLED_AT, NOW);
+    expect(prepared.stamped.map((tweet) => tweet.id)).toEqual(["2"]);
+    expect(prepared.rejected).toEqual([{ index: 0, reason: expect.any(String) as string }]);
   });
 
-  it("overrides forged attribution fields with the verified identity", async () => {
-    await ingestBatch(deps, "alice", {
-      tweets: [{ ...makeTweet(), contributed_by: "mallory", pooled_at: "1970-01-01" }],
-    });
-    const committed = log.files.get("data/alice/2026/05/tweets-2026-05-21.jsonl");
-    const stored = JSON.parse(committed?.trim() ?? "{}") as Record<string, unknown>;
-    expect(stored["contributed_by"]).toBe("alice");
-    expect(stored["pooled_at"]).toBe(NOW.toISOString());
-  });
-
-  it("counts duplicates without re-committing them", async () => {
-    await ingestBatch(deps, "osolmaz", { tweets: [makeTweet()] });
-    const again = await ingestBatch(deps, "osolmaz", { tweets: [makeTweet()] });
-    expect(again).toMatchObject({ ok: true, added: 0, duplicates: 1 });
-    expect(log.commits).toHaveLength(1);
-  });
-
-  it("rejects a future observation without preventing a valid delayed observation", async () => {
-    const outcome = await ingestBatch(deps, "osolmaz", {
-      tweets: [
+  it("rejects a future observation without preventing a valid delayed observation", () => {
+    const prepared = prepareIngest(
+      [
         makeTweet({ captured_at: "2026-07-06T12:05:00.001Z" }),
         makeTweet({ captured_at: "2026-07-01T00:00:00Z" }),
       ],
-    });
-    expect(outcome).toMatchObject({
-      ok: true,
-      added: 1,
-      rejected: [{ index: 0, reason: "captured_at is more than five minutes in the future" }],
-    });
-    expect(
-      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
-    ).toEqual({ count: 1 });
+      "osolmaz",
+      POOLED_AT,
+      NOW,
+    );
+    expect(prepared.stamped).toHaveLength(1);
+    expect(prepared.rejected).toEqual([
+      { index: 0, reason: "captured_at is more than five minutes in the future" },
+    ]);
   });
 
-  it("keeps all observations in a batch and admits a delayed older capture", async () => {
-    const first = makeTweet({ metrics: { likes: 1 } });
-    const second = makeTweet({ captured_at: "2026-05-21T09:00:00Z", metrics: { likes: 10 } });
-    expect(await ingestBatch(deps, "osolmaz", { tweets: [first, second] })).toMatchObject({
-      added: 2,
-      duplicates: 0,
-    });
-    expect(
-      await ingestBatch(deps, "osolmaz", {
-        tweets: [makeTweet({ captured_at: "2026-05-21T00:00:00Z", metrics: { likes: 2 } })],
-      }),
-    ).toMatchObject({ added: 1 });
-    expect(deps.store.count()).toBe(1);
-    expect(
-      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
-    ).toEqual({ count: 3 });
-    expect(deps.store.database.prepare("SELECT captured_at FROM tweets").get()).toEqual({
-      captured_at: "2026-05-21T09:00:00.000Z",
-    });
-  });
-
-  it("rolls back all local projections together after a durable raw write", async () => {
-    const enrich = new EnrichStore(deps.store.database, 1);
-    const failure = vi.spyOn(enrich, "registerTweets").mockImplementation(() => {
-      throw new Error("local apply failed");
-    });
-    await expect(
-      ingestBatch({ ...deps, enrich }, "osolmaz", { tweets: [makeTweet()] }),
-    ).rejects.toThrow("local apply failed");
-    expect(log.commits).toHaveLength(1);
-    expect(deps.store.count()).toBe(0);
-    expect(
-      deps.store.database.prepare("SELECT COUNT(*) AS count FROM post_observations").get(),
-    ).toEqual({ count: 0 });
-    failure.mockRestore();
-  });
-
-  it("fails closed when the hub commit fails: nothing persisted locally", async () => {
-    log.failNextCommit = true;
-    const outcome = await ingestBatch(deps, "osolmaz", { tweets: [makeTweet()] });
-    expect(outcome).toMatchObject({ ok: false, status: 500 });
-    expect(deps.store.count()).toBe(0);
-    const retry = await ingestBatch(deps, "osolmaz", { tweets: [makeTweet()] });
-    expect(retry).toMatchObject({ ok: true, added: 1 });
+  it("accepts an observation exactly five minutes ahead", () => {
+    const prepared = prepareIngest(
+      [makeTweet({ captured_at: "2026-07-06T12:05:00.000Z" })],
+      "osolmaz",
+      POOLED_AT,
+      NOW,
+    );
+    expect(prepared.rejected).toEqual([]);
   });
 });
 
